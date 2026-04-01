@@ -185,3 +185,82 @@ impl Embedder {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(provider: &str, model: &str, dims: usize) -> EmbeddingConfig {
+        EmbeddingConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            api_key: None,
+            base_url: None,
+            dimensions: dims,
+        }
+    }
+
+    #[test]
+    fn test_embedder_creation_gemini() {
+        let cfg = make_config("gemini", "text-embedding-004", 768);
+        let embedder = Embedder::new(&cfg, Some("fake-key".to_string()), None);
+        assert_eq!(embedder.dimensions(), 768);
+    }
+
+    #[test]
+    fn test_embedder_creation_openai() {
+        let cfg = make_config("openai", "text-embedding-3-small", 1536);
+        let embedder = Embedder::new(&cfg, Some("sk-fake".to_string()), None);
+        assert_eq!(embedder.dimensions(), 1536);
+    }
+
+    #[test]
+    fn test_embedder_creation_ollama() {
+        let cfg = make_config("ollama", "nomic-embed-text", 384);
+        let embedder = Embedder::new(&cfg, None, Some("http://localhost:11434".to_string()));
+        assert_eq!(embedder.dimensions(), 384);
+    }
+
+    #[test]
+    fn test_embedder_requires_api_key_when_missing() {
+        let cfg = make_config("gemini", "text-embedding-004", 768);
+        let embedder = Embedder::new(&cfg, None, None);
+        // require_api_key should fail
+        let result = embedder.require_api_key();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("gemini"));
+    }
+
+    #[test]
+    fn test_embedder_requires_api_key_when_empty() {
+        let cfg = make_config("openai", "text-embedding-3-small", 1536);
+        let embedder = Embedder::new(&cfg, Some("".to_string()), None);
+        let result = embedder.require_api_key();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_embedder_api_key_present() {
+        let cfg = make_config("openai", "text-embedding-3-small", 1536);
+        let embedder = Embedder::new(&cfg, Some("sk-real-key".to_string()), None);
+        let key = embedder.require_api_key().unwrap();
+        assert_eq!(key, "sk-real-key");
+    }
+
+    #[test]
+    fn test_embedder_dimensions_zero_allowed() {
+        let cfg = make_config("ollama", "nomic-embed-text", 0);
+        let embedder = Embedder::new(&cfg, None, None);
+        assert_eq!(embedder.dimensions(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_embed_batch_unknown_provider_errors() {
+        let cfg = make_config("unknown_provider", "some-model", 128);
+        let embedder = Embedder::new(&cfg, Some("key".to_string()), None);
+        let result = embedder.embed_batch(&["hello"]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown embedding provider"));
+    }
+}

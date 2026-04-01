@@ -297,4 +297,155 @@ mod tests {
         // "synk" → distance 1 from "sync"
         assert_eq!(correct_word("synk", &vocab), "sync");
     }
+
+    // ── Edge-case additions ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_levenshtein_empty_both() {
+        assert_eq!(levenshtein("", ""), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_identical() {
+        assert_eq!(levenshtein("rust", "rust"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_unicode() {
+        // Both strings are single multi-byte chars — distance should be 1 (substitution)
+        assert_eq!(levenshtein("ä", "ö"), 1);
+        // Same unicode char
+        assert_eq!(levenshtein("café", "café"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_long_string_fast_bail() {
+        // Strings differing by >3 chars should return early with the length diff
+        let a = "abcdefghij";  // 10 chars
+        let b = "xy";          // 2 chars  → diff = 8 > 3
+        let dist = levenshtein(a, b);
+        assert!(dist >= 8); // just verify early-bail path doesn't crash
+    }
+
+    #[test]
+    fn test_extract_tokens_empty_input() {
+        let tokens = extract_tokens("");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tokens_unicode_ignored() {
+        // Unicode chars are not ASCII alphabetic — none should be extracted as tokens
+        let tokens = extract_tokens("こんにちは 你好");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tokens_numbers_only() {
+        let tokens = extract_tokens("123 456");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tokens_very_long_word() {
+        let long_word = "a".repeat(500);
+        let tokens = extract_tokens(&long_word);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].len(), 500);
+    }
+
+    #[test]
+    fn test_correct_word_empty_vocab() {
+        // Should return the original word if no vocabulary
+        let vocab: Vec<(String, usize)> = vec![];
+        assert_eq!(correct_word("hello", &vocab), "hello");
+    }
+
+    #[test]
+    fn test_correct_word_prefer_higher_frequency() {
+        // Two words at distance 1: prefer the one with higher frequency
+        let vocab = vec![
+            ("synca".to_string(), 2),
+            ("syncb".to_string(), 20),
+        ];
+        // Both are distance 1 from "syncc" — "syncb" has higher freq, pick it
+        let result = correct_word("syncc", &vocab);
+        assert_eq!(result, "syncb");
+    }
+
+    #[test]
+    fn test_correct_query_empty() {
+        // correct_query with empty query on DB with no vocabulary should return empty string
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS vocabulary (word TEXT PRIMARY KEY, frequency INTEGER DEFAULT 1);"
+        ).unwrap();
+        let (corrected, corrections) = correct_query(&conn, "").unwrap();
+        assert_eq!(corrected, "");
+        assert!(corrections.is_empty());
+    }
+
+    #[test]
+    fn test_correct_query_no_vocab_returns_original() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS vocabulary (word TEXT PRIMARY KEY, frequency INTEGER DEFAULT 1);"
+        ).unwrap();
+        let (corrected, corrections) = correct_query(&conn, "hello world").unwrap();
+        // No vocab → every word is returned unchanged (no best match)
+        assert_eq!(corrected, "hello world");
+        assert!(corrections.is_empty());
+    }
+
+    #[test]
+    fn test_build_vocabulary_counts_words() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Create the documents table first
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY,
+                path TEXT UNIQUE NOT NULL,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );"
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO documents (path, content, content_hash) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["test.md", "hello world syncing documents", "abc"],
+        ).unwrap();
+        let count = build_vocabulary(&conn).unwrap();
+        assert!(count > 0);
+
+        // Verify "hello" is in vocabulary
+        let freq: i64 = conn.query_row(
+            "SELECT frequency FROM vocabulary WHERE word = 'hello'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(freq >= 1);
+    }
+
+    #[test]
+    fn test_split_compound_short_parts_excluded() {
+        // Parts shorter than 3 chars should not be included
+        let parts = split_compound("ab_cd_hello");
+        // "ab" and "cd" are < 3 chars — should be excluded
+        assert!(!parts.contains(&"ab".to_string()));
+        assert!(!parts.contains(&"cd".to_string()));
+        assert!(parts.contains(&"hello".to_string()));
+    }
+
+    #[test]
+    fn test_split_camel_case_lowercase_start() {
+        let parts = split_camel_case("knowledgeGraph");
+        assert_eq!(parts[0], "knowledge");
+        assert_eq!(parts[1], "Graph");
+    }
+
+    #[test]
+    fn test_split_camel_case_single_word() {
+        let parts = split_camel_case("hello");
+        assert_eq!(parts, vec!["hello".to_string()]);
+    }
 }

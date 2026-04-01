@@ -179,3 +179,133 @@ fn parse_extraction_result(text: &str) -> Result<ExtractionResult> {
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_extraction_config(provider: &str) -> ExtractionConfig {
+        ExtractionConfig {
+            provider: provider.to_string(),
+            model: "test-model".to_string(),
+            api_key: None,
+            base_url: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn test_extractor_creation() {
+        let cfg = make_extraction_config("gemini");
+        let extractor = Extractor::new(&cfg, Some("key".to_string()), None);
+        assert_eq!(extractor.config.provider, "gemini");
+    }
+
+    #[test]
+    fn test_extractor_requires_api_key_when_missing() {
+        let cfg = make_extraction_config("openai");
+        let extractor = Extractor::new(&cfg, None, None);
+        let result = extractor.require_api_key();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("openai"));
+    }
+
+    #[test]
+    fn test_extractor_requires_api_key_when_empty_string() {
+        let cfg = make_extraction_config("gemini");
+        let extractor = Extractor::new(&cfg, Some("".to_string()), None);
+        assert!(extractor.require_api_key().is_err());
+    }
+
+    #[test]
+    fn test_extractor_api_key_ok() {
+        let cfg = make_extraction_config("gemini");
+        let extractor = Extractor::new(&cfg, Some("real-key".to_string()), None);
+        assert_eq!(extractor.require_api_key().unwrap(), "real-key");
+    }
+
+    #[test]
+    fn test_build_prompt_contains_content() {
+        let content = "This document talks about Rust and SQLite.";
+        let file_path = "notes/rust.md";
+        let prompt = build_prompt(content, file_path);
+        assert!(prompt.contains(content));
+        assert!(prompt.contains(file_path));
+    }
+
+    #[test]
+    fn test_build_prompt_contains_entity_types() {
+        let prompt = build_prompt("content", "file.md");
+        assert!(prompt.contains("person"));
+        assert!(prompt.contains("project"));
+        assert!(prompt.contains("tool"));
+    }
+
+    #[test]
+    fn test_build_prompt_contains_relationship_types() {
+        let prompt = build_prompt("content", "file.md");
+        assert!(prompt.contains("depends_on"));
+        assert!(prompt.contains("relates_to"));
+    }
+
+    #[test]
+    fn test_build_prompt_instructs_json_only() {
+        let prompt = build_prompt("content", "file.md");
+        assert!(prompt.contains("JSON"));
+    }
+
+    #[test]
+    fn test_parse_extraction_result_valid_json() {
+        let json = r#"{"entities": [{"name": "Rust", "type": "tool", "description": "A language"}], "relationships": []}"#;
+        let result = parse_extraction_result(json).unwrap();
+        assert_eq!(result.entities.len(), 1);
+        assert_eq!(result.entities[0].name, "Rust");
+        assert!(result.relationships.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extraction_result_strips_markdown_fences() {
+        let json = "```json\n{\"entities\": [], \"relationships\": []}\n```";
+        let result = parse_extraction_result(json).unwrap();
+        assert!(result.entities.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extraction_result_invalid_json_returns_empty() {
+        let result = parse_extraction_result("not valid json at all").unwrap();
+        assert!(result.entities.is_empty());
+        assert!(result.relationships.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extraction_result_empty_string() {
+        let result = parse_extraction_result("").unwrap();
+        assert!(result.entities.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extraction_result_with_relationships() {
+        let json = r#"{
+            "entities": [
+                {"name": "Brainjar", "type": "project", "description": "AI memory"}
+            ],
+            "relationships": [
+                {"source": "Brainjar", "target": "SQLite", "relation": "uses", "description": "stores data"}
+            ]
+        }"#;
+        let result = parse_extraction_result(json).unwrap();
+        assert_eq!(result.entities.len(), 1);
+        assert_eq!(result.relationships.len(), 1);
+        assert_eq!(result.relationships[0].source, "Brainjar");
+        assert_eq!(result.relationships[0].relation, "uses");
+    }
+
+    #[tokio::test]
+    async fn test_extract_unknown_provider_errors() {
+        let cfg = make_extraction_config("unknown_llm");
+        let extractor = Extractor::new(&cfg, Some("key".to_string()), None);
+        let result = extractor.extract("content", "file.md").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown extraction provider"));
+    }
+}

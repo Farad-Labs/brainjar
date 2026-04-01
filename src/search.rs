@@ -79,7 +79,7 @@ pub async fn run_search(
             config
                 .knowledge_bases
                 .iter()
-                .map(|(n, kb)| (n.as_str(), kb))
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
                 .collect()
         };
 
@@ -110,7 +110,7 @@ pub async fn run_search(
             config
                 .knowledge_bases
                 .iter()
-                .map(|(n, kb)| (n.as_str(), kb))
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
                 .collect()
         };
 
@@ -147,7 +147,7 @@ pub async fn run_search(
             config
                 .knowledge_bases
                 .iter()
-                .map(|(n, kb)| (n.as_str(), kb))
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
                 .collect()
         };
 
@@ -198,7 +198,7 @@ pub async fn run_search(
                             .with_context(|| format!("KB '{}' not found", name))?;
                         vec![(name, kb)]
                     } else {
-                        config.knowledge_bases.iter().map(|(n, kb)| (n.as_str(), kb)).collect()
+                        config.knowledge_bases.iter().map(|(n, kb): (&String, _)| (n.as_str(), kb)).collect()
                     };
                     let mut all_vec: Vec<VectorResult> = Vec::new();
                     for (name, _kb) in &kbs {
@@ -542,4 +542,189 @@ pub fn search_fts_for_kb(
 ) -> Result<Vec<FtsResult>> {
     let conn = db::open_db(kb_name, &config.config_dir)?;
     search_fts(&conn, query, limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal in-memory connection with brainjar schema + some documents.
+    fn make_conn_with_docs(docs: &[(&str, &str)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS documents (
+                id           INTEGER PRIMARY KEY,
+                path         TEXT UNIQUE NOT NULL,
+                content      TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+                path,
+                content,
+                content='documents',
+                content_rowid='id'
+            );
+            CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+                INSERT INTO documents_fts(rowid, path, content)
+                VALUES (new.id, new.path, new.content);
+            END;
+        "#).unwrap();
+        for (path, content) in docs {
+            db::upsert_document(&conn, path, content, "hash").unwrap();
+        }
+        conn
+    }
+
+    // ─── SearchMode enum ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_mode_equality() {
+        assert_eq!(SearchMode::All, SearchMode::All);
+        assert_ne!(SearchMode::Text, SearchMode::Fuzzy);
+        assert_ne!(SearchMode::Vector, SearchMode::Graph);
+        assert_ne!(SearchMode::Local, SearchMode::All);
+    }
+
+    // ─── FTS query ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_fts_basic_hit() {
+        let conn = make_conn_with_docs(&[
+            ("notes/rust.md", "Rust is a systems programming language focused on safety."),
+            ("notes/python.md", "Python is great for scripting and data science."),
+        ]);
+        let results = search_fts(&conn, "Rust", 10).unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.path.contains("rust")));
+    }
+
+    #[test]
+    fn test_search_fts_no_results_for_missing_term() {
+        let conn = make_conn_with_docs(&[
+            ("notes/rust.md", "Rust is a systems programming language."),
+        ]);
+        let results = search_fts(&conn, "python", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_fts_respects_limit() {
+        let docs: Vec<(String, String)> = (0..10)
+            .map(|i| (format!("doc{i}.md"), format!("brainjar document number {i}")))
+            .collect();
+        let docs_ref: Vec<(&str, &str)> = docs.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+        let conn = make_conn_with_docs(&docs_ref);
+        let results = search_fts(&conn, "brainjar", 3).unwrap();
+        assert!(results.len() <= 3);
+    }
+
+    #[test]
+    fn test_search_fts_score_positive() {
+        let conn = make_conn_with_docs(&[
+            ("doc.md", "sqlite full text search is powerful"),
+        ]);
+        let results = search_fts(&conn, "sqlite", 5).unwrap();
+        assert!(!results.is_empty());
+        // We negate FTS5 rank so score should be positive
+        assert!(results[0].score > 0.0);
+    }
+
+    #[test]
+    fn test_search_fts_empty_table() {
+        let conn = make_conn_with_docs(&[]);
+        let results = search_fts(&conn, "anything", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ─── search_vector ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_vector_no_table_returns_empty() {
+        let conn = make_conn_with_docs(&[
+            ("doc.md", "some content"),
+        ]);
+        // No vec table — should return empty, not error
+        let results = search_vector(&conn, &[0.1, 0.2, 0.3], 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ─── reciprocal_rank_fusion ─────────────────────────────────────────────
+
+    #[test]
+    fn test_rrf_single_set() {
+        let set = vec![
+            ("doc_a".to_string(), 10.0),
+            ("doc_b".to_string(), 5.0),
+            ("doc_c".to_string(), 1.0),
+        ];
+        let merged = reciprocal_rank_fusion(vec![set], 60.0);
+        // doc_a is rank 1 (highest score) → RRF score = 1/(60+1+1) = 1/61
+        // doc_b is rank 2 → 1/62, doc_c is rank 3 → 1/63
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].0, "doc_a");
+        assert_eq!(merged[1].0, "doc_b");
+        assert_eq!(merged[2].0, "doc_c");
+    }
+
+    #[test]
+    fn test_rrf_math_correctness() {
+        // Exact score verification
+        let set = vec![
+            ("a".to_string(), 100.0),
+            ("b".to_string(), 50.0),
+        ];
+        let merged = reciprocal_rank_fusion(vec![set], 60.0);
+        // a is rank 0 → 1/(60+0+1) = 1/61 ≈ 0.01639
+        let expected_a = 1.0 / (60.0 + 0.0 + 1.0);
+        let expected_b = 1.0 / (60.0 + 1.0 + 1.0);
+        let score_a = merged.iter().find(|(k, _)| k == "a").unwrap().1;
+        let score_b = merged.iter().find(|(k, _)| k == "b").unwrap().1;
+        assert!((score_a - expected_a).abs() < 1e-9);
+        assert!((score_b - expected_b).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_rrf_two_sets_merged_higher_for_overlap() {
+        // doc_x appears in both sets at rank 1 — should have higher combined score
+        let set_a = vec![
+            ("doc_x".to_string(), 10.0),
+            ("doc_y".to_string(), 5.0),
+        ];
+        let set_b = vec![
+            ("doc_x".to_string(), 8.0),
+            ("doc_z".to_string(), 3.0),
+        ];
+        let merged = reciprocal_rank_fusion(vec![set_a, set_b], 60.0);
+        let score_x = merged.iter().find(|(k, _)| k == "doc_x").unwrap().1;
+        let score_y = merged.iter().find(|(k, _)| k == "doc_y").unwrap().1;
+        // doc_x appears twice so its score should be roughly 2x a single appearance
+        assert!(score_x > score_y);
+    }
+
+    #[test]
+    fn test_rrf_empty_sets() {
+        let merged = reciprocal_rank_fusion(vec![], 60.0);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_rrf_empty_inner_set() {
+        let merged = reciprocal_rank_fusion(vec![vec![]], 60.0);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_rrf_result_sorted_descending() {
+        let set = vec![
+            ("low".to_string(), 1.0),
+            ("high".to_string(), 100.0),
+            ("mid".to_string(), 50.0),
+        ];
+        let merged = reciprocal_rank_fusion(vec![set], 60.0);
+        // Results should be sorted highest score first
+        for i in 0..merged.len() - 1 {
+            assert!(merged[i].1 >= merged[i + 1].1);
+        }
+    }
 }

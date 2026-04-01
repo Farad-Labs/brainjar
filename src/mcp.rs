@@ -238,7 +238,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 config
                     .knowledge_bases
                     .iter()
-                    .map(|(n, k)| (n.as_str(), k))
+                    .map(|(n, k): (&String, _)| (n.as_str(), k))
                     .collect()
             };
 
@@ -318,7 +318,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 config
                     .knowledge_bases
                     .iter()
-                    .map(|(n, k)| (n.as_str(), k))
+                    .map(|(n, k): (&String, _)| (n.as_str(), k))
                     .collect()
             };
 

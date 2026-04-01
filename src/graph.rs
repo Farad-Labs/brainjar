@@ -248,3 +248,162 @@ fn sanitize_id(s: &str) -> String {
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_kg() -> (KnowledgeGraph, std::path::PathBuf) {
+        let unique = format!(
+            "brainjar_graph_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).unwrap();
+        let kg = KnowledgeGraph::open(&base, "test").unwrap();
+        (kg, base)
+    }
+
+    #[test]
+    fn test_sanitize_id_lowercases() {
+        assert_eq!(sanitize_id("Rust"), "rust");
+    }
+
+    #[test]
+    fn test_sanitize_id_replaces_special_chars() {
+        assert_eq!(sanitize_id("notes/hello.md"), "notes_hello_md");
+    }
+
+    #[test]
+    fn test_sanitize_id_alphanumeric_unchanged() {
+        assert_eq!(sanitize_id("abc123"), "abc123");
+    }
+
+    #[test]
+    fn test_ingest_entities_and_search() {
+        let (kg, _base) = make_kg();
+        let entities = vec![
+            Entity {
+                name: "Brainjar".to_string(),
+                entity_type: "project".to_string(),
+                description: "AI memory tool".to_string(),
+            },
+        ];
+        kg.ingest_entities("notes/intro.md", &entities, &[]).unwrap();
+
+        let results = kg.search("Brainjar", 5).unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.entity.contains("Brainjar")));
+    }
+
+    #[test]
+    fn test_ingest_entities_with_relationships() {
+        let (kg, _base) = make_kg();
+        let entities = vec![
+            Entity {
+                name: "Brainjar".to_string(),
+                entity_type: "project".to_string(),
+                description: "AI memory tool".to_string(),
+            },
+            Entity {
+                name: "SQLite".to_string(),
+                entity_type: "tool".to_string(),
+                description: "Embedded DB".to_string(),
+            },
+        ];
+        let rels = vec![
+            Relationship {
+                source: "Brainjar".to_string(),
+                target: "SQLite".to_string(),
+                relation: "uses".to_string(),
+                description: "stores data in sqlite".to_string(),
+            },
+        ];
+        kg.ingest_entities("notes/arch.md", &entities, &rels).unwrap();
+        let stats = kg.stats().unwrap();
+        assert!(stats.node_count > 0);
+        assert!(stats.edge_count > 0);
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let (kg, _base) = make_kg();
+        let entities = vec![
+            Entity {
+                name: "MyProject".to_string(),
+                entity_type: "project".to_string(),
+                description: "Some project".to_string(),
+            },
+        ];
+        kg.ingest_entities("doc.md", &entities, &[]).unwrap();
+        let results = kg.search("myproject", 5).unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_search_no_match_returns_empty() {
+        let (kg, _base) = make_kg();
+        let results = kg.search("xyzzy_nonexistent", 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_remove_document_does_not_error() {
+        let (kg, _base) = make_kg();
+        let entities = vec![
+            Entity {
+                name: "Rust".to_string(),
+                entity_type: "tool".to_string(),
+                description: "Systems language".to_string(),
+            },
+        ];
+        kg.ingest_entities("notes/rust.md", &entities, &[]).unwrap();
+        kg.remove_document("notes/rust.md").unwrap();
+    }
+
+    #[test]
+    fn test_deduplication_in_search() {
+        let (kg, _base) = make_kg();
+        let entity = Entity {
+            name: "SharedEntity".to_string(),
+            entity_type: "concept".to_string(),
+            description: "Appears in multiple docs".to_string(),
+        };
+        kg.ingest_entities("doc_a.md", std::slice::from_ref(&entity), &[]).unwrap();
+        kg.ingest_entities("doc_b.md", &[entity], &[]).unwrap();
+
+        let results = kg.search("SharedEntity", 10).unwrap();
+        // No duplicate files in results
+        let mut files: Vec<&str> = results.iter().map(|r| r.file.as_str()).collect();
+        files.sort();
+        files.dedup();
+        assert_eq!(files.len(), results.len());
+    }
+
+    #[test]
+    fn test_exists_before_and_after_creation() {
+        let unique = format!(
+            "brainjar_exists_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(!KnowledgeGraph::exists(&base, "mydb"));
+        KnowledgeGraph::open(&base, "mydb").unwrap();
+        assert!(KnowledgeGraph::exists(&base, "mydb"));
+    }
+
+    #[test]
+    fn test_stats_empty_graph() {
+        let (kg, _base) = make_kg();
+        let stats = kg.stats().unwrap();
+        assert!(stats.node_count >= 0);
+        assert!(stats.edge_count >= 0);
+    }
+}

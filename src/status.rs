@@ -16,7 +16,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
         config
             .knowledge_bases
             .iter()
-            .map(|(n, kb)| (n.as_str(), kb))
+            .map(|(n, kb): (&String, _)| (n.as_str(), kb))
             .collect()
     };
 

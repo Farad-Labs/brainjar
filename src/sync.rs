@@ -34,7 +34,7 @@ pub async fn run_sync(
             .knowledge_bases
             .iter()
             .filter(|(_, kb)| kb.auto_sync)
-            .map(|(name, kb)| (name.as_str(), kb))
+            .map(|(name, kb): (&String, _)| (name.as_str(), kb))
             .collect()
     };
 
@@ -526,4 +526,205 @@ pub fn hash_content(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, KnowledgeBaseConfig};
+    use std::collections::HashMap;
+
+    /// Build a minimal Config pointing at `config_dir` with one KB watching `watch_path`.
+    fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Config {
+        let mut kbs = HashMap::new();
+        kbs.insert(
+            "test".to_string(),
+            KnowledgeBaseConfig {
+                watch_paths: vec![watch_path.to_string_lossy().to_string()],
+                auto_sync: true,
+            },
+        );
+        Config {
+            providers: HashMap::new(),
+            knowledge_bases: kbs,
+            embeddings: None,
+            extraction: None,
+            config_dir: config_dir.to_path_buf(),
+        }
+    }
+
+    /// Create a temp dir with a non-dot subdirectory for testing.
+    /// Returns (tempdir_handle, data_dir) where data_dir doesn't start with '.'.
+    fn make_test_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("testdata");
+        std::fs::create_dir(&data).unwrap();
+        (tmp, data)
+    }
+
+    // ─── hash_content ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hash_content_deterministic() {
+        let h1 = hash_content(b"hello");
+        let h2 = hash_content(b"hello");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_content_different_inputs_differ() {
+        assert_ne!(hash_content(b"a"), hash_content(b"b"));
+    }
+
+    #[test]
+    fn test_hash_content_is_64_hex_chars() {
+        let h = hash_content(b"test data");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ─── collect_files ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_collect_files_finds_markdown() {
+        let (_tmp, data) = make_test_dir();
+        std::fs::write(data.join("doc.md"), "# Hello").unwrap();
+        std::fs::write(data.join("notes.txt"), "some notes").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+
+        assert!(files.keys().any(|k| k.ends_with("doc.md")));
+        assert!(files.keys().any(|k| k.ends_with("notes.txt")));
+    }
+
+    #[test]
+    fn test_collect_files_ignores_binary_extensions() {
+        let (_tmp, data) = make_test_dir();
+        std::fs::write(data.join("image.png"), b"\x89PNG\r\n").unwrap();
+        std::fs::write(data.join("data.bin"), b"\x00\x01\x02").unwrap();
+        std::fs::write(data.join("note.md"), "# note").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+
+        assert!(!files.keys().any(|k| k.ends_with(".png")));
+        assert!(!files.keys().any(|k| k.ends_with(".bin")));
+        assert!(files.keys().any(|k| k.ends_with("note.md")));
+    }
+
+    #[test]
+    fn test_collect_files_skips_git_dir() {
+        let (_tmp, data) = make_test_dir();
+        let git_dir = data.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        std::fs::write(git_dir.join("config"), "[core]").unwrap();
+        std::fs::write(data.join("real.md"), "# real").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+
+        assert!(!files.keys().any(|k| k.contains(".git")));
+        assert!(files.keys().any(|k| k.ends_with("real.md")));
+    }
+
+    #[test]
+    fn test_collect_files_skips_node_modules() {
+        let (_tmp, data) = make_test_dir();
+        let nm = data.join("node_modules");
+        std::fs::create_dir(&nm).unwrap();
+        std::fs::write(nm.join("pkg.js"), "const x = 1;").unwrap();
+        std::fs::write(data.join("app.ts"), "const y = 2;").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+
+        assert!(!files.keys().any(|k| k.contains("node_modules")));
+        assert!(files.keys().any(|k| k.ends_with("app.ts")));
+    }
+
+    #[test]
+    fn test_collect_files_empty_dir() {
+        let (_tmp, data) = make_test_dir();
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+        assert!(files.is_empty());
+    }
+
+    // ─── .brainjarignore ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_brainjarignore_excludes_pattern() {
+        let (_tmp, data) = make_test_dir();
+        // .brainjarignore in config_dir (data dir)
+        std::fs::write(data.join(".brainjarignore"), "*.log\nsecret.md").unwrap();
+        std::fs::write(data.join("secret.md"), "private").unwrap();
+        std::fs::write(data.join("app.log"), "log data").unwrap();
+        std::fs::write(data.join("public.md"), "public").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+
+        assert!(!files.keys().any(|k| k.ends_with("secret.md")));
+        assert!(files.keys().any(|k| k.ends_with("public.md")));
+    }
+
+    #[test]
+    fn test_brainjarignore_comments_ignored() {
+        let (_tmp, data) = make_test_dir();
+        std::fs::write(
+            data.join(".brainjarignore"),
+            "# This is a comment\n*.tmp",
+        ).unwrap();
+        std::fs::write(data.join("doc.md"), "content").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+        assert!(files.keys().any(|k| k.ends_with("doc.md")));
+    }
+
+    #[test]
+    fn test_no_brainjarignore_collects_all_text_files() {
+        let (_tmp, data) = make_test_dir();
+        std::fs::write(data.join("a.md"), "A").unwrap();
+        std::fs::write(data.join("b.rs"), "fn main() {}").unwrap();
+
+        let config = make_config(data.as_path(), data.as_path());
+        let watch_paths = config.expand_watch_paths(config.knowledge_bases.get("test").unwrap());
+        let files = collect_files(&config, &watch_paths);
+        assert!(files.keys().any(|k| k.ends_with("a.md")));
+        assert!(files.keys().any(|k| k.ends_with("b.rs")));
+    }
+
+    // ─── load_ignore_patterns ──────────────────────────────────────────────
+
+    #[test]
+    fn test_load_ignore_patterns_empty_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let patterns = load_ignore_patterns(dir.path());
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_load_ignore_patterns_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".brainjarignore"), "*.log\n*.tmp\n").unwrap();
+        let patterns = load_ignore_patterns(dir.path());
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[test]
+    fn test_load_ignore_patterns_skips_empty_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".brainjarignore"), "\n\n*.log\n\n").unwrap();
+        let patterns = load_ignore_patterns(dir.path());
+        assert_eq!(patterns.len(), 1);
+    }
 }

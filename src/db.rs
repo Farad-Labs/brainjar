@@ -248,3 +248,197 @@ pub fn count_documents(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create an in-memory SQLite connection with the brainjar schema.
+    fn make_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // Apply WAL + schema just like open_db_with_dims does
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").unwrap();
+        // create_schema uses the public create_schema fn
+        // (we call it via a temp file round-trip — simpler to inline the DDL)
+        conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS documents (
+                id           INTEGER PRIMARY KEY,
+                path         TEXT UNIQUE NOT NULL,
+                content      TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+                path,
+                content,
+                content='documents',
+                content_rowid='id'
+            );
+            CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+                INSERT INTO documents_fts(rowid, path, content)
+                VALUES (new.id, new.path, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+                INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                VALUES ('delete', old.id, old.path, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+                INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                VALUES ('delete', old.id, old.path, old.content);
+                INSERT INTO documents_fts(rowid, path, content)
+                VALUES (new.id, new.path, new.content);
+            END;
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+            CREATE TABLE IF NOT EXISTS vocabulary (
+                word      TEXT PRIMARY KEY,
+                frequency INTEGER DEFAULT 1
+            );
+        "#).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_open_db_creates_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_db("testdb", dir.path()).unwrap();
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+
+        let fts_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents_fts'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn test_upsert_and_retrieve_document() {
+        let conn = make_conn();
+        upsert_document(&conn, "notes/hello.md", "Hello world", "hash1").unwrap();
+        let count = count_documents(&conn).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_upsert_document_updates_existing() {
+        let conn = make_conn();
+        upsert_document(&conn, "notes/hello.md", "Original content", "hash1").unwrap();
+        upsert_document(&conn, "notes/hello.md", "Updated content", "hash2").unwrap();
+
+        // Still only 1 document
+        assert_eq!(count_documents(&conn).unwrap(), 1);
+
+        let hashes = get_all_hashes(&conn).unwrap();
+        assert_eq!(hashes.get("notes/hello.md").map(|s| s.as_str()), Some("hash2"));
+    }
+
+    #[test]
+    fn test_delete_document() {
+        let conn = make_conn();
+        upsert_document(&conn, "notes/delete_me.md", "Content", "hash1").unwrap();
+        assert_eq!(count_documents(&conn).unwrap(), 1);
+
+        delete_document(&conn, "notes/delete_me.md").unwrap();
+        assert_eq!(count_documents(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_document_is_ok() {
+        let conn = make_conn();
+        // Deleting something that doesn't exist should not error
+        delete_document(&conn, "nonexistent/path.md").unwrap();
+    }
+
+    #[test]
+    fn test_get_all_hashes_empty() {
+        let conn = make_conn();
+        let hashes = get_all_hashes(&conn).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_hashes_multiple_docs() {
+        let conn = make_conn();
+        upsert_document(&conn, "a.md", "AAA", "hash_a").unwrap();
+        upsert_document(&conn, "b.md", "BBB", "hash_b").unwrap();
+
+        let hashes = get_all_hashes(&conn).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes["a.md"], "hash_a");
+        assert_eq!(hashes["b.md"], "hash_b");
+    }
+
+    #[test]
+    fn test_vec_table_exists_false_by_default() {
+        let conn = make_conn();
+        assert!(!vec_table_exists(&conn));
+    }
+
+    #[test]
+    fn test_meta_set_and_get() {
+        let conn = make_conn();
+        set_meta(&conn, "last_sync", "2024-01-01T00:00:00Z").unwrap();
+        let val = get_meta(&conn, "last_sync").unwrap();
+        assert_eq!(val.as_deref(), Some("2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_meta_get_missing_key() {
+        let conn = make_conn();
+        let val = get_meta(&conn, "nonexistent").unwrap();
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn test_meta_upsert_overwrites() {
+        let conn = make_conn();
+        set_meta(&conn, "key", "v1").unwrap();
+        set_meta(&conn, "key", "v2").unwrap();
+        let val = get_meta(&conn, "key").unwrap();
+        assert_eq!(val.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn test_get_document_id() {
+        let conn = make_conn();
+        upsert_document(&conn, "foo/bar.md", "Content", "h1").unwrap();
+        let id = get_document_id(&conn, "foo/bar.md").unwrap();
+        assert!(id.is_some());
+    }
+
+    #[test]
+    fn test_get_document_id_missing() {
+        let conn = make_conn();
+        let id = get_document_id(&conn, "not/here.md").unwrap();
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_hash_content_deterministic() {
+        let h1 = crate::sync::hash_content(b"hello world");
+        let h2 = crate::sync::hash_content(b"hello world");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_content_different_inputs() {
+        let h1 = crate::sync::hash_content(b"hello");
+        let h2 = crate::sync::hash_content(b"world");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_content_is_hex_string() {
+        let h = crate::sync::hash_content(b"test");
+        // SHA256 produces 32 bytes = 64 hex chars
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
