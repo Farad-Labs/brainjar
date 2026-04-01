@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+.brainjar/state.json
+brainjar.toml
+.env
+*.local
