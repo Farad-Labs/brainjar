@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use crate::config::{Config, KnowledgeBaseConfig};
 use crate::db;
 use crate::extract::Extractor;
+use crate::fuzzy;
 use crate::graph::KnowledgeGraph;
 
 pub async fn run_sync(
@@ -125,6 +126,16 @@ async fn sync_kb_human(
     // Record last sync time
     db::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
 
+    // ── Build vocabulary for fuzzy search ────────────────────────────────────
+    match fuzzy::build_vocabulary(&conn) {
+        Ok(word_count) => {
+            println!("  {} Built vocabulary ({} words)", "✓".green(), word_count);
+        }
+        Err(e) => {
+            eprintln!("  ⚠ Vocabulary build failed: {}", e);
+        }
+    }
+
     // ── Optional: entity extraction via configured LLM ──────────────────────
     if let Some(extraction_cfg) = &config.extraction {
         if extraction_cfg.enabled && !changes.to_upsert.is_empty() {
@@ -234,6 +245,10 @@ async fn sync_kb_json(
         if !changes.to_upsert.is_empty() || !changes.to_delete.is_empty() {
             db::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
         }
+
+        // Rebuild vocabulary for fuzzy search
+        let vocab_count = fuzzy::build_vocabulary(&conn).unwrap_or(0);
+        result["vocabulary_words"] = serde_json::Value::Number(vocab_count.into());
 
         // Optional entity extraction
         let mut entities_extracted = 0usize;

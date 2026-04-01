@@ -62,6 +62,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             key   TEXT PRIMARY KEY,
             value TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS vocabulary (
+            word      TEXT PRIMARY KEY,
+            frequency INTEGER DEFAULT 1
+        );
         "#,
     )
     .context("Failed to create database schema")?;

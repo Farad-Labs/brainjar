@@ -1,152 +1,190 @@
 # 🧠 brainjar
 
-> AI agent memory backed by AWS Bedrock Knowledge Bases + S3
+> Local-first AI memory with hybrid search — FTS5, vocabulary fuzzy, graph traversal, and vector embeddings
 
-brainjar gives AI agents persistent, searchable memory. Sync markdown files to S3, index them with Bedrock Knowledge Bases (Titan Embed V2), and search with three complementary engines — semantic vectors, fuzzy matching, and exact text. Works as a standalone CLI or as an MCP server for Claude Code, Cursor, and any MCP-compatible tool.
+brainjar gives AI agents persistent, searchable memory backed entirely by SQLite. Sync your markdown and code files, extract entities into a knowledge graph, and search with multiple complementary engines. Works as a standalone CLI or as an MCP server for Claude Code, Cursor, and any MCP-compatible tool.
 
 ## Features
 
-- **Unified search** — runs Bedrock semantic search + local fuzzy search in parallel by default
-- **Fuzzy matching** — powered by [nucleo](https://github.com/helix-editor/nucleo) (same engine as Helix editor), tolerates typos and partial matches
-- **Exact text search** — case-insensitive substring matching with file:line references
-- **Incremental sync** — content-addressed uploads, only syncs changed files (~12s for one file)
+- **Hybrid search** — FTS5 full-text search + graph entity traversal merged via RRF (Reciprocal Rank Fusion)
+- **Vocabulary fuzzy** — typo correction via SQLite Levenshtein vocabulary table (no file scanning)
+- **GraphRAG** — entity/relationship extraction using configurable LLM backends (Gemini, OpenAI, Ollama)
+- **Zero cloud dependencies** — runs fully offline; all data lives in a single `.db` file
 - **MCP server** — stdio transport, works with Claude Code, Cursor, Windsurf, and any MCP client
-- **Multiple knowledge bases** — search across separate KBs (e.g., personal memory + project docs)
-- **Terraform templates** — scaffold your AWS infrastructure with `brainjar init`
+- **Multiple knowledge bases** — isolate personal memory, project docs, etc.
+- **.brainjarignore** — gitignore-style file filtering during sync
 
 ## Quick Start
 
 ```bash
-# Install from source (crates.io publishing coming soon)
+# Install from source
 git clone https://github.com/Farad-Labs/brainjar
 cd brainjar
 cargo install --path .
 
-# Initialize a new project
+# Initialize a new project in your workspace
 cd my-agent-workspace
 brainjar init
 
-# Edit brainjar.toml with your KB IDs
+# Edit brainjar.toml to configure your knowledge bases
 # Then sync your files
 brainjar sync
 
-# Search (runs both semantic + fuzzy by default)
+# Search (FTS + graph by default, ~33ms)
 brainjar search "deployment workflow"
+
+# Fuzzy search — tolerates typos (~100ms)
+brainjar search --fuzzy "deploymnt workflw"
 ```
 
 ## Search Modes
 
-brainjar combines remote (Bedrock) and local (file) search for comprehensive results.
+| Flag | Engine | Speed | Use when |
+|------|--------|-------|----------|
+| *(default)* | FTS5 BM25 + graph RRF | ~33ms | Fast, accurate searches |
+| `--fuzzy` | Vocabulary-corrected FTS + graph | ~100ms | Typos, partial words, abbreviations |
+| `--text` | FTS5 BM25 only | ~10ms | Pure text relevance, no graph |
+| `--graph` | Entity graph traversal only | ~20ms | Concept/relationship queries |
+| `--local` | Nucleo file scanner | ~50ms | Files not yet synced, raw file:line results |
+| `--exact` | Case-insensitive substring | fast | Literal string matching |
 
 ```bash
-# Default: runs BOTH remote + local in parallel
-brainjar search "deployment workflow"
+# Default: FTS + graph merged via RRF
+brainjar search "localpage deployment"
 
-# Remote only (Bedrock semantic search)
-brainjar search --remote "deployment workflow"
+# Fuzzy: corrects "knowlege grph" → "knowledge graph" before searching
+brainjar search --fuzzy "knowlege grph"
 
-# Local only (fuzzy matching — tolerates typos)
-brainjar search --local "branjiar"      # finds "brainjar"
+# Text only (BM25 relevance)
+brainjar search --text "entity extraction"
 
-# Local exact (case-insensitive substring)
-brainjar search --local --exact "SUPABASE_SECRET_KEY"
+# Graph only (traverses entity relationships)
+brainjar search --graph "LocalPage entities"
 
-# JSON output (for programmatic use)
-brainjar search --json "paperclip agent"
+# Raw file scanner (nucleo, returns file:line)
+brainjar search --local "brainjar"
+
+# Exact substring
+brainjar search --exact "brainjar.toml"
+
+# Limit results
+brainjar search --limit 10 "search"
+
+# Search a specific knowledge base
+brainjar search --kb personal "morning routine"
+
+# JSON output (for piping / agent use)
+brainjar search --json "deployment"
 ```
 
-### Output Format
+### How Fuzzy Search Works
 
-**Human-readable:**
+During `brainjar sync`, the vocabulary table is rebuilt from all indexed document content:
+
+1. All tokens ≥ 3 chars are extracted from every document
+2. Compound identifiers are split: `knowledge_graph` → `knowledge`, `graph`; `KnowledgeGraph` → `knowledge`, `graph`
+3. Word frequencies are counted and stored in SQLite
+
+At search time with `--fuzzy`:
+
+1. Each query word is matched against the vocabulary
+2. If the word exists exactly → kept as-is
+3. If not found → closest match by Levenshtein distance (max 2 for short words, 3 for long)
+4. Corrected query is run through FTS5 + graph
+5. Corrections are shown: `✎ corrected: deploymnt → deployment`
+
+## Entity Extraction (GraphRAG)
+
+brainjar can extract entities and relationships from your documents using a configurable LLM, building a traversable knowledge graph stored alongside your documents in SQLite.
+
+```toml
+[extraction]
+enabled = true
+backend = "gemini"          # or "openai" or "ollama"
+model = "gemini-2.0-flash-lite"
+api_key_env = "GOOGLE_API_KEY"
 ```
-🔍 Results for "deployment workflow"
 
-── Remote (Bedrock) ──────────────────────
-  1. [0.87] memory/operations.md
-     ...deploy skill handles all deployment workflows...
+During sync, for each changed document:
+- Entities (people, concepts, tools, projects) are extracted
+- Relationships between entities are identified
+- The graph is stored in `<kb_name>_graph.db`
 
-  2. [0.74] MEMORY.md
-     ...Deploy skill: ~/.openclaw/homes/glitch/skills/deploy/...
+Graph search traverses entity relationships to find documents connected to your query, even when exact terms don't match.
 
-── Local (files) ─────────────────────────
-  1. [1.00] memory/2026-03-31.md:47
-     New deployment flow decided:
-  
-  2. [0.85] memory/infrastructure.md:12
-     Homelab (root@192.168.1.3), Public VPS (root@161.97.72.189)
+### Supported Backends
+
+| Backend | Config | Notes |
+|---------|--------|-------|
+| Gemini | `backend = "gemini"` | Flash Lite recommended for cost |
+| OpenAI | `backend = "openai"` | GPT-4o-mini works well |
+| Ollama | `backend = "ollama"` | Local LLM, no API cost |
+
+## Configuration
+
+brainjar looks for config at:
+1. `--config path/to/brainjar.toml` (explicit)
+2. `./brainjar.toml` (current directory)
+3. `~/.config/brainjar/config.toml` (global)
+
+```toml
+# brainjar.toml
+
+[knowledge_bases.personal]
+paths = ["~/Documents/notes", "~/Documents/journal"]
+auto_sync = true
+
+[knowledge_bases.localpage]
+paths = ["~/Code/localpage-kb"]
+auto_sync = true
+
+# Optional: entity extraction via LLM
+[extraction]
+enabled = true
+backend = "gemini"
+model = "gemini-2.0-flash-lite"
+api_key_env = "GOOGLE_API_KEY"
+
+# Optional: vector embeddings (Phase 3 — coming soon)
+# [embeddings]
+# backend = "openai"
+# model = "text-embedding-3-small"
 ```
 
-**JSON:**
+### Knowledge Base Options
+
+```toml
+[knowledge_bases.myproject]
+paths = [
+  "~/Code/myproject/docs",          # directory
+  "~/Code/myproject/README.md",     # single file
+  "~/Code/myproject/**/*.md",       # glob
+]
+auto_sync = true    # included in `brainjar sync` without specifying a name
+```
+
+## MCP Server
+
+Run brainjar as an MCP server for use with Claude Code, Cursor, or any MCP client:
+
+```bash
+brainjar mcp
+```
+
+### Claude Code / `.mcp.json`
+
 ```json
 {
-  "remote": [
-    { "kb": "memory", "score": 0.87, "source_path": "memory/operations.md", "excerpt": "..." }
-  ],
-  "local": [
-    { "file": "memory/2026-03-31.md", "line": 47, "match": "New deployment flow decided:", "score": 1.0 }
-  ]
+  "mcpServers": {
+    "brainjar": {
+      "command": "brainjar",
+      "args": ["mcp"]
+    }
+  }
 }
 ```
 
-### When to Use Each Mode
-
-| Mode | Best for | Example |
-|------|----------|---------|
-| Default (both) | General questions | "how does auth work?" |
-| `--remote` | Semantic/conceptual queries | "error handling patterns" |
-| `--local` | Finding specific strings, typo-tolerant | "SUPBASE_URL" |
-| `--local --exact` | Exact config values, env vars, URLs | "SUPABASE_SECRET_KEY" |
-
-## Commands
-
-### `brainjar sync [kb_name]`
-
-Sync files to S3 and trigger Bedrock ingestion.
-
-```bash
-brainjar sync              # sync all auto_sync KBs
-brainjar sync memory       # sync specific KB
-brainjar sync --force      # re-upload all files
-brainjar sync --dry-run    # preview without changes
-brainjar sync --no-wait    # don't wait for ingestion
-brainjar sync --json       # JSON output
-```
-
-### `brainjar search <query>`
-
-Search across knowledge bases. See [Search Modes](#search-modes) above.
-
-```bash
-brainjar search "query"                     # both remote + local
-brainjar search --local "query"             # local fuzzy only
-brainjar search --local --exact "query"     # local exact only
-brainjar search --remote "query"            # remote (Bedrock) only
-brainjar search --kb memory "query"         # specific KB
-brainjar search --limit 10 "query"          # more results
-brainjar search --json "query"              # JSON output
-```
-
-### `brainjar status [kb_name]`
-
-Show KB health, file count, and last sync info.
-
-```bash
-brainjar status            # all KBs
-brainjar status memory     # specific KB
-brainjar status --json     # JSON output
-```
-
-### `brainjar init`
-
-Interactive setup wizard — creates `brainjar.toml` and scaffolds Terraform templates.
-
-### `brainjar mcp`
-
-Run as an MCP server over stdio.
-
-## MCP Integration
-
-Add to your Claude Code or Cursor config:
+### Cursor / `~/.cursor/mcp.json`
 
 ```json
 {
@@ -154,89 +192,135 @@ Add to your Claude Code or Cursor config:
     "brainjar": {
       "command": "brainjar",
       "args": ["mcp"],
-      "cwd": "/path/to/your/project"
+      "cwd": "/path/to/your/workspace"
     }
   }
 }
 ```
 
-### MCP Tools
+Available MCP tools: `search_memory`, `sync_memory`, `get_status`
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `memory_search` | Search across KBs | `query` (required), `mode` ("all"/"local"/"remote"), `exact` (bool), `kb`, `limit` |
-| `memory_sync` | Trigger file sync + ingestion | `kb`, `force` |
-| `memory_status` | Get KB status | `kb` |
+## Cost
 
-## Configuration
+brainjar is designed for minimal ongoing cost:
 
-`brainjar.toml` in your project root (or `~/.config/brainjar/config.toml` globally):
+| Scenario | Cost |
+|----------|------|
+| Initial ingestion (~276 docs) | ~$0.30 |
+| Daily sync (changed files only) | ~$0.022/day |
+| Monthly (Gemini Flash Lite extraction) | ~$0.66/month |
+| Fuzzy search | $0.00 (local SQLite) |
+| FTS + graph search | $0.00 (local SQLite) |
 
-```toml
-[aws]
-profile = "my-aws-profile"  # or use AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-region = "us-east-1"
+All search runs locally — zero API calls at query time.
 
-[knowledge_bases.memory]
-kb_id = "YOUR_KB_ID"
-data_source_id = "YOUR_DS_ID"
-s3_bucket = "your-memory-source-bucket"
-watch_paths = ["memory/", "MEMORY.md", "AGENTS.md"]
-auto_sync = true
+## .brainjarignore
 
-[knowledge_bases.docs]
-kb_id = "ANOTHER_KB_ID"
-data_source_id = "ANOTHER_DS_ID"
-s3_bucket = "your-docs-bucket"
-watch_paths = ["~/Code/my-project/docs/"]
-auto_sync = false  # manual sync only
+Place a `.brainjarignore` file in your config directory to exclude files from indexing. Uses gitignore-style glob patterns:
+
+```
+# .brainjarignore
+*.log
+*.tmp
+secrets/
+node_modules/
+**/generated/**
 ```
 
-## AWS Infrastructure
+Files are also filtered by extension. Only these types are indexed by default:
+`md txt rs toml yaml yml json py js ts tsx jsx sh css html xml csv sql tf hcl conf ini cfg env`
 
-brainjar requires:
-
-1. **S3 bucket** — stores source documents
-2. **S3 Vectors index** — vector storage (requires `awscc` Terraform provider)
-3. **Bedrock Knowledge Base** — configured with Titan Embed V2
-4. **IAM role** — Bedrock service role for S3 + embedding access
-5. **IAM user** — agent access for sync + search
-
-Run `brainjar init` to scaffold Terraform templates, or see the [terraform/](terraform/) directory.
-
-### Key Infrastructure Decisions
-
-- **S3 Vectors** (not OpenSearch) — ~$2-3/month vs $70+/month for OpenSearch Serverless
-- **NONE chunking** — each file = one vector; hierarchical/fixed chunking hits S3 Vectors' 2KB filterable metadata limit
-- **Non-filterable metadata** — `AMAZON_BEDROCK_TEXT` and `AMAZON_BEDROCK_METADATA` must be configured as non-filterable in the vector index
-- **Flat S3 keys** — `{sha256_of_relative_path}.md` avoids path encoding issues and metadata size limits
+Default excluded directories: `.git .venv node_modules __pycache__ target .brainjar dist build .next .nuxt .idea .vscode`
 
 ## Architecture
 
 ```
-brainjar sync                         brainjar search "query"
-  │                                     │
-  ├─ Walk watch_paths                   ├─ Remote: Bedrock Retrieve API
-  ├─ SHA256 content hash                │   └─ Semantic vector search
-  ├─ Compare with .brainjar/state.json  │
-  ├─ Upload changed files to S3         ├─ Local: nucleo fuzzy / exact
-  ├─ StartIngestionJob                  │   └─ Walk watch_paths, search line-by-line
-  └─ Update state.json                 │
-                                        └─ Merge + rank results
+brainjar.toml
+     │
+     ▼
+brainjar sync
+     │
+     ├─ Parse & hash files
+     ├─ Upsert into documents table (SQLite WAL)
+     ├─ FTS5 virtual table auto-updated via triggers
+     ├─ Build vocabulary table (Levenshtein fuzzy)
+     └─ Extract entities → knowledge graph (optional LLM)
+
+brainjar search "query"
+     │
+     ├─ FTS5 BM25 search → ranked results
+     ├─ Graph traversal from matching entities
+     └─ RRF merge → top-N results
+
+brainjar search --fuzzy "qurey"
+     │
+     ├─ Correct query via vocabulary (Levenshtein)  ← new
+     ├─ FTS5 with corrected terms
+     ├─ Graph with original + corrected terms
+     └─ RRF merge + show corrections
 ```
 
-## Cost
+### Database Layout
 
-Running two knowledge bases with ~400 documents total:
+All data lives in `~/.brainjar/<kb_name>.db`:
 
-| Resource | Monthly Cost |
-|----------|-------------|
-| S3 Vectors | ~$1-2 |
-| Bedrock (Titan Embed V2) | ~$0.50-1.00 |
-| S3 storage | ~$0.05 |
-| Cost Explorer API | ~$0.01 |
-| **Total** | **~$2-3/month** |
+| Table | Contents |
+|-------|----------|
+| `documents` | File path, content, SHA256 hash, updated_at |
+| `documents_fts` | FTS5 virtual table (auto-synced via triggers) |
+| `vocabulary` | Word → frequency (rebuilt each sync) |
+| `meta` | Key/value metadata (last_sync, etc.) |
 
-## License
+Graph data lives in `~/.brainjar/<kb_name>_graph.db` (GraphQLite).
 
-MIT — see [LICENSE](LICENSE)
+## Commands
+
+```bash
+brainjar sync [kb_name] [--force] [--dry-run] [--json]
+brainjar search <query> [--kb <name>] [--limit N] [--fuzzy|--text|--graph|--local|--exact] [--json]
+brainjar status [kb_name] [--json]
+brainjar init
+brainjar mcp
+```
+
+## Why brainjar?
+
+### Why not vector-only?
+
+Vector search is great for semantic similarity but has real drawbacks for agent memory:
+- Requires an embedding model (API cost or local GPU)
+- Slow to build and query at scale
+- Can't do exact or near-exact matching reliably
+- Black box — hard to debug why a result ranked where it did
+
+brainjar's FTS5 + graph + fuzzy approach gives you:
+- **Exact precision** when you know the term
+- **Semantic breadth** through entity graph traversal
+- **Typo tolerance** through vocabulary correction
+- **Zero query-time cost** — all runs in SQLite
+
+### Why local-first?
+
+- Your memory doesn't leave your machine (or your controlled infra)
+- No API latency — search in 33ms, not 500ms
+- Works offline
+- You own the data — one `.db` file, portable forever
+- No surprise bills from cloud KB services
+
+## Development
+
+```bash
+git clone https://github.com/Farad-Labs/brainjar
+cd brainjar
+cargo build
+cargo test
+cargo clippy
+cargo install --path .
+```
+
+### Roadmap
+
+- [ ] Vector embeddings (sqlite-vec, Phase 3)
+- [ ] MCP tool: `correct_query` (expose fuzzy correction to agents)
+- [ ] Watch mode: `brainjar sync --watch` (inotify/FSEvents)
+- [ ] Web UI for browsing the knowledge graph

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::db;
+use crate::fuzzy;
 use crate::local_search::{run_local_search, LocalSearchResult};
 
 /// An FTS5 search result.
@@ -50,8 +51,40 @@ pub async fn run_search(
     exact: bool,
 ) -> Result<()> {
     let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
-    let run_local = matches!(mode, SearchMode::Local | SearchMode::Fuzzy);
+    let run_local = matches!(mode, SearchMode::Local);
     let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
+
+    // For fuzzy mode: correct the query via vocabulary before FTS/graph search
+    let (effective_query, query_corrections) = if mode == SearchMode::Fuzzy {
+        // Use the first available KB's connection for vocabulary lookup
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb)| (n.as_str(), kb))
+                .collect()
+        };
+
+        if let Some((first_kb_name, _)) = kbs.first() {
+            let conn = db::open_db(first_kb_name, &config.config_dir)?;
+            match fuzzy::correct_query(&conn, query) {
+                Ok((corrected, corrections)) => (corrected, corrections),
+                Err(_) => (query.to_string(), Vec::new()),
+            }
+        } else {
+            (query.to_string(), Vec::new())
+        }
+    } else {
+        (query.to_string(), Vec::new())
+    };
+
+    let search_query = effective_query.as_str();
 
     // Collect FTS results across KBs
     let fts_results: Vec<FtsResult> = if run_fts {
@@ -72,7 +105,7 @@ pub async fn run_search(
         let mut all: Vec<FtsResult> = Vec::new();
         for (name, _kb) in &kbs {
             let conn = db::open_db(name, &config.config_dir)?;
-            let results = search_fts(&conn, query, limit)?;
+            let results = search_fts(&conn, search_query, limit)?;
             all.extend(results);
         }
         // Sort by score (rank from FTS5 is negative — lower is better, but we've negated it)
@@ -83,7 +116,7 @@ pub async fn run_search(
         Vec::new()
     };
 
-    // Local fuzzy results
+    // Local fuzzy results (nucleo — only for --local mode now)
     let local_results: Vec<LocalSearchResult> = if run_local {
         run_local_search(config, query, limit, exact)?
     } else {
@@ -106,13 +139,28 @@ pub async fn run_search(
                 .collect()
         };
 
+        // For fuzzy mode: search graph with both original and corrected query terms
+        let graph_query = if mode == SearchMode::Fuzzy && !query_corrections.is_empty() {
+            // Combine original + corrected unique terms
+            let combined: Vec<String> = query
+                .split_whitespace()
+                .chain(search_query.split_whitespace())
+                .map(|s| s.to_string())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            combined.join(" ")
+        } else {
+            search_query.to_string()
+        };
+
         let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
         for (name, _kb) in &kbs {
             if !crate::graph::KnowledgeGraph::exists(&config.config_dir, name) {
                 continue;
             }
             match crate::graph::KnowledgeGraph::open(&config.config_dir, name) {
-                Ok(kg) => match kg.search(query, limit) {
+                Ok(kg) => match kg.search(&graph_query, limit) {
                     Ok(results) => all_graph.extend(results),
                     Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
                 },
@@ -126,9 +174,26 @@ pub async fn run_search(
 
     if json {
         let unified = build_unified_results(&fts_results, &local_results, &graph_results, limit);
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "results": unified }))?);
+        let mut output = serde_json::json!({ "results": unified });
+        if !query_corrections.is_empty() {
+            let corrections_json: Vec<serde_json::Value> = query_corrections
+                .iter()
+                .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
+                .collect();
+            output["corrections"] = serde_json::Value::Array(corrections_json);
+        }
+        println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_results(query, &fts_results, &local_results, &graph_results, mode, limit);
+        print_results(
+            query,
+            search_query,
+            &query_corrections,
+            &fts_results,
+            &local_results,
+            &graph_results,
+            mode,
+            limit,
+        );
     }
 
     Ok(())
@@ -246,8 +311,11 @@ fn build_unified_results(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_results(
     query: &str,
+    effective_query: &str,
+    corrections: &[(String, String)],
     fts: &[FtsResult],
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
@@ -268,6 +336,26 @@ fn print_results(
         "🔍 Results for".cyan().bold(),
         format!("\"{}\"", query).white().bold(),
     );
+
+    // Show corrections if any were made
+    if !corrections.is_empty() {
+        let correction_strs: Vec<String> = corrections
+            .iter()
+            .map(|(from, to)| format!("{} → {}", from.yellow(), to.green()))
+            .collect();
+        println!(
+            "  {} corrected: {}\n",
+            "✎".cyan(),
+            correction_strs.join(", ")
+        );
+        if effective_query != query {
+            println!(
+                "  {} searching for: {}\n",
+                "→".dimmed(),
+                format!("\"{}\"", effective_query).white()
+            );
+        }
+    }
 
     if matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy) {
         // Show merged RRF results (or pure graph results)
