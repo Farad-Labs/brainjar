@@ -43,8 +43,42 @@ pub async fn run_sync(
         return Ok(());
     }
 
-    let clients = build_clients(&config.aws).await?;
     let mut state = State::load(&config.config_dir)?;
+
+    // Pre-check: skip AWS entirely if nothing changed across all KBs
+    if !force {
+        let mut any_changes = false;
+        for (name, kb) in &kbs_to_sync {
+            let kb_state = state.kb_state(name);
+            let watch_paths = config.expand_watch_paths(kb);
+            let local_files = collect_files(config, &watch_paths);
+            let changes = compute_changes(&local_files, &kb_state, false);
+            if !changes.to_upload.is_empty() || !changes.to_delete.is_empty() {
+                any_changes = true;
+                break;
+            }
+        }
+        if !any_changes {
+            if json {
+                for (name, _) in &kbs_to_sync {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "kb": name,
+                        "to_upload": 0,
+                        "to_delete": 0,
+                        "status": "NO_CHANGES"
+                    }))?);
+                }
+            } else {
+                for (name, _) in &kbs_to_sync {
+                    println!("\n{} {}", "⟳ Syncing".cyan().bold(), name.bold());
+                    println!("  {} Nothing to sync", "✓".green());
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let clients = build_clients(&config.aws).await?;
 
     for (name, kb) in &kbs_to_sync {
         if json {
