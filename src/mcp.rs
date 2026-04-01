@@ -231,6 +231,15 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
             all_results.truncate(limit);
 
+            // Reverse-map S3 keys to human-readable paths
+            for result in &mut all_results {
+                let kb_state = state.kb_state(&result.kb);
+                let reverse_map = crate::search::build_s3_key_to_path_map(&kb_state);
+                if let Some(original_path) = reverse_map.get(&result.source_path) {
+                    result.source_path = original_path.clone();
+                }
+            }
+
             let text = format_search_results_text(query, &all_results);
             Ok(tool_text(text))
         }

@@ -61,6 +61,7 @@ pub async fn run_sync(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sync_kb_human(
     config: &Config,
     kb_name: &str,
@@ -95,7 +96,7 @@ async fn sync_kb_human(
 
     if dry_run {
         println!("  {} (dry run, no changes made)", "DRY RUN".yellow().bold());
-        for (rel_path, _) in &changes.to_upload {
+        for rel_path in changes.to_upload.keys() {
             println!("    {} {}", "+".green(), rel_path);
         }
         for s3_key in &changes.to_delete {
@@ -247,6 +248,7 @@ async fn sync_kb_human(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sync_kb_json(
     config: &Config,
     kb_name: &str,
