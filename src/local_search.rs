@@ -85,25 +85,41 @@ fn search_path(
         None
     };
 
+    /// Directories to always skip (matches sync.rs DEFAULT_SKIP_DIRS)
+    const SKIP_DIRS: &[&str] = &[
+        ".git", ".venv", "node_modules", "__pycache__", "target", ".brainjar",
+        "dist", "build", ".next", ".nuxt", ".idea", ".vscode",
+    ];
+
+    /// Text file extensions to include (matches sync.rs DEFAULT_TEXT_EXTENSIONS)
+    const TEXT_EXTS: &[&str] = &[
+        "md", "txt", "rs", "toml", "yaml", "yml", "json", "py", "js", "ts", "tsx", "jsx",
+        "sh", "css", "html", "xml", "csv", "sql", "tf", "hcl", "conf", "ini", "cfg", "env",
+    ];
+
     for entry in WalkDir::new(base)
         .follow_links(true)
         .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            if e.file_type().is_dir() {
+                !SKIP_DIRS.contains(&name.as_ref()) && !name.starts_with('.')
+            } else {
+                true
+            }
+        })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
         let path = entry.path();
 
-        // Skip binary / non-text files by extension heuristic
+        // Only index known text file extensions
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let text_exts = [
-            "md", "txt", "rs", "toml", "yaml", "yml", "json", "py", "js", "ts",
-            "sh", "csv", "html", "css", "xml", "log", "conf", "ini", "",
-        ];
-        if !text_exts.contains(&ext.as_str()) {
+        if !TEXT_EXTS.contains(&ext.as_str()) {
             continue;
         }
 

@@ -28,8 +28,10 @@ pub struct UnifiedResult {
 /// Search mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// Run FTS + fuzzy (+ graph when available), merge with RRF
+    /// Run FTS + graph, merge with RRF (fast — no fuzzy by default)
     All,
+    /// Run FTS + graph + fuzzy, merge with RRF (slower, more comprehensive)
+    Fuzzy,
     /// Local fuzzy only (nucleo)
     Local,
     /// FTS5 BM25 only
@@ -47,9 +49,9 @@ pub async fn run_search(
     mode: SearchMode,
     exact: bool,
 ) -> Result<()> {
-    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text);
-    let run_local = matches!(mode, SearchMode::All | SearchMode::Local);
-    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph);
+    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
+    let run_local = matches!(mode, SearchMode::Local | SearchMode::Fuzzy);
+    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
 
     // Collect FTS results across KBs
     let fts_results: Vec<FtsResult> = if run_fts {
@@ -267,7 +269,7 @@ fn print_results(
         format!("\"{}\"", query).white().bold(),
     );
 
-    if matches!(mode, SearchMode::All | SearchMode::Graph) {
+    if matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy) {
         // Show merged RRF results (or pure graph results)
         let unified = build_unified_results(fts, local, graph, limit);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());

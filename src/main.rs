@@ -50,14 +50,17 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Local fuzzy search only (nucleo)
-        #[arg(long, conflicts_with = "text", conflicts_with = "graph")]
+        #[arg(long, conflicts_with = "text", conflicts_with = "graph", conflicts_with = "fuzzy")]
         local: bool,
         /// FTS5 text search only
-        #[arg(long, conflicts_with = "local", conflicts_with = "graph")]
+        #[arg(long, conflicts_with = "local", conflicts_with = "graph", conflicts_with = "fuzzy")]
         text: bool,
         /// Graph entity traversal search
-        #[arg(long, conflicts_with = "local", conflicts_with = "text")]
+        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "fuzzy")]
         graph: bool,
+        /// Include fuzzy matching in search (slower, more comprehensive)
+        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "graph")]
+        fuzzy: bool,
         /// Use exact (case-insensitive substring) matching for local search
         #[arg(long)]
         exact: bool,
@@ -100,6 +103,7 @@ async fn main() -> Result<()> {
             local,
             text,
             graph,
+            fuzzy,
             exact,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
@@ -109,6 +113,8 @@ async fn main() -> Result<()> {
                 brainjar::search::SearchMode::Text
             } else if graph {
                 brainjar::search::SearchMode::Graph
+            } else if fuzzy {
+                brainjar::search::SearchMode::Fuzzy
             } else {
                 brainjar::search::SearchMode::All
             };

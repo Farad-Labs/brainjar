@@ -147,8 +147,8 @@ fn handle_tools_list() -> Result<Value> {
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["all", "local", "text", "graph"],
-                            "description": "Search mode: 'all' runs FTS5 + fuzzy + graph (default), 'local' runs only fuzzy search, 'text' runs only FTS5, 'graph' runs entity graph traversal",
+                            "enum": ["all", "fuzzy", "local", "text", "graph"],
+                            "description": "Search mode: 'all' runs FTS5 + graph (default, fast), 'fuzzy' adds fuzzy matching to all (slower), 'local' runs only fuzzy search, 'text' runs only FTS5, 'graph' runs entity graph traversal",
                             "default": "all"
                         },
                         "exact": {
@@ -218,12 +218,13 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 "local" => crate::search::SearchMode::Local,
                 "text" => crate::search::SearchMode::Text,
                 "graph" => crate::search::SearchMode::Graph,
+                "fuzzy" => crate::search::SearchMode::Fuzzy,
                 _ => crate::search::SearchMode::All,
             };
 
-            let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text);
-            let run_local = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Local);
-            let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph);
+            let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text | crate::search::SearchMode::Fuzzy);
+            let run_local = matches!(mode, crate::search::SearchMode::Local | crate::search::SearchMode::Fuzzy);
+            let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph | crate::search::SearchMode::Fuzzy);
 
             // Determine KBs to search
             let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
