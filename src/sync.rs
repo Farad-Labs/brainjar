@@ -5,6 +5,7 @@ use hex;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use glob::Pattern;
 use walkdir::WalkDir;
 
 use crate::config::{Config, KnowledgeBaseConfig};
@@ -313,10 +314,37 @@ fn compute_changes(
 }
 
 /// Collect all files from watch paths, returning (relative_path, absolute_path) pairs.
+/// Default file extensions to include when no .brainjarignore exists
+const DEFAULT_TEXT_EXTENSIONS: &[&str] = &[
+    "md", "txt", "rs", "toml", "yaml", "yml", "json", "py", "js", "ts", "tsx", "jsx",
+    "sh", "css", "html", "xml", "csv", "sql", "tf", "hcl", "conf", "ini", "cfg", "env",
+];
+
+/// Default directories to always skip
+const DEFAULT_SKIP_DIRS: &[&str] = &[
+    ".git", ".venv", "node_modules", "__pycache__", "target", ".brainjar",
+    "dist", "build", ".next", ".nuxt", ".idea", ".vscode",
+];
+
+/// Load ignore patterns from .brainjarignore in the config directory
+fn load_ignore_patterns(config_dir: &std::path::Path) -> Vec<Pattern> {
+    let ignore_file = config_dir.join(".brainjarignore");
+    if !ignore_file.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(&ignore_file)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|l| Pattern::new(l.trim().trim_end_matches('/')).ok())
+        .collect()
+}
+
 pub fn collect_files(
     config: &Config,
     watch_paths: &[std::path::PathBuf],
 ) -> HashMap<String, std::path::PathBuf> {
+    let ignore_patterns = load_ignore_patterns(&config.config_dir);
     let mut files = HashMap::new();
     for watch_path in watch_paths {
         if watch_path.is_file() {
@@ -330,14 +358,11 @@ pub fn collect_files(
             for entry in WalkDir::new(watch_path)
                 .into_iter()
                 .filter_entry(|e| {
-                    // Skip hidden dirs, .venv, node_modules, .git, __pycache__, target
                     let name = e.file_name().to_string_lossy();
                     if e.file_type().is_dir() {
-                        !name.starts_with('.')
-                            && name != "node_modules"
-                            && name != "__pycache__"
-                            && name != "target"
-                            && name != ".venv"
+                        // Skip default excluded directories
+                        !DEFAULT_SKIP_DIRS.contains(&name.as_ref())
+                            && !name.starts_with('.')
                     } else {
                         true
                     }
@@ -347,16 +372,19 @@ pub fn collect_files(
                     if !e.file_type().is_file() {
                         return false;
                     }
-                    // Only index text files
+                    let path_str = e.path().to_string_lossy();
+                    // Check .brainjarignore patterns
+                    for pattern in &ignore_patterns {
+                        if pattern.matches(&path_str) || pattern.matches(e.file_name().to_string_lossy().as_ref()) {
+                            return false;
+                        }
+                    }
+                    // Only index known text file extensions
                     let ext = e.path().extension()
-                        .and_then(|e| e.to_str())
+                        .and_then(|ext| ext.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    matches!(ext.as_str(),
-                        "md" | "txt" | "rs" | "toml" | "yaml" | "yml" | "json" |
-                        "py" | "js" | "ts" | "tsx" | "jsx" | "sh" | "css" | "html" |
-                        "xml" | "csv" | "sql" | "tf" | "hcl" | "conf" | "ini" | "cfg" | "env"
-                    )
+                    DEFAULT_TEXT_EXTENSIONS.contains(&ext.as_str())
                 })
             {
                 let abs = entry.path().to_path_buf();

@@ -1,0 +1,62 @@
+# .brainjarignore — controls which files brainjar indexes
+# Works like .gitignore: one pattern per line, # for comments
+# By default, brainjar ONLY indexes these text file types:
+
+# === INCLUDED BY DEFAULT ===
+# Documents:  .md .txt
+# Config:     .toml .yaml .yml .json .ini .conf .cfg .env
+# Code:       .rs .py .js .ts .tsx .jsx .sh .css .html .xml .sql
+# Infra:      .tf .hcl
+# Data:       .csv
+
+# === ALWAYS EXCLUDED ===
+# Directories
+.git/
+.venv/
+node_modules/
+__pycache__/
+target/
+.brainjar/
+dist/
+build/
+.next/
+.nuxt/
+
+# Binary/media files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+*.woff
+*.woff2
+*.ttf
+*.eot
+*.mp3
+*.mp4
+*.zip
+*.tar
+*.gz
+*.pdf
+*.pyc
+*.wasm
+*.so
+*.dylib
+*.o
+*.a
+
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Cargo.lock
+poetry.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
