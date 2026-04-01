@@ -203,6 +203,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             // Capture results as JSON
             let clients = crate::aws::build_clients(&config.aws).await?;
+            let state = crate::state::State::load(&config.config_dir)?;
             let mut all_results: Vec<crate::search::SearchResult> = Vec::new();
 
             let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
@@ -220,7 +221,8 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             };
 
             for (name, kb_config) in &kbs {
-                match crate::search::search_kb_raw(&clients, name, kb_config, query, limit).await {
+                let kb_state = state.kb_state(name);
+                match crate::search::search_kb_raw(&clients, name, kb_config, query, limit, &kb_state).await {
                     Ok(results) => all_results.extend(results),
                     Err(e) => eprintln!("[brainjar mcp] Search error for KB {}: {}", name, e),
                 }
