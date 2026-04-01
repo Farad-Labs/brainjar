@@ -128,7 +128,7 @@ fn handle_tools_list() -> Result<Value> {
         "tools": [
             {
                 "name": "memory_search",
-                "description": "Search across knowledge bases for relevant memories and context",
+                "description": "Search across knowledge bases for relevant memories and context. Runs both remote Bedrock hybrid search and local fuzzy file search by default.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -144,6 +144,17 @@ fn handle_tools_list() -> Result<Value> {
                             "type": "integer",
                             "description": "Maximum number of results (default: 5)",
                             "default": 5
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["all", "local", "remote"],
+                            "description": "Search mode: 'all' runs both remote (Bedrock) and local fuzzy search (default), 'local' runs only local file search, 'remote' runs only Bedrock search",
+                            "default": "all"
+                        },
+                        "exact": {
+                            "type": "boolean",
+                            "description": "Use exact (case-insensitive substring) matching for local search instead of fuzzy matching",
+                            "default": false
                         }
                     },
                     "required": ["query"]
@@ -200,47 +211,88 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 .ok_or_else(|| anyhow::anyhow!("Missing query argument"))?;
             let kb = args.get("kb").and_then(|v| v.as_str());
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-
-            // Capture results as JSON
-            let clients = crate::aws::build_clients(&config.aws).await?;
-            let state = crate::state::State::load(&config.config_dir)?;
-            let mut all_results: Vec<crate::search::SearchResult> = Vec::new();
-
-            let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
-                if let Some(k) = config.knowledge_bases.get(name) {
-                    vec![(name, k)]
-                } else {
-                    return Ok(tool_error(format!("KB '{}' not found", name)));
-                }
-            } else {
-                config
-                    .knowledge_bases
-                    .iter()
-                    .map(|(n, k)| (n.as_str(), k))
-                    .collect()
+            let exact = args.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("all");
+            let mode = match mode_str {
+                "local" => crate::search::SearchMode::Local,
+                "remote" => crate::search::SearchMode::Remote,
+                _ => crate::search::SearchMode::All,
             };
 
-            for (name, kb_config) in &kbs {
-                let kb_state = state.kb_state(name);
-                match crate::search::search_kb_raw(&clients, name, kb_config, query, limit, &kb_state).await {
-                    Ok(results) => all_results.extend(results),
-                    Err(e) => eprintln!("[brainjar mcp] Search error for KB {}: {}", name, e),
+            let run_remote = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Remote);
+            let run_local = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Local);
+
+            // Run both searches in parallel
+            let remote_future = async {
+                if !run_remote {
+                    return Ok::<Vec<crate::search::SearchResult>, anyhow::Error>(Vec::new());
                 }
-            }
+                let clients = crate::aws::build_clients(&config.aws).await?;
+                let state = crate::state::State::load(&config.config_dir)?;
+                let mut all_results: Vec<crate::search::SearchResult> = Vec::new();
 
-            all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-            all_results.truncate(limit);
+                let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
+                    if let Some(k) = config.knowledge_bases.get(name) {
+                        vec![(name, k)]
+                    } else {
+                        return Err(anyhow::anyhow!("KB '{}' not found", name));
+                    }
+                } else {
+                    config
+                        .knowledge_bases
+                        .iter()
+                        .map(|(n, k)| (n.as_str(), k))
+                        .collect()
+                };
 
-            // Reverse-map S3 keys to human-readable paths
-            for result in &mut all_results {
-                let kb_state = state.kb_state(&result.kb);
-                let reverse_map = crate::search::build_s3_key_to_path_map(&kb_state);
-                if let Some(original_path) = reverse_map.get(&result.source_path) {
-                    result.source_path = original_path.clone();
+                for (name, kb_config) in &kbs {
+                    let kb_state = state.kb_state(name);
+                    match crate::search::search_kb_raw(&clients, name, kb_config, query, limit, &kb_state).await {
+                        Ok(results) => all_results.extend(results),
+                        Err(e) => eprintln!("[brainjar mcp] Search error for KB {}: {}", name, e),
+                    }
                 }
-            }
 
-            let text = format_search_results_text(query, &all_results);
+                all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                all_results.truncate(limit);
+
+                // Reverse-map S3 keys to human-readable paths
+                for result in &mut all_results {
+                    let kb_state = state.kb_state(&result.kb);
+                    let reverse_map = crate::search::build_s3_key_to_path_map(&kb_state);
+                    if let Some(original_path) = reverse_map.get(&result.source_path) {
+                        result.source_path = original_path.clone();
+                    }
+                }
+
+                Ok(all_results)
+            };
+
+            let local_future = async {
+                if run_local {
+                    crate::local_search::run_local_search(config, query, limit, exact)
+                } else {
+                    Ok(Vec::new())
+                }
+            };
+
+            let (remote_results, local_results) = tokio::join!(remote_future, local_future);
+            let remote_results = match remote_results {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[brainjar mcp] Remote search error: {}", e);
+                    Vec::new()
+                }
+            };
+            let local_results = match local_results {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[brainjar mcp] Local search error: {}", e);
+                    Vec::new()
+                }
+            };
+
+            let text = format_unified_search_text(query, &remote_results, &local_results, mode);
             Ok(tool_text(text))
         }
 
@@ -304,19 +356,52 @@ fn tool_error(message: String) -> Value {
     })
 }
 
-fn format_search_results_text(query: &str, results: &[crate::search::SearchResult]) -> String {
-    if results.is_empty() {
+fn format_unified_search_text(
+    query: &str,
+    remote: &[crate::search::SearchResult],
+    local: &[crate::local_search::LocalSearchResult],
+    mode: crate::search::SearchMode,
+) -> String {
+    if remote.is_empty() && local.is_empty() {
         return format!("No results found for \"{}\"", query);
     }
-    let mut out = format!("Results for \"{}\" ({} matches)\n\n", query, results.len());
-    for (i, r) in results.iter().enumerate() {
-        out.push_str(&format!(
-            "{}. [{:.2}] {}\n   ...{}...\n\n",
-            i + 1,
-            r.score,
-            r.source_path,
-            r.excerpt.replace('\n', " ")
-        ));
+
+    let mut out = format!("Results for \"{}\"\n\n", query);
+
+    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Remote) {
+        out.push_str("=== Remote (Bedrock) ===\n");
+        if remote.is_empty() {
+            out.push_str("No remote results\n\n");
+        } else {
+            for (i, r) in remote.iter().enumerate() {
+                out.push_str(&format!(
+                    "{}. [{:.2}] {}\n   ...{}...\n\n",
+                    i + 1,
+                    r.score,
+                    r.source_path,
+                    r.excerpt.replace('\n', " ")
+                ));
+            }
+        }
     }
+
+    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Local) {
+        out.push_str("=== Local (files) ===\n");
+        if local.is_empty() {
+            out.push_str("No local results\n\n");
+        } else {
+            for (i, r) in local.iter().enumerate() {
+                out.push_str(&format!(
+                    "{}. [{:.2}] {}:{}\n   {}\n\n",
+                    i + 1,
+                    r.score,
+                    r.file,
+                    r.line,
+                    r.matched_text
+                ));
+            }
+        }
+    }
+
     out
 }

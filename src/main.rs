@@ -49,6 +49,15 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Local search only (no Bedrock)
+        #[arg(long, conflicts_with = "remote")]
+        local: bool,
+        /// Remote (Bedrock) search only
+        #[arg(long, conflicts_with = "local")]
+        remote: bool,
+        /// Use exact (case-insensitive substring) matching instead of fuzzy for local search
+        #[arg(long)]
+        exact: bool,
     },
     /// Show knowledge base status
     Status {
@@ -80,9 +89,16 @@ async fn main() -> Result<()> {
             brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, json)
                 .await?;
         }
-        Commands::Search { query, kb, limit, json } => {
+        Commands::Search { query, kb, limit, json, local, remote, exact } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json).await?;
+            let mode = if local {
+                brainjar::search::SearchMode::Local
+            } else if remote {
+                brainjar::search::SearchMode::Remote
+            } else {
+                brainjar::search::SearchMode::All
+            };
+            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact).await?;
         }
         Commands::Status { kb_name, json } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;

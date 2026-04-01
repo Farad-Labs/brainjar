@@ -2,75 +2,100 @@
 
 > AI agent memory backed by AWS Bedrock Knowledge Bases + S3
 
-brainjar is a CLI tool that manages persistent memory for AI agents using AWS Bedrock Knowledge Bases with S3 Vectors as the vector storage backend. It syncs files to S3, triggers Bedrock ingestion, and exposes semantic search — either directly or via an MCP server.
+brainjar gives AI agents persistent, searchable memory. Sync markdown files to S3, index them with Bedrock Knowledge Bases (Titan Embed V2), and search with three complementary engines — semantic vectors, fuzzy matching, and exact text. Works as a standalone CLI or as an MCP server for Claude Code, Cursor, and any MCP-compatible tool.
 
-## Use Cases
+## Features
 
-1. **Standalone CLI** — sync your agent's memory files and search them
-2. **OpenClaw plugin backend** — shell out to brainjar from the memory plugin
-3. **Claude Code / MCP integration** — run `brainjar mcp` as an MCP server
+- **Unified search** — runs Bedrock semantic search + local fuzzy search in parallel by default
+- **Fuzzy matching** — powered by [nucleo](https://github.com/helix-editor/nucleo) (same engine as Helix editor), tolerates typos and partial matches
+- **Exact text search** — case-insensitive substring matching with file:line references
+- **Incremental sync** — content-addressed uploads, only syncs changed files (~12s for one file)
+- **MCP server** — stdio transport, works with Claude Code, Cursor, Windsurf, and any MCP client
+- **Multiple knowledge bases** — search across separate KBs (e.g., personal memory + project docs)
+- **Terraform templates** — scaffold your AWS infrastructure with `brainjar init`
 
 ## Quick Start
 
 ```bash
-# Install
-cargo install brainjar
+# Install from source (crates.io publishing coming soon)
+git clone https://github.com/Farad-Labs/brainjar
+cd brainjar
+cargo install --path .
 
 # Initialize a new project
 cd my-agent-workspace
 brainjar init
 
-# Edit brainjar.toml with your KB IDs (or run terraform first)
-# Then sync
+# Edit brainjar.toml with your KB IDs
+# Then sync your files
 brainjar sync
 
-# Search
+# Search (runs both semantic + fuzzy by default)
+brainjar search "deployment workflow"
+```
+
+## Search Modes
+
+brainjar combines remote (Bedrock) and local (file) search for comprehensive results.
+
+```bash
+# Default: runs BOTH remote + local in parallel
 brainjar search "deployment workflow"
 
-# Status
-brainjar status
+# Remote only (Bedrock semantic search)
+brainjar search --remote "deployment workflow"
+
+# Local only (fuzzy matching — tolerates typos)
+brainjar search --local "branjiar"      # finds "brainjar"
+
+# Local exact (case-insensitive substring)
+brainjar search --local --exact "SUPABASE_SECRET_KEY"
+
+# JSON output (for programmatic use)
+brainjar search --json "paperclip agent"
 ```
 
-## Installation
+### Output Format
 
-### From crates.io
+**Human-readable:**
+```
+🔍 Results for "deployment workflow"
 
-```bash
-cargo install brainjar
+── Remote (Bedrock) ──────────────────────
+  1. [0.87] memory/operations.md
+     ...deploy skill handles all deployment workflows...
+
+  2. [0.74] MEMORY.md
+     ...Deploy skill: ~/.openclaw/homes/glitch/skills/deploy/...
+
+── Local (files) ─────────────────────────
+  1. [1.00] memory/2026-03-31.md:47
+     New deployment flow decided:
+  
+  2. [0.85] memory/infrastructure.md:12
+     Homelab (root@192.168.1.3), Public VPS (root@161.97.72.189)
 ```
 
-### From source
-
-```bash
-git clone https://github.com/farad-labs/brainjar
-cd brainjar
-cargo build --release
-cp target/release/brainjar ~/.local/bin/
+**JSON:**
+```json
+{
+  "remote": [
+    { "kb": "memory", "score": 0.87, "source_path": "memory/operations.md", "excerpt": "..." }
+  ],
+  "local": [
+    { "file": "memory/2026-03-31.md", "line": 47, "match": "New deployment flow decided:", "score": 1.0 }
+  ]
+}
 ```
 
-## Configuration
+### When to Use Each Mode
 
-`brainjar.toml` in your project root (or `~/.config/brainjar/config.toml` globally):
-
-```toml
-[aws]
-profile = "my-aws-profile"  # or use AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-region = "us-east-1"
-
-[knowledge_bases.memory]
-kb_id = "8KAXLVSBPD"
-data_source_id = "ZOGCSXXICI"
-s3_bucket = "my-memory-source-bucket"
-watch_paths = ["memory/", "MEMORY.md", "AGENTS.md"]
-auto_sync = true
-
-[knowledge_bases.codebase]
-kb_id = "FDQBH29QQL"
-data_source_id = "0GSZWQBPAD"
-s3_bucket = "my-code-kb-bucket"
-watch_paths = ["~/Code/my-project/docs/"]
-auto_sync = false  # manual sync only
-```
+| Mode | Best for | Example |
+|------|----------|---------|
+| Default (both) | General questions | "how does auth work?" |
+| `--remote` | Semantic/conceptual queries | "error handling patterns" |
+| `--local` | Finding specific strings, typo-tolerant | "SUPBASE_URL" |
+| `--local --exact` | Exact config values, env vars, URLs | "SUPABASE_SECRET_KEY" |
 
 ## Commands
 
@@ -89,28 +114,16 @@ brainjar sync --json       # JSON output
 
 ### `brainjar search <query>`
 
-Search across knowledge bases.
+Search across knowledge bases. See [Search Modes](#search-modes) above.
 
 ```bash
-brainjar search "deployment workflow"
-brainjar search "API keys" --kb memory
-brainjar search "database schema" --limit 10
-brainjar search "auth flow" --json
-```
-
-Example output:
-```
-🔍 Results for "deployment workflow" (3 matches)
-
-  1. [0.87] memory/operations.md
-     ...deploy skill handles all deployment workflows. Four modes:
-     homelab-static, homelab-docker, vps-static, vps-docker...
-
-  2. [0.74] MEMORY.md
-     ...Deploy skill: ~/.openclaw/homes/glitch/skills/deploy/...
-
-  3. [0.61] memory/infrastructure.md
-     ...Homelab (root@192.168.1.3), Public VPS (root@161.97.72.189)...
+brainjar search "query"                     # both remote + local
+brainjar search --local "query"             # local fuzzy only
+brainjar search --local --exact "query"     # local exact only
+brainjar search --remote "query"            # remote (Bedrock) only
+brainjar search --kb memory "query"         # specific KB
+brainjar search --limit 10 "query"          # more results
+brainjar search --json "query"              # JSON output
 ```
 
 ### `brainjar status [kb_name]`
@@ -118,9 +131,9 @@ Example output:
 Show KB health, file count, and last sync info.
 
 ```bash
-brainjar status
-brainjar status memory
-brainjar status --json
+brainjar status            # all KBs
+brainjar status memory     # specific KB
+brainjar status --json     # JSON output
 ```
 
 ### `brainjar init`
@@ -129,7 +142,11 @@ Interactive setup wizard — creates `brainjar.toml` and scaffolds Terraform tem
 
 ### `brainjar mcp`
 
-Run as an MCP server over stdio. Add to your Claude Code / Cursor config:
+Run as an MCP server over stdio.
+
+## MCP Integration
+
+Add to your Claude Code or Cursor config:
 
 ```json
 {
@@ -143,75 +160,82 @@ Run as an MCP server over stdio. Add to your Claude Code / Cursor config:
 }
 ```
 
-Available MCP tools:
-- `memory_search` — search across KBs
-- `memory_sync` — trigger sync
-- `memory_status` — get status
+### MCP Tools
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `memory_search` | Search across KBs | `query` (required), `mode` ("all"/"local"/"remote"), `exact` (bool), `kb`, `limit` |
+| `memory_sync` | Trigger file sync + ingestion | `kb`, `force` |
+| `memory_status` | Get KB status | `kb` |
+
+## Configuration
+
+`brainjar.toml` in your project root (or `~/.config/brainjar/config.toml` globally):
+
+```toml
+[aws]
+profile = "my-aws-profile"  # or use AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+region = "us-east-1"
+
+[knowledge_bases.memory]
+kb_id = "YOUR_KB_ID"
+data_source_id = "YOUR_DS_ID"
+s3_bucket = "your-memory-source-bucket"
+watch_paths = ["memory/", "MEMORY.md", "AGENTS.md"]
+auto_sync = true
+
+[knowledge_bases.docs]
+kb_id = "ANOTHER_KB_ID"
+data_source_id = "ANOTHER_DS_ID"
+s3_bucket = "your-docs-bucket"
+watch_paths = ["~/Code/my-project/docs/"]
+auto_sync = false  # manual sync only
+```
 
 ## AWS Infrastructure
 
-Run `brainjar init` to scaffold Terraform, or set up manually:
+brainjar requires:
 
 1. **S3 bucket** — stores source documents
 2. **S3 Vectors index** — vector storage (requires `awscc` Terraform provider)
-3. **Bedrock Knowledge Base** — Titan Embed V2, NONE chunking
-4. **IAM role** — Bedrock service role
+3. **Bedrock Knowledge Base** — configured with Titan Embed V2
+4. **IAM role** — Bedrock service role for S3 + embedding access
+5. **IAM user** — agent access for sync + search
 
-See [`terraform/README.md`](terraform/README.md) for full setup instructions.
+Run `brainjar init` to scaffold Terraform templates, or see the [terraform/](terraform/) directory.
+
+### Key Infrastructure Decisions
+
+- **S3 Vectors** (not OpenSearch) — ~$2-3/month vs $70+/month for OpenSearch Serverless
+- **NONE chunking** — each file = one vector; hierarchical/fixed chunking hits S3 Vectors' 2KB filterable metadata limit
+- **Non-filterable metadata** — `AMAZON_BEDROCK_TEXT` and `AMAZON_BEDROCK_METADATA` must be configured as non-filterable in the vector index
+- **Flat S3 keys** — `{sha256_of_relative_path}.md` avoids path encoding issues and metadata size limits
 
 ## Architecture
 
 ```
-brainjar sync
-  ↓
-Collect files from watch_paths
-  ↓
-Compute SHA256 of relative path → stable S3 key
-  ↓
-Compare with .brainjar/state.json
-  ↓
-Upload changed files to S3 (with metadata: source path)
-  ↓
-StartIngestionJob → poll until COMPLETE
-  ↓
-Update state.json
-
-brainjar search
-  ↓
-Bedrock Retrieve API
-  ↓
-Ranked results with source attribution
+brainjar sync                         brainjar search "query"
+  │                                     │
+  ├─ Walk watch_paths                   ├─ Remote: Bedrock Retrieve API
+  ├─ SHA256 content hash                │   └─ Semantic vector search
+  ├─ Compare with .brainjar/state.json  │
+  ├─ Upload changed files to S3         ├─ Local: nucleo fuzzy / exact
+  ├─ StartIngestionJob                  │   └─ Walk watch_paths, search line-by-line
+  └─ Update state.json                 │
+                                        └─ Merge + rank results
 ```
 
-### Key Design Decisions
+## Cost
 
-- **Flat S3 filenames** — `{sha256_of_relative_path}.md` avoids S3 path encoding issues and stays within S3 Vectors' 2KB metadata limit
-- **NONE chunking** — each file = one vector; hierarchical chunking hits metadata limits
-- **Content-addressed state** — state tracks SHA256 of file content to detect changes
-- **Non-filterable metadata** — `AMAZON_BEDROCK_TEXT` / `AMAZON_BEDROCK_METADATA` must be non-filterable in the vector index (handled by the Terraform templates)
+Running two knowledge bases with ~400 documents total:
 
-## State File
-
-`.brainjar/state.json` tracks sync state:
-
-```json
-{
-  "version": 1,
-  "knowledge_bases": {
-    "memory": {
-      "last_sync": "2026-03-31T01:37:00Z",
-      "last_ingestion_status": "COMPLETE",
-      "files": {
-        "memory/2026-03-31.md": {
-          "content_hash": "abc123...",
-          "s3_key": "def456...md",
-          "last_modified": "2026-03-31T01:37:00Z"
-        }
-      }
-    }
-  }
-}
-```
+| Resource | Monthly Cost |
+|----------|-------------|
+| S3 Vectors | ~$1-2 |
+| Bedrock (Titan Embed V2) | ~$0.50-1.00 |
+| S3 storage | ~$0.05 |
+| Cost Explorer API | ~$0.01 |
+| **Total** | **~$2-3/month** |
 
 ## License
 
