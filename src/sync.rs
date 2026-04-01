@@ -139,8 +139,8 @@ async fn sync_kb_human(
     }
 
     // ── Optional: entity extraction via configured LLM ──────────────────────
-    if let Some(extraction_cfg) = &config.extraction {
-        if extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+    if let Some(extraction_cfg) = &config.extraction
+        && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
             let extractor = Extractor::new(extraction_cfg);
             // Open graph DB (or create it)
             match KnowledgeGraph::open(&config.config_dir, kb_name) {
@@ -203,11 +203,10 @@ async fn sync_kb_human(
                 }
             }
         }
-    }
 
     // ── Optional: vector embeddings via sqlite-vec ───────────────────────────
-    if let Some(embed_cfg) = &config.embeddings {
-        if !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+    if let Some(embed_cfg) = &config.embeddings
+        && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
             let embedder = Embedder::new(embed_cfg);
             let paths_and_contents: Vec<(String, String)> = changes
                 .to_upsert
@@ -261,7 +260,6 @@ async fn sync_kb_human(
                 );
             }
         }
-    }
 
     println!("  {} Done", "✓".green().bold());
 
@@ -308,8 +306,8 @@ async fn sync_kb_json(
         // Optional entity extraction
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
-        if let Some(extraction_cfg) = &config.extraction {
-            if extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+        if let Some(extraction_cfg) = &config.extraction
+            && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
                 let extractor = Extractor::new(extraction_cfg);
                 if let Ok(kg) = KnowledgeGraph::open(&config.config_dir, kb_name) {
                     for (rel_path, abs_path) in &changes.to_upsert {
@@ -326,12 +324,11 @@ async fn sync_kb_json(
                     }
                 }
             }
-        }
 
         // Vector embeddings (JSON mode)
         let mut vectors_embedded = 0usize;
-        if let Some(embed_cfg) = &config.embeddings {
-            if !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+        if let Some(embed_cfg) = &config.embeddings
+            && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
                 let embedder = Embedder::new(embed_cfg);
                 let paths_and_contents: Vec<(String, String)> = changes
                     .to_upsert
@@ -357,7 +354,6 @@ async fn sync_kb_json(
                     }
                 }
             }
-        }
 
         result["status"] = serde_json::Value::String("COMPLETE".to_string());
         result["entities_extracted"] = serde_json::Value::Number(entities_extracted.into());

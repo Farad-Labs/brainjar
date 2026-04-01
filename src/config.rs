@@ -96,11 +96,10 @@ impl Config {
     }
 
     pub fn expand_path(&self, p: &str) -> PathBuf {
-        if p.starts_with('~') {
-            if let Some(home) = dirs::home_dir() {
+        if p.starts_with('~')
+            && let Some(home) = dirs::home_dir() {
                 return home.join(&p[2..]);
             }
-        }
         if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {

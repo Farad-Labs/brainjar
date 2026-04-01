@@ -139,7 +139,7 @@ pub async fn run_init() -> Result<()> {
             .interact_text()?;
         let api_key_env: String = if embed_provider != "ollama" {
             Input::with_theme(&theme)
-                .with_prompt("  API key env var (e.g. GEMINI_API_KEY)")
+                .with_prompt("  API key or env var name (e.g. GEMINI_API_KEY or paste raw key)")
                 .default(default_embed_env(embed_provider).to_string())
                 .interact_text()?
         } else {
@@ -180,7 +180,7 @@ pub async fn run_init() -> Result<()> {
             .interact_text()?;
         let api_key_env: String = if extract_provider != "ollama" {
             Input::with_theme(&theme)
-                .with_prompt("  API key env var (e.g. GEMINI_API_KEY)")
+                .with_prompt("  API key or env var name (e.g. GEMINI_API_KEY or paste raw key)")
                 .default(default_embed_env(extract_provider).to_string())
                 .interact_text()?
         } else {
@@ -252,6 +252,13 @@ fn prompt_watch_paths() -> Result<Vec<String>> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+/// Heuristic: env var names are ALL_CAPS_WITH_UNDERSCORES, raw keys are not.
+fn is_env_var_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 // brainjar.toml generation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -271,7 +278,11 @@ fn generate_brainjar_toml(
         toml.push_str(&format!("provider   = \"{}\"\n", provider));
         toml.push_str(&format!("model      = \"{}\"\n", model));
         if !api_key_env.is_empty() {
-            toml.push_str(&format!("api_key    = \"${{{}}}\"\n", api_key_env));
+            if is_env_var_name(api_key_env) {
+                toml.push_str(&format!("api_key    = \"${{{}}}\"\n", api_key_env));
+            } else {
+                toml.push_str(&format!("api_key    = \"{}\"\n", api_key_env));
+            }
         }
         if !base_url.is_empty() {
             toml.push_str(&format!("base_url   = \"{}\"\n", base_url));
@@ -285,7 +296,11 @@ fn generate_brainjar_toml(
         toml.push_str(&format!("provider = \"{}\"\n", provider));
         toml.push_str(&format!("model    = \"{}\"\n", model));
         if !api_key_env.is_empty() {
-            toml.push_str(&format!("api_key  = \"${{{}}}\"\n", api_key_env));
+            if is_env_var_name(api_key_env) {
+                toml.push_str(&format!("api_key  = \"${{{}}}\"\n", api_key_env));
+            } else {
+                toml.push_str(&format!("api_key  = \"{}\"\n", api_key_env));
+            }
         }
         toml.push_str("enabled  = true\n\n");
     }

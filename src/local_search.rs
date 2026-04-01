@@ -152,7 +152,7 @@ fn search_path(
                 }
             } else {
                 // Fuzzy match with nucleo
-                if let (Some(ref atom_ref), Some(ref mut m)) = (&atom, &mut matcher) {
+                if let (Some(atom_ref), Some(m)) = (&atom, &mut matcher) {
                     let mut buf = Vec::new();
                     let haystack = Utf32Str::new(trimmed, &mut buf);
                     if let Some(score) = atom_ref.score(haystack, m) {
