@@ -7,13 +7,23 @@ use crate::config::EmbeddingConfig;
 /// Pluggable embedding provider.
 pub struct Embedder {
     config: EmbeddingConfig,
+    /// Resolved API key (already env-expanded, if applicable).
+    api_key: Option<String>,
+    /// Resolved base URL (used by Ollama).
+    base_url: Option<String>,
     client: reqwest::Client,
 }
 
 impl Embedder {
-    pub fn new(config: &EmbeddingConfig) -> Self {
+    /// Create an Embedder.
+    ///
+    /// `api_key` and `base_url` should already be resolved from the provider
+    /// config (see `Config::resolve_api_key` / `Config::resolve_base_url`).
+    pub fn new(config: &EmbeddingConfig, api_key: Option<String>, base_url: Option<String>) -> Self {
         Self {
             config: config.clone(),
+            api_key,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -38,7 +48,7 @@ impl Embedder {
 
 impl Embedder {
     async fn embed_gemini(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let api_key = self.resolve_api_key()?;
+        let api_key = self.require_api_key()?;
 
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
@@ -81,7 +91,7 @@ impl Embedder {
     }
 
     async fn embed_openai(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let api_key = self.resolve_api_key()?;
+        let api_key = self.require_api_key()?;
         let url = "https://api.openai.com/v1/embeddings";
 
         let body = serde_json::json!({
@@ -122,7 +132,6 @@ impl Embedder {
 
     async fn embed_ollama(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let base_url = self
-            .config
             .base_url
             .as_deref()
             .unwrap_or("http://localhost:11434");
@@ -162,18 +171,17 @@ impl Embedder {
         Ok(result)
     }
 
-    fn resolve_api_key(&self) -> Result<String> {
-        match &self.config.api_key {
-            Some(key) if key.starts_with("${") && key.ends_with('}') => {
-                let var_name = &key[2..key.len() - 1];
-                std::env::var(var_name)
-                    .with_context(|| format!("Env var {} not set (required by embedding config)", var_name))
-            }
-            Some(key) => Ok(key.clone()),
-            None => anyhow::bail!(
-                "No api_key configured for embedding provider '{}'",
-                self.config.provider
-            ),
-        }
+    fn require_api_key(&self) -> Result<&str> {
+        self.api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No api_key configured for embedding provider '{}'. \
+                     Set it under [providers.{}] in brainjar.toml.",
+                    self.config.provider,
+                    self.config.provider
+                )
+            })
     }
 }

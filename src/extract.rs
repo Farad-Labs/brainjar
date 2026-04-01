@@ -17,13 +17,23 @@ pub struct ExtractionResult {
 /// Pluggable LLM-backed entity extractor.
 pub struct Extractor {
     config: ExtractionConfig,
+    /// Resolved API key (already env-expanded).
+    api_key: Option<String>,
+    /// Resolved base URL (used by Ollama).
+    base_url: Option<String>,
     client: reqwest::Client,
 }
 
 impl Extractor {
-    pub fn new(config: &ExtractionConfig) -> Self {
+    /// Create an Extractor.
+    ///
+    /// `api_key` and `base_url` should already be resolved from the provider
+    /// config (see `Config::resolve_api_key` / `Config::resolve_base_url`).
+    pub fn new(config: &ExtractionConfig, api_key: Option<String>, base_url: Option<String>) -> Self {
         Self {
             config: config.clone(),
+            api_key,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -44,7 +54,7 @@ impl Extractor {
 
 impl Extractor {
     async fn extract_gemini(&self, prompt: &str) -> Result<ExtractionResult> {
-        let api_key = self.resolve_api_key()?;
+        let api_key = self.require_api_key()?;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.config.model, api_key
@@ -70,7 +80,7 @@ impl Extractor {
     }
 
     async fn extract_openai(&self, prompt: &str) -> Result<ExtractionResult> {
-        let api_key = self.resolve_api_key()?;
+        let api_key = self.require_api_key()?;
         let url = "https://api.openai.com/v1/chat/completions";
         let body = serde_json::json!({
             "model": self.config.model,
@@ -96,7 +106,6 @@ impl Extractor {
 
     async fn extract_ollama(&self, prompt: &str) -> Result<ExtractionResult> {
         let base_url = self
-            .config
             .base_url
             .as_deref()
             .unwrap_or("http://localhost:11434");
@@ -121,16 +130,18 @@ impl Extractor {
         parse_extraction_result(text)
     }
 
-    fn resolve_api_key(&self) -> Result<String> {
-        match &self.config.api_key {
-            Some(key) if key.starts_with("${") && key.ends_with('}') => {
-                let var_name = &key[2..key.len() - 1];
-                std::env::var(var_name)
-                    .with_context(|| format!("Env var {} not set (required by extraction config)", var_name))
-            }
-            Some(key) => Ok(key.clone()),
-            None => anyhow::bail!("No api_key configured for extraction provider '{}'", self.config.provider),
-        }
+    fn require_api_key(&self) -> Result<&str> {
+        self.api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No api_key configured for extraction provider '{}'. \
+                     Set it under [providers.{}] in brainjar.toml.",
+                    self.config.provider,
+                    self.config.provider
+                )
+            })
     }
 }
 

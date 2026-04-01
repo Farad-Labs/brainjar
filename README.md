@@ -116,9 +116,9 @@ Graph search traverses entity relationships to find documents connected to your 
 
 | Backend | Config | Notes |
 |---------|--------|-------|
-| Gemini | `backend = "gemini"` | Flash Lite recommended for cost |
-| OpenAI | `backend = "openai"` | GPT-4o-mini works well |
-| Ollama | `backend = "ollama"` | Local LLM, no API cost |
+| Gemini | `provider = "gemini"` | Flash Lite recommended for cost |
+| OpenAI | `provider = "openai"` | GPT-4o-mini works well |
+| Ollama | `provider = "ollama"` | Local LLM, no API cost |
 
 ## Configuration
 
@@ -130,37 +130,42 @@ brainjar looks for config at:
 ```toml
 # brainjar.toml
 
+[providers]
+gemini.api_key = "${GEMINI_API_KEY}"
+openai.api_key = "${OPENAI_API_KEY}"
+# ollama.base_url = "http://localhost:11434"
+
 [knowledge_bases.personal]
-paths = ["~/Documents/notes", "~/Documents/journal"]
+watch_paths = ["~/Documents/notes", "~/Documents/journal"]
 auto_sync = true
 
 [knowledge_bases.localpage]
-paths = ["~/Code/localpage-kb"]
+watch_paths = ["~/Code/localpage-kb"]
 auto_sync = true
 
 # Optional: entity extraction via LLM
 [extraction]
-enabled = true
-backend = "gemini"
+provider = "gemini"
 model = "gemini-3.1-flash-lite-preview"
-api_key_env = "GOOGLE_API_KEY"
+enabled = true
 
-# Optional: vector embeddings (Phase 3 — coming soon)
-# [embeddings]
-# backend = "openai"
-# model = "text-embedding-3-small"
+# Optional: vector embeddings (coming soon)
+[embeddings]
+provider = "gemini"
+model = "text-embedding-004"
+dimensions = 768
 ```
 
 ### Knowledge Base Options
 
 ```toml
 [knowledge_bases.myproject]
-paths = [
+watch_paths = [
   "~/Code/myproject/docs",          # directory
   "~/Code/myproject/README.md",     # single file
   "~/Code/myproject/**/*.md",       # glob
 ]
-auto_sync = true    # included in `brainjar sync` without specifying a name
+auto_sync = true    # included in `brainjar sync` without --kb flag
 ```
 
 ## MCP Server

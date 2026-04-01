@@ -3,8 +3,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderConfig {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Per-provider credentials (api_key, base_url).
+    /// Keys: "gemini", "openai", "ollama", etc.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     pub knowledge_bases: HashMap<String, KnowledgeBaseConfig>,
     pub embeddings: Option<EmbeddingConfig>,
@@ -25,7 +35,10 @@ pub struct KnowledgeBaseConfig {
 pub struct EmbeddingConfig {
     pub provider: String, // "gemini", "openai", "ollama"
     pub model: String,
+    /// Backward-compat: api_key directly on embeddings section.
+    /// Prefer [providers.<name>].api_key over this.
     pub api_key: Option<String>,
+    /// Backward-compat: base_url directly on embeddings section.
     pub base_url: Option<String>,
     pub dimensions: usize,
 }
@@ -34,7 +47,9 @@ pub struct EmbeddingConfig {
 pub struct ExtractionConfig {
     pub provider: String,
     pub model: String,
+    /// Backward-compat: api_key directly on extraction section.
     pub api_key: Option<String>,
+    /// Backward-compat: base_url directly on extraction section.
     pub base_url: Option<String>,
     pub enabled: bool,
 }
@@ -87,6 +102,28 @@ fn find_config() -> Result<PathBuf> {
 }
 
 impl Config {
+    /// Resolve the API key for a given provider name.
+    /// Prefers `[providers.<name>].api_key`, falls back to the supplied
+    /// `legacy_key` (the `api_key` field on `[embeddings]` / `[extraction]`).
+    pub fn resolve_api_key(&self, provider: &str, legacy_key: Option<&str>) -> Option<String> {
+        // Prefer providers section
+        if let Some(p) = self.providers.get(provider)
+            && p.api_key.is_some() {
+                return p.api_key.as_ref().map(|k| expand_env_var(k));
+            }
+        // Fall back to legacy inline key
+        legacy_key.map(expand_env_var)
+    }
+
+    /// Resolve the base_url for a given provider name.
+    pub fn resolve_base_url(&self, provider: &str, legacy_url: Option<&str>) -> Option<String> {
+        if let Some(p) = self.providers.get(provider)
+            && p.base_url.is_some() {
+                return p.base_url.clone();
+            }
+        legacy_url.map(|s| s.to_string())
+    }
+
     /// Expand watch paths relative to the config dir, with ~ support
     pub fn expand_watch_paths(&self, kb: &KnowledgeBaseConfig) -> Vec<PathBuf> {
         kb.watch_paths
@@ -105,5 +142,15 @@ impl Config {
         } else {
             self.config_dir.join(p)
         }
+    }
+}
+
+/// Expand `${VAR_NAME}` env-var references in an API key value.
+fn expand_env_var(key: &str) -> String {
+    if key.starts_with("${") && key.ends_with('}') {
+        let var_name = &key[2..key.len() - 1];
+        std::env::var(var_name).unwrap_or_default()
+    } else {
+        key.to_string()
     }
 }

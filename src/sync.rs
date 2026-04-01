@@ -141,7 +141,9 @@ async fn sync_kb_human(
     // ── Optional: entity extraction via configured LLM ──────────────────────
     if let Some(extraction_cfg) = &config.extraction
         && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
-            let extractor = Extractor::new(extraction_cfg);
+            let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
+            let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
+            let extractor = Extractor::new(extraction_cfg, api_key, base_url);
             // Open graph DB (or create it)
             match KnowledgeGraph::open(&config.config_dir, kb_name) {
                 Ok(kg) => {
@@ -207,7 +209,9 @@ async fn sync_kb_human(
     // ── Optional: vector embeddings via sqlite-vec ───────────────────────────
     if let Some(embed_cfg) = &config.embeddings
         && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
-            let embedder = Embedder::new(embed_cfg);
+            let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+            let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+            let embedder = Embedder::new(embed_cfg, api_key, base_url);
             let paths_and_contents: Vec<(String, String)> = changes
                 .to_upsert
                 .iter()
@@ -308,7 +312,9 @@ async fn sync_kb_json(
         let mut rels_extracted = 0usize;
         if let Some(extraction_cfg) = &config.extraction
             && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
-                let extractor = Extractor::new(extraction_cfg);
+                let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
+                let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
+                let extractor = Extractor::new(extraction_cfg, api_key, base_url);
                 if let Ok(kg) = KnowledgeGraph::open(&config.config_dir, kb_name) {
                     for (rel_path, abs_path) in &changes.to_upsert {
                         let content = match std::fs::read_to_string(abs_path) {
@@ -329,7 +335,9 @@ async fn sync_kb_json(
         let mut vectors_embedded = 0usize;
         if let Some(embed_cfg) = &config.embeddings
             && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
-                let embedder = Embedder::new(embed_cfg);
+                let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+                let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+                let embedder = Embedder::new(embed_cfg, api_key, base_url);
                 let paths_and_contents: Vec<(String, String)> = changes
                     .to_upsert
                     .iter()

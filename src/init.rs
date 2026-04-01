@@ -52,6 +52,13 @@ struct KbConfig {
     auto_sync: bool,
 }
 
+/// Provider credentials gathered from the wizard.
+struct ProviderCreds {
+    gemini_api_key: String,
+    openai_api_key: String,
+    ollama_base_url: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,8 +85,39 @@ pub async fn run_init() -> Result<()> {
         }
     }
 
+    // ── Provider credentials ──────────────────────────────────────────────────
+    println!("{}", "── Provider credentials ───────────────────────────".dimmed());
+    println!(
+        "  {}",
+        "Set API keys/URLs here once; embeddings and extraction will reference them.".dimmed()
+    );
+
+    let gemini_key: String = Input::with_theme(&theme)
+        .with_prompt("  Gemini API key or env var (e.g. GEMINI_API_KEY, or leave blank)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()?;
+
+    let openai_key: String = Input::with_theme(&theme)
+        .with_prompt("  OpenAI API key or env var (e.g. OPENAI_API_KEY, or leave blank)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()?;
+
+    let ollama_url: String = Input::with_theme(&theme)
+        .with_prompt("  Ollama base URL (leave blank for default http://localhost:11434)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()?;
+
+    let providers = ProviderCreds {
+        gemini_api_key: gemini_key,
+        openai_api_key: openai_key,
+        ollama_base_url: ollama_url,
+    };
+
     // ── Knowledge bases ───────────────────────────────────────────────────────
-    println!("{}", "── Knowledge bases ────────────────────────────────".dimmed());
+    println!("\n{}", "── Knowledge bases ────────────────────────────────".dimmed());
 
     let kb_count: usize = Input::with_theme(&theme)
         .with_prompt("How many knowledge bases?")
@@ -106,7 +144,10 @@ pub async fn run_init() -> Result<()> {
         }
 
         let auto_sync = Confirm::with_theme(&theme)
-            .with_prompt(format!("  Enable auto_sync for '{}'?", name))
+            .with_prompt(format!(
+                "  Enable auto_sync for '{}'? (included in `brainjar sync` without --kb flag)",
+                name
+            ))
             .default(true)
             .interact()?;
 
@@ -121,7 +162,7 @@ pub async fn run_init() -> Result<()> {
     println!("\n{}", "── Embedding provider (optional) ──────────────────".dimmed());
     println!(
         "  {}",
-        "Used for vector search (coming in phase 2). Skip for FTS + fuzzy only.".dimmed()
+        "Used for vector/semantic search. Skip for FTS + fuzzy only.".dimmed()
     );
 
     let embed_providers = &["none", "gemini", "openai", "ollama"];
@@ -137,23 +178,7 @@ pub async fn run_init() -> Result<()> {
             .with_prompt("  Embedding model")
             .default(default_embed_model(embed_provider).to_string())
             .interact_text()?;
-        let api_key_env: String = if embed_provider != "ollama" {
-            Input::with_theme(&theme)
-                .with_prompt("  API key or env var name (e.g. GEMINI_API_KEY or paste raw key)")
-                .default(default_embed_env(embed_provider).to_string())
-                .interact_text()?
-        } else {
-            String::new()
-        };
-        let base_url: String = if embed_provider == "ollama" {
-            Input::with_theme(&theme)
-                .with_prompt("  Ollama base URL")
-                .default("http://localhost:11434".to_string())
-                .interact_text()?
-        } else {
-            String::new()
-        };
-        Some((embed_provider.to_string(), model, api_key_env, base_url))
+        Some((embed_provider.to_string(), model))
     } else {
         None
     };
@@ -162,7 +187,7 @@ pub async fn run_init() -> Result<()> {
     println!("\n{}", "── Extraction provider (optional) ─────────────────".dimmed());
     println!(
         "  {}",
-        "Used for entity extraction (coming in phase 2). Skip for FTS + fuzzy only.".dimmed()
+        "Used for GraphRAG entity/relationship extraction. Skip for FTS + fuzzy only.".dimmed()
     );
 
     let extract_providers = &["none", "gemini", "openai", "ollama"];
@@ -178,22 +203,19 @@ pub async fn run_init() -> Result<()> {
             .with_prompt("  Extraction model")
             .default(default_extract_model(extract_provider).to_string())
             .interact_text()?;
-        let api_key_env: String = if extract_provider != "ollama" {
-            Input::with_theme(&theme)
-                .with_prompt("  API key or env var name (e.g. GEMINI_API_KEY or paste raw key)")
-                .default(default_embed_env(extract_provider).to_string())
-                .interact_text()?
-        } else {
-            String::new()
-        };
-        Some((extract_provider.to_string(), model, api_key_env))
+        Some((extract_provider.to_string(), model))
     } else {
         None
     };
 
     // ── Generate brainjar.toml ────────────────────────────────────────────────
     println!();
-    generate_brainjar_toml(&knowledge_bases, embedding_config.as_ref(), extraction_config.as_ref())?;
+    generate_brainjar_toml(
+        &knowledge_bases,
+        &providers,
+        embedding_config.as_ref(),
+        extraction_config.as_ref(),
+    )?;
 
     // ── Create .brainjar directory ────────────────────────────────────────────
     std::fs::create_dir_all(".brainjar").context("Failed to create .brainjar directory")?;
@@ -259,49 +281,77 @@ fn is_env_var_name(s: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 // brainjar.toml generation
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn format_api_key_value(key: &str) -> String {
+    if key.is_empty() {
+        String::from("\"\"")
+    } else if is_env_var_name(key) {
+        format!("\"${{{}}}\"", key)
+    } else {
+        format!("\"{}\"", key)
+    }
+}
+
 fn generate_brainjar_toml(
     kbs: &[KbConfig],
-    embedding: Option<&(String, String, String, String)>,
-    extraction: Option<&(String, String, String)>,
+    providers: &ProviderCreds,
+    embedding: Option<&(String, String)>,
+    extraction: Option<&(String, String)>,
 ) -> Result<()> {
     let mut toml = String::from(
         "# brainjar.toml — Knowledge base configuration\n\
          # Generated by `brainjar init`\n\n",
     );
 
-    // Embedding section
-    if let Some((provider, model, api_key_env, base_url)) = embedding {
+    // [providers] section — always emitted so keys are in one place
+    toml.push_str("[providers]\n");
+
+    let has_gemini = !providers.gemini_api_key.is_empty();
+    let has_openai = !providers.openai_api_key.is_empty();
+    let has_ollama = !providers.ollama_base_url.is_empty();
+
+    if has_gemini {
+        toml.push_str(&format!(
+            "gemini.api_key = {}\n",
+            format_api_key_value(&providers.gemini_api_key)
+        ));
+    } else {
+        toml.push_str("# gemini.api_key = \"${GEMINI_API_KEY}\"\n");
+    }
+
+    if has_openai {
+        toml.push_str(&format!(
+            "openai.api_key = {}\n",
+            format_api_key_value(&providers.openai_api_key)
+        ));
+    } else {
+        toml.push_str("# openai.api_key = \"${OPENAI_API_KEY}\"\n");
+    }
+
+    if has_ollama {
+        toml.push_str(&format!("ollama.base_url = \"{}\"\n", providers.ollama_base_url));
+    } else {
+        toml.push_str("# ollama.base_url = \"http://localhost:11434\"\n");
+    }
+
+    toml.push('\n');
+
+    // [embeddings] section
+    if let Some((provider, model)) = embedding {
         toml.push_str("[embeddings]\n");
         toml.push_str(&format!("provider   = \"{}\"\n", provider));
         toml.push_str(&format!("model      = \"{}\"\n", model));
-        if !api_key_env.is_empty() {
-            if is_env_var_name(api_key_env) {
-                toml.push_str(&format!("api_key    = \"${{{}}}\"\n", api_key_env));
-            } else {
-                toml.push_str(&format!("api_key    = \"{}\"\n", api_key_env));
-            }
-        }
-        if !base_url.is_empty() {
-            toml.push_str(&format!("base_url   = \"{}\"\n", base_url));
-        }
         toml.push_str("dimensions = 768\n\n");
     }
 
-    // Extraction section
-    if let Some((provider, model, api_key_env)) = extraction {
+    // [extraction] section
+    if let Some((provider, model)) = extraction {
         toml.push_str("[extraction]\n");
         toml.push_str(&format!("provider = \"{}\"\n", provider));
         toml.push_str(&format!("model    = \"{}\"\n", model));
-        if !api_key_env.is_empty() {
-            if is_env_var_name(api_key_env) {
-                toml.push_str(&format!("api_key  = \"${{{}}}\"\n", api_key_env));
-            } else {
-                toml.push_str(&format!("api_key  = \"{}\"\n", api_key_env));
-            }
-        }
         toml.push_str("enabled  = true\n\n");
     }
 
@@ -383,13 +433,5 @@ fn default_extract_model(provider: &str) -> &'static str {
         "openai" => "gpt-4o-mini",
         "ollama" => "llama3",
         _ => "gemini-3.1-flash-lite-preview",
-    }
-}
-
-fn default_embed_env(provider: &str) -> &'static str {
-    match provider {
-        "gemini" => "GEMINI_API_KEY",
-        "openai" => "OPENAI_API_KEY",
-        _ => "API_KEY",
     }
 }

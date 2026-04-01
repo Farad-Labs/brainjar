@@ -187,7 +187,9 @@ pub async fn run_search(
     // Vector KNN search
     let vector_results: Vec<VectorResult> = if run_vector {
         if let Some(embed_cfg) = &config.embeddings {
-            let embedder = Embedder::new(embed_cfg);
+            let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+            let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+            let embedder = Embedder::new(embed_cfg, api_key, base_url);
             match embedder.embed_batch(&[search_query]).await {
                 Ok(vecs) if !vecs.is_empty() => {
                     let query_vec = &vecs[0];

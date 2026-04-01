@@ -1,9 +1,9 @@
 [package]
 name = "brainjar"
-version = "2.0.0"
+version = "0.1.0"
 edition = "2024"
 description = "AI agent memory with local SQLite backend — FTS5, fuzzy, and vector search"
-authors = ["Glitch <glitch@farad.dev>"]
+authors = ["Luke Libraro <luke@farad.dev>"]
 license = "MIT"
 repository = "https://github.com/farad-labs/brainjar"
 readme = "README.md"
