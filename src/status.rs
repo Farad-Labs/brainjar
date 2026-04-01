@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 
-use crate::aws::build_clients;
 use crate::config::{Config, KnowledgeBaseConfig};
-use crate::state::State;
+use crate::db;
+use crate::graph::KnowledgeGraph;
 
 pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> Result<()> {
     let kbs: Vec<(&str, &KnowledgeBaseConfig)> = if let Some(name) = kb_name {
@@ -20,69 +20,50 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
             .collect()
     };
 
-    let clients = build_clients(&config.aws).await?;
-    let state = State::load(&config.config_dir)?;
-
     let mut all_statuses = Vec::new();
 
     for (name, kb) in &kbs {
-        let kb_state = state.kb_state(name);
+        let db_dir = config.config_dir.join(".brainjar");
+        let db_path = db_dir.join(format!("{}.db", name));
+        let db_exists = db_path.exists();
 
-        // Try to fetch live KB info from Bedrock
-        let kb_info = clients
-            .bedrock_agent
-            .get_knowledge_base()
-            .knowledge_base_id(&kb.kb_id)
-            .send()
-            .await
-            .ok();
+        let (doc_count, last_sync) = if db_exists {
+            let conn = db::open_db(name, &config.config_dir)?;
+            let count = db::count_documents(&conn)?;
+            let sync_time = db::get_meta(&conn, "last_sync")?.unwrap_or_else(|| "Never".to_string());
+            (count, sync_time)
+        } else {
+            (0, "Never (DB not initialized — run brainjar sync)".to_string())
+        };
 
-        let ds_info = clients
-            .bedrock_agent
-            .get_data_source()
-            .knowledge_base_id(&kb.kb_id)
-            .data_source_id(&kb.data_source_id)
-            .send()
-            .await
-            .ok();
-
-        let kb_status = kb_info
-            .as_ref()
-            .and_then(|r| r.knowledge_base())
-            .map(|kb| format!("{:?}", kb.status()))
-            .unwrap_or_else(|| "UNKNOWN".to_string());
-
-        let ds_status = ds_info
-            .as_ref()
-            .and_then(|r| r.data_source())
-            .map(|ds| format!("{:?}", ds.status()))
-            .unwrap_or_else(|| "UNKNOWN".to_string());
-
-        let file_count = kb_state.files.len();
-        let last_sync = kb_state
-            .last_sync
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_else(|| "Never".to_string());
-        let last_ingestion = kb_state
-            .last_ingestion_status
-            .clone()
-            .unwrap_or_else(|| "Never".to_string());
+        // Graph stats (optional — only if graph DB exists)
+        let graph_stats: Option<crate::graph::GraphStats> = if db_exists
+            && KnowledgeGraph::exists(&config.config_dir, name)
+        {
+            KnowledgeGraph::open(&config.config_dir, name)
+                .ok()
+                .and_then(|kg| kg.stats().ok())
+        } else {
+            None
+        };
 
         if json {
-            all_statuses.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": name,
-                "kb_id": kb.kb_id,
-                "data_source_id": kb.data_source_id,
-                "s3_bucket": kb.s3_bucket,
-                "kb_status": kb_status,
-                "ds_status": ds_status,
-                "tracked_files": file_count,
+                "db_path": db_path.display().to_string(),
+                "db_exists": db_exists,
+                "document_count": doc_count,
                 "last_sync": last_sync,
-                "last_ingestion": last_ingestion,
                 "auto_sync": kb.auto_sync,
-            }));
+                "watch_paths": kb.watch_paths,
+            });
+            if let Some(ref gs) = graph_stats {
+                entry["graph_nodes"] = serde_json::Value::Number(gs.node_count.into());
+                entry["graph_edges"] = serde_json::Value::Number(gs.edge_count.into());
+            }
+            all_statuses.push(entry);
         } else {
-            print_kb_status(name, kb, &kb_status, &ds_status, file_count, &last_sync, &last_ingestion);
+            print_kb_status(name, kb, db_exists, doc_count, &last_sync, graph_stats.as_ref());
         }
     }
 
@@ -96,61 +77,62 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
 fn print_kb_status(
     name: &str,
     kb: &KnowledgeBaseConfig,
-    kb_status: &str,
-    ds_status: &str,
-    file_count: usize,
+    db_exists: bool,
+    doc_count: i64,
     last_sync: &str,
-    last_ingestion: &str,
+    graph_stats: Option<&crate::graph::GraphStats>,
 ) {
     println!("\n{} {}", "📦".cyan(), name.bold().white());
-    println!("  {:<20} {}", "KB ID:".dimmed(), kb.kb_id.cyan());
-    println!("  {:<20} {}", "Data Source ID:".dimmed(), kb.data_source_id.cyan());
-    println!("  {:<20} s3://{}", "S3 Bucket:".dimmed(), kb.s3_bucket.cyan());
     println!(
         "  {:<20} {}",
-        "KB Status:".dimmed(),
-        colorize_status(kb_status)
+        "Backend:".dimmed(),
+        "SQLite (local)".cyan()
     );
     println!(
         "  {:<20} {}",
-        "DS Status:".dimmed(),
-        colorize_status(ds_status)
+        "DB exists:".dimmed(),
+        if db_exists {
+            "yes".green().to_string()
+        } else {
+            "no (run brainjar sync)".yellow().to_string()
+        }
     );
     println!(
         "  {:<20} {}",
-        "Tracked Files:".dimmed(),
-        file_count.to_string().cyan()
+        "Documents:".dimmed(),
+        doc_count.to_string().cyan()
     );
     println!(
         "  {:<20} {}",
-        "Last Sync:".dimmed(),
+        "Last sync:".dimmed(),
         last_sync.dimmed()
     );
     println!(
         "  {:<20} {}",
-        "Last Ingestion:".dimmed(),
-        colorize_status(last_ingestion)
-    );
-    println!(
-        "  {:<20} {}",
-        "Auto Sync:".dimmed(),
+        "Auto sync:".dimmed(),
         if kb.auto_sync {
             "yes".green().to_string()
         } else {
             "no".dimmed().to_string()
         }
     );
-}
-
-fn colorize_status(status: &str) -> colored::ColoredString {
-    match status {
-        s if s.contains("ACTIVE") || s.contains("COMPLETE") || s.contains("AVAILABLE") => {
-            s.green()
-        }
-        s if s.contains("FAIL") || s.contains("ERROR") || s.contains("DELETE") => s.red(),
-        s if s.contains("PROGRESS") || s.contains("STARTING") || s.contains("CREATING") => {
-            s.yellow()
-        }
-        s => s.dimmed(),
+    println!(
+        "  {:<20} {}",
+        "Watch paths:".dimmed(),
+        kb.watch_paths.join(", ").dimmed()
+    );
+    if let Some(gs) = graph_stats {
+        println!(
+            "  {:<20} {} nodes, {} edges",
+            "Graph:".dimmed(),
+            gs.node_count.to_string().cyan(),
+            gs.edge_count.to_string().cyan(),
+        );
+    } else {
+        println!(
+            "  {:<20} {}",
+            "Graph:".dimmed(),
+            "not built (run brainjar sync with extraction enabled)".dimmed()
+        );
     }
 }

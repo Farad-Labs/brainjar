@@ -5,28 +5,38 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub aws: AwsConfig,
     #[serde(default)]
     pub knowledge_bases: HashMap<String, KnowledgeBaseConfig>,
+    pub embeddings: Option<EmbeddingConfig>,
+    pub extraction: Option<ExtractionConfig>,
     /// Path to the config file (not serialized)
     #[serde(skip)]
     pub config_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AwsConfig {
-    pub profile: Option<String>,
-    pub region: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeBaseConfig {
-    pub kb_id: String,
-    pub data_source_id: String,
-    pub s3_bucket: String,
     pub watch_paths: Vec<String>,
     #[serde(default)]
     pub auto_sync: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    pub provider: String, // "gemini", "openai", "ollama"
+    pub model: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub dimensions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionConfig {
+    pub provider: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub enabled: bool,
 }
 
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {

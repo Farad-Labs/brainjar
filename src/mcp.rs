@@ -128,7 +128,7 @@ fn handle_tools_list() -> Result<Value> {
         "tools": [
             {
                 "name": "memory_search",
-                "description": "Search across knowledge bases for relevant memories and context. Runs both remote Bedrock hybrid search and local fuzzy file search by default.",
+                "description": "Search across knowledge bases for relevant memories and context. Runs both FTS5 text search and local fuzzy file search by default.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -147,13 +147,13 @@ fn handle_tools_list() -> Result<Value> {
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["all", "local", "remote"],
-                            "description": "Search mode: 'all' runs both remote (Bedrock) and local fuzzy search (default), 'local' runs only local file search, 'remote' runs only Bedrock search",
+                            "enum": ["all", "local", "text", "graph"],
+                            "description": "Search mode: 'all' runs FTS5 + fuzzy + graph (default), 'local' runs only fuzzy search, 'text' runs only FTS5, 'graph' runs entity graph traversal",
                             "default": "all"
                         },
                         "exact": {
                             "type": "boolean",
-                            "description": "Use exact (case-insensitive substring) matching for local search instead of fuzzy matching",
+                            "description": "Use exact (case-insensitive substring) matching for local search instead of fuzzy",
                             "default": false
                         }
                     },
@@ -162,7 +162,7 @@ fn handle_tools_list() -> Result<Value> {
             },
             {
                 "name": "memory_sync",
-                "description": "Sync files to S3 and trigger Bedrock ingestion",
+                "description": "Sync files to the local SQLite index",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -172,7 +172,7 @@ fn handle_tools_list() -> Result<Value> {
                         },
                         "force": {
                             "type": "boolean",
-                            "description": "Force re-upload of all files",
+                            "description": "Force re-index of all files",
                             "default": false
                         }
                     }
@@ -180,7 +180,7 @@ fn handle_tools_list() -> Result<Value> {
             },
             {
                 "name": "memory_status",
-                "description": "Get knowledge base status including last sync time and file count",
+                "description": "Get knowledge base status including document count and last sync time",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -213,86 +213,83 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             let exact = args.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
             let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("all");
+
             let mode = match mode_str {
                 "local" => crate::search::SearchMode::Local,
-                "remote" => crate::search::SearchMode::Remote,
+                "text" => crate::search::SearchMode::Text,
+                "graph" => crate::search::SearchMode::Graph,
                 _ => crate::search::SearchMode::All,
             };
 
-            let run_remote = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Remote);
+            let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text);
             let run_local = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Local);
+            let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph);
 
-            // Run both searches in parallel
-            let remote_future = async {
-                if !run_remote {
-                    return Ok::<Vec<crate::search::SearchResult>, anyhow::Error>(Vec::new());
-                }
-                let clients = crate::aws::build_clients(&config.aws).await?;
-                let state = crate::state::State::load(&config.config_dir)?;
-                let mut all_results: Vec<crate::search::SearchResult> = Vec::new();
-
-                let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
-                    if let Some(k) = config.knowledge_bases.get(name) {
-                        vec![(name, k)]
-                    } else {
-                        return Err(anyhow::anyhow!("KB '{}' not found", name));
-                    }
+            // Determine KBs to search
+            let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
+                if let Some(k) = config.knowledge_bases.get(name) {
+                    vec![(name, k)]
                 } else {
-                    config
-                        .knowledge_bases
-                        .iter()
-                        .map(|(n, k)| (n.as_str(), k))
-                        .collect()
-                };
+                    return Ok(tool_error(format!("KB '{}' not found", name)));
+                }
+            } else {
+                config
+                    .knowledge_bases
+                    .iter()
+                    .map(|(n, k)| (n.as_str(), k))
+                    .collect()
+            };
 
-                for (name, kb_config) in &kbs {
-                    let kb_state = state.kb_state(name);
-                    match crate::search::search_kb_raw(&clients, name, kb_config, query, limit, &kb_state).await {
-                        Ok(results) => all_results.extend(results),
-                        Err(e) => eprintln!("[brainjar mcp] Search error for KB {}: {}", name, e),
+            // FTS results
+            let fts_results: Vec<crate::search::FtsResult> = if run_fts {
+                let mut all = Vec::new();
+                for (name, _kb_config) in &kbs {
+                    match crate::search::search_fts_for_kb(config, name, query, limit) {
+                        Ok(results) => all.extend(results),
+                        Err(e) => eprintln!("[brainjar mcp] FTS error for KB {}: {}", name, e),
                     }
                 }
+                all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                all.truncate(limit);
+                all
+            } else {
+                Vec::new()
+            };
 
-                all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-                all_results.truncate(limit);
-
-                // Reverse-map S3 keys to human-readable paths
-                for result in &mut all_results {
-                    let kb_state = state.kb_state(&result.kb);
-                    let reverse_map = crate::search::build_s3_key_to_path_map(&kb_state);
-                    if let Some(original_path) = reverse_map.get(&result.source_path) {
-                        result.source_path = original_path.clone();
+            // Local fuzzy results
+            let local_results: Vec<crate::local_search::LocalSearchResult> = if run_local {
+                match crate::local_search::run_local_search(config, query, limit, exact) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[brainjar mcp] Local search error: {}", e);
+                        Vec::new()
                     }
                 }
-
-                Ok(all_results)
+            } else {
+                Vec::new()
             };
 
-            let local_future = async {
-                if run_local {
-                    crate::local_search::run_local_search(config, query, limit, exact)
-                } else {
-                    Ok(Vec::new())
+            // Graph results
+            let graph_results: Vec<crate::graph::GraphSearchResult> = if run_graph {
+                let mut all = Vec::new();
+                for (name, _kb_config) in &kbs {
+                    if !crate::graph::KnowledgeGraph::exists(&config.config_dir, name) {
+                        continue;
+                    }
+                    match crate::graph::KnowledgeGraph::open(&config.config_dir, name) {
+                        Ok(kg) => match kg.search(query, limit) {
+                            Ok(results) => all.extend(results),
+                            Err(e) => eprintln!("[brainjar mcp] Graph search error for KB {}: {}", name, e),
+                        },
+                        Err(e) => eprintln!("[brainjar mcp] Could not open graph DB for KB {}: {}", name, e),
+                    }
                 }
+                all
+            } else {
+                Vec::new()
             };
 
-            let (remote_results, local_results) = tokio::join!(remote_future, local_future);
-            let remote_results = match remote_results {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("[brainjar mcp] Remote search error: {}", e);
-                    Vec::new()
-                }
-            };
-            let local_results = match local_results {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("[brainjar mcp] Local search error: {}", e);
-                    Vec::new()
-                }
-            };
-
-            let text = format_unified_search_text(query, &remote_results, &local_results, mode);
+            let text = format_search_text(query, &fts_results, &local_results, &graph_results, mode);
             Ok(tool_text(text))
         }
 
@@ -300,15 +297,14 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let kb = args.get("kb").and_then(|v| v.as_str());
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            match crate::sync::run_sync(config, kb, force, false, true, false).await {
-                Ok(()) => Ok(tool_text("Sync triggered successfully".to_string())),
+            match crate::sync::run_sync(config, kb, force, false, false, false).await {
+                Ok(()) => Ok(tool_text("Sync completed successfully".to_string())),
                 Err(e) => Ok(tool_error(e.to_string())),
             }
         }
 
         "memory_status" => {
             let kb = args.get("kb").and_then(|v| v.as_str());
-            let state = crate::state::State::load(&config.config_dir)?;
 
             let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
                 if let Some(k) = config.knowledge_bases.get(name) {
@@ -326,13 +322,20 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             let mut status_lines = Vec::new();
             for (name, _kb_config) in &kbs {
-                let kb_state = state.kb_state(name);
+                let conn = match crate::db::open_db(name, &config.config_dir) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        status_lines.push(format!("{}: DB not initialized (run brainjar sync)", name));
+                        continue;
+                    }
+                };
+                let count = crate::db::count_documents(&conn).unwrap_or(0);
+                let last_sync = crate::db::get_meta(&conn, "last_sync")
+                    .unwrap_or_default()
+                    .unwrap_or_else(|| "never".to_string());
                 status_lines.push(format!(
-                    "{}: {} files, last sync: {}, last ingestion: {}",
-                    name,
-                    kb_state.files.len(),
-                    kb_state.last_sync.map(|t| t.to_rfc3339()).unwrap_or_else(|| "never".to_string()),
-                    kb_state.last_ingestion_status.unwrap_or_else(|| "unknown".to_string()),
+                    "{}: {} documents, last sync: {}",
+                    name, count, last_sync
                 ));
             }
 
@@ -356,29 +359,30 @@ fn tool_error(message: String) -> Value {
     })
 }
 
-fn format_unified_search_text(
+fn format_search_text(
     query: &str,
-    remote: &[crate::search::SearchResult],
+    fts: &[crate::search::FtsResult],
     local: &[crate::local_search::LocalSearchResult],
+    graph: &[crate::graph::GraphSearchResult],
     mode: crate::search::SearchMode,
 ) -> String {
-    if remote.is_empty() && local.is_empty() {
+    if fts.is_empty() && local.is_empty() && graph.is_empty() {
         return format!("No results found for \"{}\"", query);
     }
 
     let mut out = format!("Results for \"{}\"\n\n", query);
 
-    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Remote) {
-        out.push_str("=== Remote (Bedrock) ===\n");
-        if remote.is_empty() {
-            out.push_str("No remote results\n\n");
+    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text) {
+        out.push_str("=== FTS5 (text search) ===\n");
+        if fts.is_empty() {
+            out.push_str("No text results\n\n");
         } else {
-            for (i, r) in remote.iter().enumerate() {
+            for (i, r) in fts.iter().enumerate() {
                 out.push_str(&format!(
-                    "{}. [{:.2}] {}\n   ...{}...\n\n",
+                    "{}. [{:.4}] {}\n   ...{}...\n\n",
                     i + 1,
                     r.score,
-                    r.source_path,
+                    r.path,
                     r.excerpt.replace('\n', " ")
                 ));
             }
@@ -386,7 +390,7 @@ fn format_unified_search_text(
     }
 
     if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Local) {
-        out.push_str("=== Local (files) ===\n");
+        out.push_str("=== Local (fuzzy) ===\n");
         if local.is_empty() {
             out.push_str("No local results\n\n");
         } else {
@@ -398,6 +402,29 @@ fn format_unified_search_text(
                     r.file,
                     r.line,
                     r.matched_text
+                ));
+            }
+        }
+    }
+
+    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph) {
+        out.push_str("=== Graph (entity search) ===\n");
+        if graph.is_empty() {
+            out.push_str("No graph results\n\n");
+        } else {
+            for (i, r) in graph.iter().enumerate() {
+                let related = if r.related_entities.is_empty() {
+                    String::new()
+                } else {
+                    format!(" → related: {}", r.related_entities.join(", "))
+                };
+                out.push_str(&format!(
+                    "{}. {} (entity: {} [{}]{})\n\n",
+                    i + 1,
+                    r.file,
+                    r.entity,
+                    r.entity_type,
+                    related
                 ));
             }
         }

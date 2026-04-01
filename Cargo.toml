@@ -1,13 +1,13 @@
 [package]
 name = "brainjar"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
-description = "AI agent memory backed by AWS Bedrock Knowledge Bases + S3"
+description = "AI agent memory with local SQLite backend — FTS5, fuzzy, and vector search"
 authors = ["Glitch <glitch@farad.dev>"]
 license = "MIT"
 repository = "https://github.com/farad-labs/brainjar"
 readme = "README.md"
-keywords = ["ai", "memory", "bedrock", "aws", "mcp"]
+keywords = ["ai", "memory", "sqlite", "mcp", "search"]
 categories = ["command-line-utilities"]
 
 [[bin]]
@@ -19,11 +19,8 @@ name = "brainjar"
 path = "src/lib.rs"
 
 [dependencies]
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
-aws-sdk-bedrockagent = "1"
-aws-sdk-bedrockagentruntime = "1"
-aws-smithy-types = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
@@ -42,6 +39,7 @@ hex = "0.4"
 dirs = "5"
 dialoguer = "0.11"
 rustyline = { version = "14", features = ["derive"] }
+graphqlite = "0.4.3"
 
 [profile.release]
 opt-level = 3

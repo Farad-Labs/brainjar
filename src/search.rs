@@ -1,40 +1,41 @@
 use anyhow::{Context, Result};
-use aws_sdk_bedrockagentruntime::types::{
-    KnowledgeBaseRetrievalConfiguration, KnowledgeBaseRetrievalResult,
-    KnowledgeBaseVectorSearchConfiguration,
-};
 use colored::Colorize;
+use rusqlite::Connection;
+use std::collections::HashMap;
 
-use crate::aws::build_clients;
-use crate::config::{Config, KnowledgeBaseConfig};
+use crate::config::Config;
+use crate::db;
 use crate::local_search::{run_local_search, LocalSearchResult};
-use crate::state::State;
 
-/// A remote (Bedrock) search result.
-#[derive(Debug, serde::Serialize)]
-pub struct SearchResult {
-    pub kb: String,
-    pub score: f64,
-    pub source_path: String,
+/// An FTS5 search result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FtsResult {
+    pub path: String,
     pub excerpt: String,
+    pub score: f64,
 }
 
-/// Combined result from both remote and local searches.
+/// A unified search result (for JSON output).
 #[derive(Debug, serde::Serialize)]
-pub struct UnifiedSearchResult {
-    pub remote: Vec<SearchResult>,
-    pub local: Vec<LocalSearchResult>,
+pub struct UnifiedResult {
+    pub file: String,
+    pub score: f64,
+    pub sources: Vec<String>,
+    pub excerpt: String,
+    pub line: Option<u32>,
 }
 
 /// Search mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// Run both remote (Bedrock hybrid) and local (fuzzy/exact)
+    /// Run FTS + fuzzy (+ graph when available), merge with RRF
     All,
-    /// Local only
+    /// Local fuzzy only (nucleo)
     Local,
-    /// Remote (Bedrock) only
-    Remote,
+    /// FTS5 BM25 only
+    Text,
+    /// Graph traversal from matching entities
+    Graph,
 }
 
 pub async fn run_search(
@@ -46,208 +47,216 @@ pub async fn run_search(
     mode: SearchMode,
     exact: bool,
 ) -> Result<()> {
-    let run_remote = matches!(mode, SearchMode::All | SearchMode::Remote);
+    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text);
     let run_local = matches!(mode, SearchMode::All | SearchMode::Local);
+    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph);
 
-    // Build remote future
-    let remote_future = async {
-        if run_remote {
-            fetch_remote_results(config, query, kb_name, limit).await
+    // Collect FTS results across KBs
+    let fts_results: Vec<FtsResult> = if run_fts {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
         } else {
-            Ok(Vec::new())
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb)| (n.as_str(), kb))
+                .collect()
+        };
+
+        let mut all: Vec<FtsResult> = Vec::new();
+        for (name, _kb) in &kbs {
+            let conn = db::open_db(name, &config.config_dir)?;
+            let results = search_fts(&conn, query, limit)?;
+            all.extend(results);
         }
+        // Sort by score (rank from FTS5 is negative — lower is better, but we've negated it)
+        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all.truncate(limit);
+        all
+    } else {
+        Vec::new()
     };
 
-    // Build local future
-    let local_future = async {
-        if run_local {
-            run_local_search(config, query, limit, exact)
-        } else {
-            Ok(Vec::new())
-        }
+    // Local fuzzy results
+    let local_results: Vec<LocalSearchResult> = if run_local {
+        run_local_search(config, query, limit, exact)?
+    } else {
+        Vec::new()
     };
 
-    // Run in parallel
-    let (remote_results, local_results) = tokio::join!(remote_future, local_future);
+    // Graph search results
+    let graph_results: Vec<crate::graph::GraphSearchResult> = if run_graph {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb)| (n.as_str(), kb))
+                .collect()
+        };
 
-    let remote_results = remote_results?;
-    let local_results = local_results?;
-
-    let unified = UnifiedSearchResult {
-        remote: remote_results,
-        local: local_results,
+        let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
+        for (name, _kb) in &kbs {
+            if !crate::graph::KnowledgeGraph::exists(&config.config_dir, name) {
+                continue;
+            }
+            match crate::graph::KnowledgeGraph::open(&config.config_dir, name) {
+                Ok(kg) => match kg.search(query, limit) {
+                    Ok(results) => all_graph.extend(results),
+                    Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
+                },
+                Err(e) => eprintln!("Could not open graph DB for KB {}: {}", name, e),
+            }
+        }
+        all_graph
+    } else {
+        Vec::new()
     };
 
     if json {
-        // JSON output: structured combined object
-        println!("{}", serde_json::to_string_pretty(&unified)?);
+        let unified = build_unified_results(&fts_results, &local_results, &graph_results, limit);
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "results": unified }))?);
     } else {
-        print_unified_results(query, &unified, mode);
+        print_results(query, &fts_results, &local_results, &graph_results, mode, limit);
     }
 
     Ok(())
 }
 
-async fn fetch_remote_results(
-    config: &Config,
-    query: &str,
-    kb_name: Option<&str>,
-    limit: usize,
-) -> Result<Vec<SearchResult>> {
-    let kbs: Vec<(&str, &KnowledgeBaseConfig)> = if let Some(name) = kb_name {
-        let kb = config
-            .knowledge_bases
-            .get(name)
-            .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
-        vec![(name, kb)]
-    } else {
-        config
-            .knowledge_bases
-            .iter()
-            .map(|(n, kb)| (n.as_str(), kb))
-            .collect()
-    };
+/// FTS5 BM25 search using the documents_fts virtual table.
+pub fn search_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
+    let mut stmt = conn.prepare(
+        r#"SELECT d.path,
+                  snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
+                  rank AS score
+           FROM documents_fts
+           JOIN documents d ON d.id = documents_fts.rowid
+           WHERE documents_fts MATCH ?1
+           ORDER BY rank
+           LIMIT ?2"#,
+    )?;
 
-    let clients = build_clients(&config.aws).await?;
-    let state = State::load(&config.config_dir)?;
-    let mut all_results: Vec<SearchResult> = Vec::new();
-
-    for (name, kb) in &kbs {
-        let kb_state = state.kb_state(name);
-        let results = search_kb(&clients, name, kb, query, limit, &kb_state).await?;
-        all_results.extend(results);
-    }
-
-    // Sort by score descending and truncate
-    all_results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    all_results.truncate(limit);
-
-    // Reverse-map S3 keys to human-readable paths using state
-    for result in &mut all_results {
-        let kb_state = state.kb_state(&result.kb);
-        let reverse_map = build_s3_key_to_path_map(&kb_state);
-        if let Some(original_path) = reverse_map.get(&result.source_path) {
-            result.source_path = original_path.clone();
-        }
-    }
-
-    Ok(all_results)
-}
-
-pub async fn search_kb_raw(
-    clients: &crate::aws::AwsClients,
-    kb_name: &str,
-    kb: &KnowledgeBaseConfig,
-    query: &str,
-    limit: usize,
-    kb_state: &crate::state::KbState,
-) -> Result<Vec<SearchResult>> {
-    search_kb(clients, kb_name, kb, query, limit, kb_state).await
-}
-
-async fn search_kb(
-    clients: &crate::aws::AwsClients,
-    kb_name: &str,
-    kb: &KnowledgeBaseConfig,
-    query: &str,
-    limit: usize,
-    _kb_state: &crate::state::KbState,
-) -> Result<Vec<SearchResult>> {
-    let retrieval_config = KnowledgeBaseRetrievalConfiguration::builder()
-        .vector_search_configuration(
-            KnowledgeBaseVectorSearchConfiguration::builder()
-                .number_of_results(limit as i32)
-                
-                .build(),
-        )
-        .build();
-
-    let response = clients
-        .bedrock_runtime
-        .retrieve()
-        .knowledge_base_id(&kb.kb_id)
-        .retrieval_query(
-            aws_sdk_bedrockagentruntime::types::KnowledgeBaseQuery::builder()
-                .text(query)
-                .build(),
-        )
-        .retrieval_configuration(retrieval_config)
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to search KB '{}' ({}). Check KB ID and IAM permissions.",
-                kb_name, kb.kb_id
-            )
-        })?;
+    let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+        Ok(FtsResult {
+            path: row.get(0)?,
+            excerpt: row.get(1)?,
+            // FTS5 rank is negative (lower = better match). Negate to get a
+            // positive score where higher is better.
+            score: -row.get::<_, f64>(2)?,
+        })
+    })?;
 
     let mut results = Vec::new();
-    for item in response.retrieval_results() {
-        let score = item.score().unwrap_or(0.0);
-        let content = item
-            .content()
-            .map(|c| c.text().to_string())
-            .unwrap_or_default();
-
-        let source_path = extract_source_path(item, kb);
-
-        let excerpt = if content.len() > 200 {
-            format!("{}...", &content[..200])
-        } else {
-            content
-        };
-
-        results.push(SearchResult {
-            kb: kb_name.to_string(),
-            score,
-            source_path,
-            excerpt,
-        });
+    for row in rows {
+        results.push(row?);
     }
-
     Ok(results)
 }
 
-fn extract_source_path(item: &KnowledgeBaseRetrievalResult, kb: &KnowledgeBaseConfig) -> String {
-    let s3_key: Option<String> = item
-        .location()
-        .and_then(|loc| loc.s3_location())
-        .and_then(|s3| s3.uri().map(|u| u.to_string()))
-        .and_then(|uri: String| {
-            let prefix = format!("s3://{}/", kb.s3_bucket);
-            uri.strip_prefix(&prefix).map(|s| s.to_string())
-        });
+/// Reciprocal Rank Fusion over multiple ranked result sets.
+/// Each set is Vec<(doc_id, score)>. Returns merged Vec<(doc_id, rrf_score)>.
+pub fn reciprocal_rank_fusion(
+    result_sets: Vec<Vec<(String, f64)>>,
+    k: f64,
+) -> Vec<(String, f64)> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
 
-    if let Some(path) = item
-        .metadata()
-        .and_then(|m| m.get("x-amz-meta-brainjar-source-path"))
-        .and_then(|v| v.as_string())
-    {
-        return path.to_string();
+    for result_set in &result_sets {
+        // Sort descending by score
+        let mut ranked: Vec<&(String, f64)> = result_set.iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (rank, (doc_id, _score)) in ranked.iter().enumerate() {
+            let rrf_score = 1.0 / (k + rank as f64 + 1.0);
+            *scores.entry(doc_id.clone()).or_insert(0.0) += rrf_score;
+        }
     }
 
-    s3_key.unwrap_or_else(|| "unknown".to_string())
+    let mut merged: Vec<(String, f64)> = scores.into_iter().collect();
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged
 }
 
-pub fn build_s3_key_to_path_map(
-    kb_state: &crate::state::KbState,
-) -> std::collections::HashMap<String, String> {
-    kb_state
-        .files
-        .iter()
-        .map(|(rel_path, file_state)| (file_state.s3_key.clone(), rel_path.clone()))
+fn build_unified_results(
+    fts: &[FtsResult],
+    local: &[LocalSearchResult],
+    graph: &[crate::graph::GraphSearchResult],
+    limit: usize,
+) -> Vec<UnifiedResult> {
+    // Build ranked lists for RRF
+    let fts_ranked: Vec<(String, f64)> =
+        fts.iter().map(|r| (r.path.clone(), r.score)).collect();
+    let local_ranked: Vec<(String, f64)> =
+        local.iter().map(|r| (r.file.clone(), r.score)).collect();
+    let graph_ranked: Vec<(String, f64)> =
+        graph.iter().map(|r| (r.file.clone(), r.score)).collect();
+
+    let merged = reciprocal_rank_fusion(vec![fts_ranked, local_ranked, graph_ranked], 60.0);
+
+    // Build lookup maps for excerpts/lines/graph info
+    let fts_map: HashMap<&str, &FtsResult> =
+        fts.iter().map(|r| (r.path.as_str(), r)).collect();
+    let local_map: HashMap<&str, &LocalSearchResult> =
+        local.iter().map(|r| (r.file.as_str(), r)).collect();
+    let graph_map: HashMap<&str, &crate::graph::GraphSearchResult> =
+        graph.iter().map(|r| (r.file.as_str(), r)).collect();
+
+    merged
+        .into_iter()
+        .take(limit)
+        .map(|(file, score)| {
+            let mut sources = Vec::new();
+            let mut excerpt = String::new();
+            let mut line = None;
+
+            if let Some(f) = fts_map.get(file.as_str()) {
+                sources.push("fts".to_string());
+                excerpt = f.excerpt.clone();
+            }
+            if let Some(l) = local_map.get(file.as_str()) {
+                sources.push("fuzzy".to_string());
+                if excerpt.is_empty() {
+                    excerpt = l.matched_text.clone();
+                }
+                line = Some(l.line);
+            }
+            if graph_map.contains_key(file.as_str()) {
+                sources.push("graph".to_string());
+            }
+
+            UnifiedResult {
+                file,
+                score,
+                sources,
+                excerpt,
+                line,
+            }
+        })
         .collect()
 }
 
-fn print_unified_results(query: &str, unified: &UnifiedSearchResult, mode: SearchMode) {
-    let has_remote = !unified.remote.is_empty();
-    let has_local = !unified.local.is_empty();
+fn print_results(
+    query: &str,
+    fts: &[FtsResult],
+    local: &[LocalSearchResult],
+    graph: &[crate::graph::GraphSearchResult],
+    mode: SearchMode,
+    limit: usize,
+) {
+    let has_fts = !fts.is_empty();
+    let has_local = !local.is_empty();
+    let has_graph = !graph.is_empty();
 
-    if !has_remote && !has_local {
+    if !has_fts && !has_local && !has_graph {
         println!("{}", "🔍 No results found".yellow());
         return;
     }
@@ -258,51 +267,89 @@ fn print_unified_results(query: &str, unified: &UnifiedSearchResult, mode: Searc
         format!("\"{}\"", query).white().bold(),
     );
 
-    // Remote results
-    if matches!(mode, SearchMode::All | SearchMode::Remote) {
-        println!("{}", "── Remote (Bedrock) ──────────────────────".dimmed());
-        if has_remote {
-            print_remote_results(&unified.remote);
+    if matches!(mode, SearchMode::All | SearchMode::Graph) {
+        // Show merged RRF results (or pure graph results)
+        let unified = build_unified_results(fts, local, graph, limit);
+        println!("{}", "── Merged results ────────────────────────────────".dimmed());
+        for (i, result) in unified.iter().enumerate() {
+            let sources = result.sources.join(", ");
+            println!(
+                "  {}. {} {} {}",
+                (i + 1).to_string().bold(),
+                format!("[{:.4}]", result.score).green(),
+                result.file.cyan().bold(),
+                format!("({})", sources).dimmed(),
+            );
+            if !result.excerpt.is_empty() {
+                let excerpt = result.excerpt.replace('\n', " ");
+                if let Some(ln) = result.line {
+                    println!(
+                        "     {}:{} {}",
+                        result.file.dimmed(),
+                        ln,
+                        format!("...{}...", excerpt).dimmed()
+                    );
+                } else {
+                    println!("     {}", format!("...{}...", excerpt).dimmed());
+                }
+            }
+            println!();
+        }
+        return;
+    }
+
+    if matches!(mode, SearchMode::Text) {
+        println!(
+            "{}",
+            "── FTS5 (text search) ─────────────────────────────".dimmed()
+        );
+        if has_fts {
+            for (i, r) in fts.iter().enumerate() {
+                println!(
+                    "  {}. {} {}",
+                    (i + 1).to_string().bold(),
+                    format!("[{:.4}]", r.score).green(),
+                    r.path.cyan().bold(),
+                );
+                let excerpt = r.excerpt.replace('\n', " ");
+                println!("     {}", format!("...{}...", excerpt).dimmed());
+                println!();
+            }
         } else {
-            println!("  {}\n", "No remote results".dimmed());
+            println!("  {}\n", "No text results".dimmed());
         }
     }
 
-    // Local results
-    if matches!(mode, SearchMode::All | SearchMode::Local) {
-        println!("{}", "── Local (files) ─────────────────────────".dimmed());
+    if matches!(mode, SearchMode::Local) {
+        println!(
+            "{}",
+            "── Local (fuzzy) ─────────────────────────────────".dimmed()
+        );
         if has_local {
-            print_local_results(&unified.local);
+            for (i, r) in local.iter().enumerate() {
+                println!(
+                    "  {}. {} {}{}",
+                    (i + 1).to_string().bold(),
+                    format!("[{:.2}]", r.score).green(),
+                    r.file.cyan().bold(),
+                    format!(":{}", r.line).dimmed(),
+                );
+                println!("     {}", r.matched_text.dimmed());
+                println!();
+            }
         } else {
             println!("  {}\n", "No local results".dimmed());
         }
     }
 }
 
-fn print_remote_results(results: &[SearchResult]) {
-    for (i, result) in results.iter().enumerate() {
-        println!(
-            "  {}. {} {}",
-            (i + 1).to_string().bold(),
-            format!("[{:.2}]", result.score).green(),
-            result.source_path.cyan().bold()
-        );
-        let excerpt = result.excerpt.replace('\n', " ");
-        println!("     {}", format!("...{}...", excerpt).dimmed());
-        println!();
-    }
-}
-
-fn print_local_results(results: &[LocalSearchResult]) {
-    for (i, result) in results.iter().enumerate() {
-        println!(
-            "  {}. {} {}{}",
-            (i + 1).to_string().bold(),
-            format!("[{:.2}]", result.score).green(),
-            result.file.cyan().bold(),
-            format!(":{}", result.line).dimmed()
-        );
-        println!("     {}", result.matched_text.dimmed());
-        println!();
-    }
+/// Public accessor used by mcp.rs.
+pub fn search_fts_for_kb(
+    config: &Config,
+    kb_name: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FtsResult>> {
+    let conn = db::open_db(kb_name, &config.config_dir)?;
+    search_fts(&conn, query, limit)
 }

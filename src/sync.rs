@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use aws_sdk_bedrockagent::types::IngestionJobStatus;
 use chrono::Utc;
 use colored::Colorize;
 use hex;
@@ -8,16 +7,17 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use walkdir::WalkDir;
 
-use crate::aws::build_clients;
 use crate::config::{Config, KnowledgeBaseConfig};
-use crate::state::{FileState, State};
+use crate::db;
+use crate::extract::Extractor;
+use crate::graph::KnowledgeGraph;
 
 pub async fn run_sync(
     config: &Config,
     kb_name: Option<&str>,
     force: bool,
     dry_run: bool,
-    no_wait: bool,
+    _no_wait: bool, // no-op: everything is local/instant
     json: bool,
 ) -> Result<()> {
     let kbs_to_sync: Vec<(&str, &KnowledgeBaseConfig)> = if let Some(name) = kb_name {
@@ -43,105 +43,56 @@ pub async fn run_sync(
         return Ok(());
     }
 
-    let mut state = State::load(&config.config_dir)?;
-
-    // Pre-check: skip AWS entirely if nothing changed across all KBs
-    if !force {
-        let mut any_changes = false;
-        for (name, kb) in &kbs_to_sync {
-            let kb_state = state.kb_state(name);
-            let watch_paths = config.expand_watch_paths(kb);
-            let local_files = collect_files(config, &watch_paths);
-            let changes = compute_changes(&local_files, &kb_state, false);
-            if !changes.to_upload.is_empty() || !changes.to_delete.is_empty() {
-                any_changes = true;
-                break;
-            }
-        }
-        if !any_changes {
-            if json {
-                for (name, _) in &kbs_to_sync {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "kb": name,
-                        "to_upload": 0,
-                        "to_delete": 0,
-                        "status": "NO_CHANGES"
-                    }))?);
-                }
-            } else {
-                for (name, _) in &kbs_to_sync {
-                    println!("\n{} {}", "⟳ Syncing".cyan().bold(), name.bold());
-                    println!("  {} Nothing to sync", "✓".green());
-                }
-            }
-            return Ok(());
-        }
-    }
-
-    let clients = build_clients(&config.aws).await?;
-
     for (name, kb) in &kbs_to_sync {
         if json {
-            sync_kb_json(config, name, kb, &clients, &mut state, force, dry_run, no_wait).await?;
+            sync_kb_json(config, name, kb, force, dry_run).await?;
         } else {
-            sync_kb_human(config, name, kb, &clients, &mut state, force, dry_run, no_wait).await?;
+            sync_kb_human(config, name, kb, force, dry_run).await?;
         }
-    }
-
-    if !dry_run {
-        state.save(&config.config_dir)?;
     }
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn sync_kb_human(
     config: &Config,
     kb_name: &str,
     kb: &KnowledgeBaseConfig,
-    clients: &crate::aws::AwsClients,
-    state: &mut State,
     force: bool,
     dry_run: bool,
-    no_wait: bool,
 ) -> Result<()> {
     println!("\n{} {}", "⟳ Syncing".cyan().bold(), kb_name.bold());
 
-    let mut kb_state = state.kb_state(kb_name);
+    let conn = db::open_db(kb_name, &config.config_dir)?;
     let watch_paths = config.expand_watch_paths(kb);
-
-    // Collect all local files
     let local_files = collect_files(config, &watch_paths);
+    let changes = compute_changes(&conn, &local_files, force)?;
 
-    // Determine changes
-    let changes = compute_changes(&local_files, &kb_state, force);
-
-    if changes.to_upload.is_empty() && changes.to_delete.is_empty() {
+    if changes.to_upsert.is_empty() && changes.to_delete.is_empty() {
         println!("  {} Nothing to sync", "✓".green());
         return Ok(());
     }
 
     println!(
-        "  {} files to upload, {} to delete",
-        changes.to_upload.len().to_string().cyan(),
+        "  {} files to update, {} to delete",
+        changes.to_upsert.len().to_string().cyan(),
         changes.to_delete.len().to_string().yellow()
     );
 
     if dry_run {
         println!("  {} (dry run, no changes made)", "DRY RUN".yellow().bold());
-        for rel_path in changes.to_upload.keys() {
+        for rel_path in changes.to_upsert.keys() {
             println!("    {} {}", "+".green(), rel_path);
         }
-        for s3_key in &changes.to_delete {
-            println!("    {} {}", "-".red(), s3_key);
+        for path in &changes.to_delete {
+            println!("    {} {}", "-".red(), path);
         }
         return Ok(());
     }
 
-    // Upload files
-    if !changes.to_upload.is_empty() {
-        let pb = ProgressBar::new(changes.to_upload.len() as u64);
+    // Upsert files
+    if !changes.to_upsert.is_empty() {
+        let pb = ProgressBar::new(changes.to_upsert.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("  [{bar:40.cyan/blue}] {pos}/{len} {msg}")
@@ -149,250 +100,221 @@ async fn sync_kb_human(
                 .progress_chars("=>-"),
         );
 
-        for (rel_path, (abs_path, s3_key)) in &changes.to_upload {
+        for (rel_path, abs_path) in &changes.to_upsert {
             pb.set_message(rel_path.clone());
-            let content = std::fs::read(abs_path)
+            let content = std::fs::read_to_string(abs_path)
                 .with_context(|| format!("Failed to read file: {}", abs_path.display()))?;
-            let content_hash = hash_file_content(&content);
-
-            clients
-                .s3
-                .put_object()
-                .bucket(&kb.s3_bucket)
-                .key(s3_key)
-                .body(content.into())
-                .metadata("brainjar-source-path", rel_path)
-                .content_type("text/markdown")
-                .send()
-                .await
-                .with_context(|| format!("Failed to upload {} to s3://{}/{}", rel_path, kb.s3_bucket, s3_key))?;
-
-            kb_state.files.insert(
-                rel_path.clone(),
-                FileState {
-                    content_hash,
-                    s3_key: s3_key.clone(),
-                    last_modified: Utc::now(),
-                },
-            );
+            let hash = hash_content(content.as_bytes());
+            db::upsert_document(&conn, rel_path, &content, &hash)?;
             pb.inc(1);
         }
         pb.finish_and_clear();
-        println!("  {} Uploaded {} files", "✓".green(), changes.to_upload.len());
+        println!("  {} Synced {} files", "✓".green(), changes.to_upsert.len());
     }
 
-    // Delete files
-    for s3_key in &changes.to_delete {
-        clients
-            .s3
-            .delete_object()
-            .bucket(&kb.s3_bucket)
-            .key(s3_key)
-            .send()
-            .await
-            .with_context(|| format!("Failed to delete s3://{}/{}", kb.s3_bucket, s3_key))?;
+    // Delete removed files
+    for path in &changes.to_delete {
+        db::delete_document(&conn, path)?;
     }
-
-    // Remove deleted files from state
-    kb_state.files.retain(|_, f| !changes.to_delete.contains(&f.s3_key));
 
     if !changes.to_delete.is_empty() {
-        println!("  {} Deleted {} files from S3", "✓".green(), changes.to_delete.len());
+        println!("  {} Removed {} files from index", "✓".green(), changes.to_delete.len());
     }
 
-    // Trigger ingestion
-    println!("  {} Triggering Bedrock ingestion...", "⟳".cyan());
-    let job = clients
-        .bedrock_agent
-        .start_ingestion_job()
-        .knowledge_base_id(&kb.kb_id)
-        .data_source_id(&kb.data_source_id)
-        .send()
-        .await
-        .with_context(|| format!("Failed to start ingestion job for KB '{}' ({}). Check IAM permissions.", kb_name, kb.kb_id))?;
+    // Record last sync time
+    db::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
 
-    let job = job.ingestion_job().context("No ingestion job in response")?;
-    let job_id = job.ingestion_job_id().to_string();
+    // ── Optional: entity extraction via configured LLM ──────────────────────
+    if let Some(extraction_cfg) = &config.extraction {
+        if extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+            let extractor = Extractor::new(extraction_cfg);
+            // Open graph DB (or create it)
+            match KnowledgeGraph::open(&config.config_dir, kb_name) {
+                Ok(kg) => {
+                    let mut total_entities = 0usize;
+                    let mut total_rels = 0usize;
+                    let mut extraction_errors = 0usize;
 
-    kb_state.last_ingestion_job_id = Some(job_id.clone());
-    kb_state.last_sync = Some(Utc::now());
+                    for (rel_path, abs_path) in &changes.to_upsert {
+                        let content = match std::fs::read_to_string(abs_path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
 
-    if no_wait {
-        println!("  {} Ingestion started (job: {})", "✓".green(), job_id.dimmed());
-        println!("  {} Run `brainjar status {}` to check progress", "ℹ".blue(), kb_name);
-        kb_state.last_ingestion_status = Some("IN_PROGRESS".to_string());
-        state.set_kb_state(kb_name, kb_state);
-        return Ok(());
-    }
+                        // Remove stale graph data for this document
+                        if let Err(e) = kg.remove_document(rel_path) {
+                            eprintln!("  ⚠ Graph remove failed for {}: {}", rel_path, e);
+                        }
 
-    // Poll for completion
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("  {spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    pb.set_message("Waiting for ingestion...");
+                        // Extract entities
+                        match extractor.extract(&content, rel_path).await {
+                            Ok(result) => {
+                                total_entities += result.entities.len();
+                                total_rels += result.relationships.len();
+                                if let Err(e) = kg.ingest_entities(
+                                    rel_path,
+                                    &result.entities,
+                                    &result.relationships,
+                                ) {
+                                    eprintln!("  ⚠ Graph ingest failed for {}: {}", rel_path, e);
+                                    extraction_errors += 1;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("  ⚠ Extraction failed for {}: {}", rel_path, e);
+                                extraction_errors += 1;
+                            }
+                        }
+                    }
 
-    let mut delay_ms = 3000u64;
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-
-        let result = clients
-            .bedrock_agent
-            .get_ingestion_job()
-            .knowledge_base_id(&kb.kb_id)
-            .data_source_id(&kb.data_source_id)
-            .ingestion_job_id(&job_id)
-            .send()
-            .await
-            .context("Failed to poll ingestion job status")?;
-
-        let job = result.ingestion_job().context("No ingestion job in response")?;
-        let status = job.status();
-        let status_str = format!("{:?}", status);
-        pb.set_message(format!("Ingestion status: {}", status_str.cyan()));
-
-        match status {
-            IngestionJobStatus::Complete => {
-                pb.finish_and_clear();
-                println!("  {} Ingestion complete!", "✓".green().bold());
-                kb_state.last_ingestion_status = Some("COMPLETE".to_string());
-                break;
-            }
-            IngestionJobStatus::Failed => {
-                pb.finish_and_clear();
-                let failures = job.failure_reasons();
-                eprintln!("  {} Ingestion failed!", "✗".red().bold());
-                for reason in failures {
-                    eprintln!("    {}", reason.red());
+                    if extraction_errors == 0 {
+                        println!(
+                            "  {} Extracted entities ({} entities, {} relationships)",
+                            "✓".green(),
+                            total_entities,
+                            total_rels
+                        );
+                    } else {
+                        println!(
+                            "  {} Extracted entities ({} entities, {} relationships, {} errors)",
+                            "⚠".yellow(),
+                            total_entities,
+                            total_rels,
+                            extraction_errors
+                        );
+                    }
                 }
-                eprintln!("\n  Check IAM permissions for the Bedrock service role.");
-                kb_state.last_ingestion_status = Some("FAILED".to_string());
-                break;
-            }
-            _ => {
-                // Still running — back off
-                delay_ms = (delay_ms * 2).min(30_000);
+                Err(e) => {
+                    eprintln!("  ⚠ Could not open graph DB: {}", e);
+                }
             }
         }
     }
 
-    state.set_kb_state(kb_name, kb_state);
+    // ── TODO: embedding support (sqlite-vec integration, Phase 3) ───────────
+    // if let Some(_embed_cfg) = &config.embeddings {
+    //     let _embedder = crate::embed::Embedder::new(_embed_cfg);
+    //     // embed_batch() content chunks, upsert into documents_vec
+    // }
+
+    println!("  {} Done", "✓".green().bold());
+
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn sync_kb_json(
     config: &Config,
     kb_name: &str,
     kb: &KnowledgeBaseConfig,
-    clients: &crate::aws::AwsClients,
-    state: &mut State,
     force: bool,
     dry_run: bool,
-    no_wait: bool,
 ) -> Result<()> {
-    // Simplified: just do the work and emit a JSON result at the end
-    // For brevity, we call the same logic with silenced output
-    let mut kb_state = state.kb_state(kb_name);
+    let conn = db::open_db(kb_name, &config.config_dir)?;
     let watch_paths = config.expand_watch_paths(kb);
     let local_files = collect_files(config, &watch_paths);
-    let changes = compute_changes(&local_files, &kb_state, force);
+    let changes = compute_changes(&conn, &local_files, force)?;
 
     let mut result = serde_json::json!({
         "kb": kb_name,
-        "to_upload": changes.to_upload.len(),
+        "to_update": changes.to_upsert.len(),
         "to_delete": changes.to_delete.len(),
         "dry_run": dry_run,
     });
 
     if !dry_run {
-        for (rel_path, (abs_path, s3_key)) in &changes.to_upload {
-            let content = std::fs::read(abs_path)?;
-            let content_hash = hash_file_content(&content);
-            clients
-                .s3
-                .put_object()
-                .bucket(&kb.s3_bucket)
-                .key(s3_key)
-                .body(content.into())
-                .metadata("brainjar-source-path", rel_path)
-                .content_type("text/markdown")
-                .send()
-                .await?;
-            kb_state.files.insert(
-                rel_path.clone(),
-                FileState {
-                    content_hash,
-                    s3_key: s3_key.clone(),
-                    last_modified: Utc::now(),
-                },
-            );
+        for (rel_path, abs_path) in &changes.to_upsert {
+            let content = std::fs::read_to_string(abs_path)?;
+            let hash = hash_content(content.as_bytes());
+            db::upsert_document(&conn, rel_path, &content, &hash)?;
         }
-        for s3_key in &changes.to_delete {
-            clients.s3.delete_object().bucket(&kb.s3_bucket).key(s3_key).send().await?;
+        for path in &changes.to_delete {
+            db::delete_document(&conn, path)?;
         }
-        kb_state.files.retain(|_, f| !changes.to_delete.contains(&f.s3_key));
+        if !changes.to_upsert.is_empty() || !changes.to_delete.is_empty() {
+            db::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
+        }
 
-        let job = clients
-            .bedrock_agent
-            .start_ingestion_job()
-            .knowledge_base_id(&kb.kb_id)
-            .data_source_id(&kb.data_source_id)
-            .send()
-            .await?;
-        let job = job.ingestion_job().context("No ingestion job in response")?;
-        let job_id = job.ingestion_job_id().to_string();
-        kb_state.last_ingestion_job_id = Some(job_id.clone());
-        kb_state.last_sync = Some(Utc::now());
-
-        result["job_id"] = serde_json::Value::String(job_id.clone());
-
-        if !no_wait {
-            let mut delay_ms = 3000u64;
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                let r = clients
-                    .bedrock_agent
-                    .get_ingestion_job()
-                    .knowledge_base_id(&kb.kb_id)
-                    .data_source_id(&kb.data_source_id)
-                    .ingestion_job_id(&job_id)
-                    .send()
-                    .await?;
-                let j = r.ingestion_job().context("No ingestion job")?;
-                match j.status() {
-                    IngestionJobStatus::Complete => {
-                        result["status"] = serde_json::Value::String("COMPLETE".to_string());
-                        kb_state.last_ingestion_status = Some("COMPLETE".to_string());
-                        break;
-                    }
-                    IngestionJobStatus::Failed => {
-                        result["status"] = serde_json::Value::String("FAILED".to_string());
-                        kb_state.last_ingestion_status = Some("FAILED".to_string());
-                        break;
-                    }
-                    _ => {
-                        delay_ms = (delay_ms * 2).min(30_000);
+        // Optional entity extraction
+        let mut entities_extracted = 0usize;
+        let mut rels_extracted = 0usize;
+        if let Some(extraction_cfg) = &config.extraction {
+            if extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+                let extractor = Extractor::new(extraction_cfg);
+                if let Ok(kg) = KnowledgeGraph::open(&config.config_dir, kb_name) {
+                    for (rel_path, abs_path) in &changes.to_upsert {
+                        let content = match std::fs::read_to_string(abs_path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        let _ = kg.remove_document(rel_path);
+                        if let Ok(res) = extractor.extract(&content, rel_path).await {
+                            entities_extracted += res.entities.len();
+                            rels_extracted += res.relationships.len();
+                            let _ = kg.ingest_entities(rel_path, &res.entities, &res.relationships);
+                        }
                     }
                 }
             }
-        } else {
-            result["status"] = serde_json::Value::String("IN_PROGRESS".to_string());
-            kb_state.last_ingestion_status = Some("IN_PROGRESS".to_string());
         }
 
-        state.set_kb_state(kb_name, kb_state);
+        result["status"] = serde_json::Value::String("COMPLETE".to_string());
+        result["entities_extracted"] = serde_json::Value::Number(entities_extracted.into());
+        result["relationships_extracted"] = serde_json::Value::Number(rels_extracted.into());
+    } else {
+        result["status"] = serde_json::Value::String("DRY_RUN".to_string());
     }
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
-/// Collect all files from watch paths, returning (relative_path, absolute_path) pairs
+struct SyncChanges {
+    to_upsert: HashMap<String, std::path::PathBuf>, // rel_path → abs_path
+    to_delete: HashSet<String>,                      // rel_paths to remove
+}
+
+fn compute_changes(
+    conn: &rusqlite::Connection,
+    local_files: &HashMap<String, std::path::PathBuf>,
+    force: bool,
+) -> Result<SyncChanges> {
+    let db_hashes = db::get_all_hashes(conn)?;
+
+    let mut to_upsert = HashMap::new();
+    let mut to_delete = HashSet::new();
+
+    for (rel_path, abs_path) in local_files {
+        let needs_update = if force {
+            true
+        } else if let Some(db_hash) = db_hashes.get(rel_path) {
+            // Check if content changed
+            if let Ok(content) = std::fs::read(abs_path) {
+                hash_content(&content) != *db_hash
+            } else {
+                true
+            }
+        } else {
+            true // New file
+        };
+
+        if needs_update {
+            to_upsert.insert(rel_path.clone(), abs_path.clone());
+        }
+    }
+
+    // Find deleted files (in DB but no longer on disk)
+    for db_path in db_hashes.keys() {
+        if !local_files.contains_key(db_path) {
+            to_delete.insert(db_path.clone());
+        }
+    }
+
+    Ok(SyncChanges { to_upsert, to_delete })
+}
+
+/// Collect all files from watch paths, returning (relative_path, absolute_path) pairs.
 pub fn collect_files(
-    config: &crate::config::Config,
+    config: &Config,
     watch_paths: &[std::path::PathBuf],
 ) -> HashMap<String, std::path::PathBuf> {
     let mut files = HashMap::new();
@@ -407,10 +329,36 @@ pub fn collect_files(
         } else if watch_path.is_dir() {
             for entry in WalkDir::new(watch_path)
                 .into_iter()
+                .filter_entry(|e| {
+                    // Skip hidden dirs, .venv, node_modules, .git, __pycache__, target
+                    let name = e.file_name().to_string_lossy();
+                    if e.file_type().is_dir() {
+                        !name.starts_with('.')
+                            && name != "node_modules"
+                            && name != "__pycache__"
+                            && name != "target"
+                            && name != ".venv"
+                    } else {
+                        true
+                    }
+                })
                 .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    if !e.file_type().is_file() {
+                        return false;
+                    }
+                    // Only index text files
+                    let ext = e.path().extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    matches!(ext.as_str(),
+                        "md" | "txt" | "rs" | "toml" | "yaml" | "yml" | "json" |
+                        "py" | "js" | "ts" | "tsx" | "jsx" | "sh" | "css" | "html" |
+                        "xml" | "csv" | "sql" | "tf" | "hcl" | "conf" | "ini" | "cfg" | "env"
+                    )
+                })
             {
-                // Try to make relative to config_dir for stable keys
                 let abs = entry.path().to_path_buf();
                 let rel = if let Ok(r) = abs.strip_prefix(&config.config_dir) {
                     r.to_string_lossy().to_string()
@@ -419,9 +367,8 @@ pub fn collect_files(
                 };
                 files.insert(rel, abs);
             }
-        }
-        // Glob patterns
-        else {
+        } else {
+            // Glob pattern
             let pattern = watch_path.to_string_lossy();
             if let Ok(paths) = glob::glob(&pattern) {
                 for path in paths.filter_map(|p| p.ok()) {
@@ -440,59 +387,8 @@ pub fn collect_files(
     files
 }
 
-struct SyncChanges {
-    to_upload: HashMap<String, (std::path::PathBuf, String)>, // rel_path -> (abs_path, s3_key)
-    to_delete: HashSet<String>,                                 // s3_keys
-}
-
-fn compute_changes(
-    local_files: &HashMap<String, std::path::PathBuf>,
-    kb_state: &crate::state::KbState,
-    force: bool,
-) -> SyncChanges {
-    let mut to_upload = HashMap::new();
-    let mut to_delete = HashSet::new();
-
-    for (rel_path, abs_path) in local_files {
-        let s3_key = path_to_s3_key(rel_path);
-        let needs_upload = if force {
-            true
-        } else if let Some(file_state) = kb_state.files.get(rel_path) {
-            // Check if content changed
-            if let Ok(content) = std::fs::read(abs_path) {
-                hash_file_content(&content) != file_state.content_hash
-            } else {
-                true
-            }
-        } else {
-            true // New file
-        };
-
-        if needs_upload {
-            to_upload.insert(rel_path.clone(), (abs_path.clone(), s3_key));
-        }
-    }
-
-    // Find deleted files
-    for (rel_path, file_state) in &kb_state.files {
-        if !local_files.contains_key(rel_path) {
-            to_delete.insert(file_state.s3_key.clone());
-        }
-    }
-
-    SyncChanges { to_upload, to_delete }
-}
-
-/// SHA256 of the relative path → used as stable S3 key
-pub fn path_to_s3_key(rel_path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(rel_path.as_bytes());
-    let hash = hasher.finalize();
-    format!("{}.md", hex::encode(hash))
-}
-
-/// SHA256 of file content → used to detect changes
-pub fn hash_file_content(content: &[u8]) -> String {
+/// SHA256 of file content — used to detect changes.
+pub fn hash_content(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     hex::encode(hasher.finalize())

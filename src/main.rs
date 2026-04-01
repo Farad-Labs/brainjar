@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "brainjar",
-    about = "AI agent memory backed by AWS Bedrock Knowledge Bases + S3",
+    about = "AI agent memory with local SQLite backend — FTS5, fuzzy, and vector search",
     version,
     propagate_version = true
 )]
@@ -19,18 +19,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sync files to S3 and trigger Bedrock ingestion
+    /// Sync files to the local SQLite index
     Sync {
         /// Knowledge base name (default: all auto_sync KBs)
         kb_name: Option<String>,
-        /// Force re-upload of all files
+        /// Force re-index of all files
         #[arg(long)]
         force: bool,
         /// Show what would be done without actually doing it
         #[arg(long)]
         dry_run: bool,
-        /// Don't wait for ingestion to complete
-        #[arg(long)]
+        /// (no-op in v2: sync is always instant)
+        #[arg(long, hide = true)]
         no_wait: bool,
         /// Output as JSON
         #[arg(long)]
@@ -49,13 +49,16 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Local search only (no Bedrock)
-        #[arg(long, conflicts_with = "remote")]
+        /// Local fuzzy search only (nucleo)
+        #[arg(long, conflicts_with = "text", conflicts_with = "graph")]
         local: bool,
-        /// Remote (Bedrock) search only
-        #[arg(long, conflicts_with = "local")]
-        remote: bool,
-        /// Use exact (case-insensitive substring) matching instead of fuzzy for local search
+        /// FTS5 text search only
+        #[arg(long, conflicts_with = "local", conflicts_with = "graph")]
+        text: bool,
+        /// Graph entity traversal search
+        #[arg(long, conflicts_with = "local", conflicts_with = "text")]
+        graph: bool,
+        /// Use exact (case-insensitive substring) matching for local search
         #[arg(long)]
         exact: bool,
     },
@@ -89,16 +92,28 @@ async fn main() -> Result<()> {
             brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, json)
                 .await?;
         }
-        Commands::Search { query, kb, limit, json, local, remote, exact } => {
+        Commands::Search {
+            query,
+            kb,
+            limit,
+            json,
+            local,
+            text,
+            graph,
+            exact,
+        } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             let mode = if local {
                 brainjar::search::SearchMode::Local
-            } else if remote {
-                brainjar::search::SearchMode::Remote
+            } else if text {
+                brainjar::search::SearchMode::Text
+            } else if graph {
+                brainjar::search::SearchMode::Graph
             } else {
                 brainjar::search::SearchMode::All
             };
-            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact).await?;
+            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact)
+                .await?;
         }
         Commands::Status { kb_name, json } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
