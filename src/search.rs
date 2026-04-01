@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::db;
+use crate::embed::Embedder;
+use zerocopy::IntoBytes;
 use crate::fuzzy;
 use crate::local_search::{run_local_search, LocalSearchResult};
 
@@ -29,9 +31,9 @@ pub struct UnifiedResult {
 /// Search mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// Run FTS + graph, merge with RRF (fast — no fuzzy by default)
+    /// Run FTS + graph + vector (if configured), merge with RRF (fast)
     All,
-    /// Run FTS + graph + fuzzy, merge with RRF (slower, more comprehensive)
+    /// Run FTS + graph + fuzzy + vector, merge with RRF (slower, more comprehensive)
     Fuzzy,
     /// Local fuzzy only (nucleo)
     Local,
@@ -39,6 +41,15 @@ pub enum SearchMode {
     Text,
     /// Graph traversal from matching entities
     Graph,
+    /// Vector KNN similarity search only
+    Vector,
+}
+
+/// A vector KNN search result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VectorResult {
+    pub path: String,
+    pub score: f64,
 }
 
 pub async fn run_search(
@@ -53,6 +64,7 @@ pub async fn run_search(
     let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
     let run_local = matches!(mode, SearchMode::Local);
     let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
+    let run_vector = matches!(mode, SearchMode::All | SearchMode::Vector | SearchMode::Fuzzy);
 
     // For fuzzy mode: correct the query via vocabulary before FTS/graph search
     let (effective_query, query_corrections) = if mode == SearchMode::Fuzzy {
@@ -172,8 +184,45 @@ pub async fn run_search(
         Vec::new()
     };
 
+    // Vector KNN search
+    let vector_results: Vec<VectorResult> = if run_vector {
+        if let Some(embed_cfg) = &config.embeddings {
+            let embedder = Embedder::new(embed_cfg);
+            match embedder.embed_batch(&[search_query]).await {
+                Ok(vecs) if !vecs.is_empty() => {
+                    let query_vec = &vecs[0];
+                    let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+                        let kb = config.knowledge_bases.get(name)
+                            .with_context(|| format!("KB '{}' not found", name))?;
+                        vec![(name, kb)]
+                    } else {
+                        config.knowledge_bases.iter().map(|(n, kb)| (n.as_str(), kb)).collect()
+                    };
+                    let mut all_vec: Vec<VectorResult> = Vec::new();
+                    for (name, _kb) in &kbs {
+                        let conn = db::open_db(name, &config.config_dir)?;
+                        match search_vector(&conn, query_vec, limit) {
+                            Ok(results) => all_vec.extend(results),
+                            Err(e) => eprintln!("Vector search error in KB {}: {}", name, e),
+                        }
+                    }
+                    all_vec
+                }
+                Ok(_) => Vec::new(),
+                Err(e) => {
+                    eprintln!("Embedding query failed: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     if json {
-        let unified = build_unified_results(&fts_results, &local_results, &graph_results, limit);
+        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
             let corrections_json: Vec<serde_json::Value> = query_corrections
@@ -191,6 +240,7 @@ pub async fn run_search(
             &fts_results,
             &local_results,
             &graph_results,
+            &vector_results,
             mode,
             limit,
         );
@@ -229,6 +279,44 @@ pub fn search_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Ft
     Ok(results)
 }
 
+/// Vector KNN search using sqlite-vec documents_vec table.
+pub fn search_vector(
+    conn: &Connection,
+    query_embedding: &[f32],
+    limit: usize,
+) -> Result<Vec<VectorResult>> {
+    if !db::vec_table_exists(conn) {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        r#"SELECT dv.document_id, dv.distance, d.path
+           FROM documents_vec dv
+           JOIN documents d ON d.id = dv.document_id
+           WHERE dv.embedding MATCH ?1
+           ORDER BY dv.distance
+           LIMIT ?2"#,
+    )?;
+
+    let rows = stmt.query_map(
+        rusqlite::params![query_embedding.as_bytes(), limit as i64],
+        |row| {
+            let distance: f64 = row.get(1)?;
+            Ok(VectorResult {
+                path: row.get(2)?,
+                // Convert distance to similarity score (lower distance = better)
+                score: 1.0 / (1.0 + distance),
+            })
+        },
+    )?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
 /// Reciprocal Rank Fusion over multiple ranked result sets.
 /// Each set is Vec<(doc_id, score)>. Returns merged Vec<(doc_id, rrf_score)>.
 pub fn reciprocal_rank_fusion(
@@ -257,6 +345,7 @@ fn build_unified_results(
     fts: &[FtsResult],
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
+    vector: &[VectorResult],
     limit: usize,
 ) -> Vec<UnifiedResult> {
     // Build ranked lists for RRF
@@ -266,8 +355,10 @@ fn build_unified_results(
         local.iter().map(|r| (r.file.clone(), r.score)).collect();
     let graph_ranked: Vec<(String, f64)> =
         graph.iter().map(|r| (r.file.clone(), r.score)).collect();
+    let vector_ranked: Vec<(String, f64)> =
+        vector.iter().map(|r| (r.path.clone(), r.score)).collect();
 
-    let merged = reciprocal_rank_fusion(vec![fts_ranked, local_ranked, graph_ranked], 60.0);
+    let merged = reciprocal_rank_fusion(vec![fts_ranked, local_ranked, graph_ranked, vector_ranked], 60.0);
 
     // Build lookup maps for excerpts/lines/graph info
     let fts_map: HashMap<&str, &FtsResult> =
@@ -276,6 +367,8 @@ fn build_unified_results(
         local.iter().map(|r| (r.file.as_str(), r)).collect();
     let graph_map: HashMap<&str, &crate::graph::GraphSearchResult> =
         graph.iter().map(|r| (r.file.as_str(), r)).collect();
+    let vector_set: std::collections::HashSet<&str> =
+        vector.iter().map(|r| r.path.as_str()).collect();
 
     merged
         .into_iter()
@@ -299,6 +392,9 @@ fn build_unified_results(
             if graph_map.contains_key(file.as_str()) {
                 sources.push("graph".to_string());
             }
+            if vector_set.contains(file.as_str()) {
+                sources.push("vector".to_string());
+            }
 
             UnifiedResult {
                 file,
@@ -319,14 +415,16 @@ fn print_results(
     fts: &[FtsResult],
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
+    vector: &[VectorResult],
     mode: SearchMode,
     limit: usize,
 ) {
     let has_fts = !fts.is_empty();
     let has_local = !local.is_empty();
     let has_graph = !graph.is_empty();
+    let has_vector = !vector.is_empty();
 
-    if !has_fts && !has_local && !has_graph {
+    if !has_fts && !has_local && !has_graph && !has_vector {
         println!("{}", "🔍 No results found".yellow());
         return;
     }
@@ -359,7 +457,7 @@ fn print_results(
 
     if matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy) {
         // Show merged RRF results (or pure graph results)
-        let unified = build_unified_results(fts, local, graph, limit);
+        let unified = build_unified_results(fts, local, graph, vector, limit);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");

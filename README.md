@@ -101,7 +101,7 @@ brainjar can extract entities and relationships from your documents using a conf
 [extraction]
 enabled = true
 backend = "gemini"          # or "openai" or "ollama"
-model = "gemini-2.0-flash-lite"
+model = "gemini-3.1-flash-lite-preview"
 api_key_env = "GOOGLE_API_KEY"
 ```
 
@@ -142,7 +142,7 @@ auto_sync = true
 [extraction]
 enabled = true
 backend = "gemini"
-model = "gemini-2.0-flash-lite"
+model = "gemini-3.1-flash-lite-preview"
 api_key_env = "GOOGLE_API_KEY"
 
 # Optional: vector embeddings (Phase 3 — coming soon)

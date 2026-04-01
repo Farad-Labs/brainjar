@@ -59,8 +59,11 @@ enum Commands {
         #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "fuzzy")]
         graph: bool,
         /// Include fuzzy matching in search (slower, more comprehensive)
-        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "graph")]
+        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "graph", conflicts_with = "vector")]
         fuzzy: bool,
+        /// Vector similarity search only (requires embeddings config)
+        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "graph", conflicts_with = "fuzzy")]
+        vector: bool,
         /// Use exact (case-insensitive substring) matching for local search
         #[arg(long)]
         exact: bool,
@@ -81,6 +84,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    brainjar::db::init_vec_extension();
     let cli = Cli::parse();
 
     match cli.command {
@@ -104,6 +108,7 @@ async fn main() -> Result<()> {
             text,
             graph,
             fuzzy,
+            vector,
             exact,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
@@ -115,6 +120,8 @@ async fn main() -> Result<()> {
                 brainjar::search::SearchMode::Graph
             } else if fuzzy {
                 brainjar::search::SearchMode::Fuzzy
+            } else if vector {
+                brainjar::search::SearchMode::Vector
             } else {
                 brainjar::search::SearchMode::All
             };

@@ -1,11 +1,33 @@
 use anyhow::{Context, Result};
+use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::Connection;
+use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
+
+/// Register the sqlite-vec extension so it is automatically loaded for every
+/// new `Connection`. Must be called **once**, before any `open_db()` call.
+pub fn init_vec_extension() {
+    #[allow(clippy::missing_transmute_annotations)]
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite3_vec_init as *const (),
+        )));
+    }
+}
 
 /// Open (or create) the SQLite database for a knowledge base.
 /// The DB is stored at `<config_dir>/.brainjar/<kb_name>.db`.
 /// Tables and FTS triggers are created on first open.
+///
+/// `vec_dimensions` — if > 0 **and** the `documents_vec` virtual table does
+/// not yet exist, it will be created with that many float dimensions.
 pub fn open_db(kb_name: &str, config_dir: &Path) -> Result<Connection> {
+    open_db_with_dims(kb_name, config_dir, 0)
+}
+
+/// Like `open_db` but creates the `documents_vec` virtual table when
+/// `vec_dimensions > 0` and the table is not present yet.
+pub fn open_db_with_dims(kb_name: &str, config_dir: &Path, vec_dimensions: usize) -> Result<Connection> {
     let db_dir = config_dir.join(".brainjar");
     std::fs::create_dir_all(&db_dir)
         .with_context(|| format!("Failed to create .brainjar directory: {}", db_dir.display()))?;
@@ -19,7 +41,38 @@ pub fn open_db(kb_name: &str, config_dir: &Path) -> Result<Connection> {
 
     create_schema(&conn)?;
 
+    if vec_dimensions > 0 {
+        ensure_vec_table(&conn, vec_dimensions)?;
+    }
+
     Ok(conn)
+}
+
+/// Create the `documents_vec` virtual table if it doesn't already exist.
+/// `dimensions` must match the actual embedding dimensionality.
+fn ensure_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents_vec'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+
+    if !exists {
+        let sql = format!(
+            "CREATE VIRTUAL TABLE documents_vec USING vec0(\
+             document_id INTEGER PRIMARY KEY, \
+             embedding float[{}]\
+             )",
+            dimensions
+        );
+        conn.execute_batch(&sql)
+            .context("Failed to create documents_vec virtual table")?;
+    }
+
+    Ok(())
 }
 
 fn create_schema(conn: &Connection) -> Result<()> {
@@ -106,10 +159,67 @@ pub fn upsert_document(conn: &Connection, path: &str, content: &str, hash: &str)
 }
 
 /// Delete a document by path (triggers keep FTS in sync).
+/// Also removes the vector embedding if the documents_vec table exists.
 pub fn delete_document(conn: &Connection, path: &str) -> Result<()> {
+    // Grab the id before deleting so we can clean up the vec table.
+    let doc_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM documents WHERE path = ?1",
+            rusqlite::params![path],
+            |row| row.get(0),
+        )
+        .ok();
+
     conn.execute("DELETE FROM documents WHERE path = ?1", rusqlite::params![path])
         .with_context(|| format!("Failed to delete document: {}", path))?;
+
+    if let Some(id) = doc_id {
+        delete_document_vec(conn, id);
+    }
+
     Ok(())
+}
+
+/// Remove a vector embedding by document id (no-op if table doesn't exist).
+pub fn delete_document_vec(conn: &Connection, doc_id: i64) {
+    // Ignore errors — the table may not exist if embeddings are disabled.
+    let _ = conn.execute(
+        "DELETE FROM documents_vec WHERE document_id = ?1",
+        rusqlite::params![doc_id],
+    );
+}
+
+/// Upsert a vector embedding for a document id.
+/// `embedding` is passed as raw f32 bytes (zerocopy::AsBytes).
+pub fn upsert_document_vec(conn: &Connection, doc_id: i64, embedding_bytes: &[u8]) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO documents_vec(document_id, embedding) VALUES (?1, ?2)",
+        rusqlite::params![doc_id, embedding_bytes],
+    )
+    .context("Failed to upsert document vector")?;
+    Ok(())
+}
+
+/// Look up the document id for a given path.
+pub fn get_document_id(conn: &Connection, path: &str) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM documents WHERE path = ?1")?;
+    let mut rows = stmt.query(rusqlite::params![path])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Check whether the documents_vec table exists.
+pub fn vec_table_exists(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents_vec'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
 }
 
 /// Set a metadata value.

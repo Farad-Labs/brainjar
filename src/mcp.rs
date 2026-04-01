@@ -147,8 +147,8 @@ fn handle_tools_list() -> Result<Value> {
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["all", "fuzzy", "local", "text", "graph"],
-                            "description": "Search mode: 'all' runs FTS5 + graph (default, fast), 'fuzzy' adds fuzzy matching to all (slower), 'local' runs only fuzzy search, 'text' runs only FTS5, 'graph' runs entity graph traversal",
+                            "enum": ["all", "fuzzy", "local", "text", "graph", "vector"],
+                            "description": "Search mode: 'all' runs FTS5 + graph + vector (default), 'fuzzy' adds typo correction, 'local' runs nucleo fuzzy, 'text' FTS5 only, 'graph' entity traversal, 'vector' semantic similarity",
                             "default": "all"
                         },
                         "exact": {
@@ -219,6 +219,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 "text" => crate::search::SearchMode::Text,
                 "graph" => crate::search::SearchMode::Graph,
                 "fuzzy" => crate::search::SearchMode::Fuzzy,
+                "vector" => crate::search::SearchMode::Vector,
                 _ => crate::search::SearchMode::All,
             };
 

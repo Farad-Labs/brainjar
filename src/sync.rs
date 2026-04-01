@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 
 use crate::config::{Config, KnowledgeBaseConfig};
 use crate::db;
+use crate::embed::Embedder;
 use crate::extract::Extractor;
 use crate::fuzzy;
 use crate::graph::KnowledgeGraph;
@@ -65,7 +66,8 @@ async fn sync_kb_human(
 ) -> Result<()> {
     println!("\n{} {}", "⟳ Syncing".cyan().bold(), kb_name.bold());
 
-    let conn = db::open_db(kb_name, &config.config_dir)?;
+    let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
+    let conn = db::open_db_with_dims(kb_name, &config.config_dir, vec_dims)?;
     let watch_paths = config.expand_watch_paths(kb);
     let local_files = collect_files(config, &watch_paths);
     let changes = compute_changes(&conn, &local_files, force)?;
@@ -203,11 +205,63 @@ async fn sync_kb_human(
         }
     }
 
-    // ── TODO: embedding support (sqlite-vec integration, Phase 3) ───────────
-    // if let Some(_embed_cfg) = &config.embeddings {
-    //     let _embedder = crate::embed::Embedder::new(_embed_cfg);
-    //     // embed_batch() content chunks, upsert into documents_vec
-    // }
+    // ── Optional: vector embeddings via sqlite-vec ───────────────────────────
+    if let Some(embed_cfg) = &config.embeddings {
+        if !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+            let embedder = Embedder::new(embed_cfg);
+            let paths_and_contents: Vec<(String, String)> = changes
+                .to_upsert
+                .iter()
+                .filter_map(|(rel_path, abs_path)| {
+                    std::fs::read_to_string(abs_path)
+                        .ok()
+                        .map(|c| (rel_path.clone(), c))
+                })
+                .collect();
+
+            let mut embedded_count = 0usize;
+            let mut embed_errors = 0usize;
+
+            // Batch 20 documents at a time
+            for chunk in paths_and_contents.chunks(20) {
+                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
+                match embedder.embed_batch(&texts).await {
+                    Ok(embeddings) => {
+                        for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
+                            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                                use zerocopy::IntoBytes;
+                                if let Err(e) = db::upsert_document_vec(&conn, doc_id, embedding.as_bytes()) {
+                                    eprintln!("  ⚠ Vec upsert failed for {}: {}", rel_path, e);
+                                    embed_errors += 1;
+                                } else {
+                                    embedded_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  ⚠ Embedding batch failed: {}", e);
+                        embed_errors += chunk.len();
+                    }
+                }
+            }
+
+            if embed_errors == 0 {
+                println!(
+                    "  {} Generated embeddings ({} documents)",
+                    "✓".green(),
+                    embedded_count
+                );
+            } else {
+                println!(
+                    "  {} Generated embeddings ({} documents, {} errors)",
+                    "⚠".yellow(),
+                    embedded_count,
+                    embed_errors
+                );
+            }
+        }
+    }
 
     println!("  {} Done", "✓".green().bold());
 
@@ -221,7 +275,8 @@ async fn sync_kb_json(
     force: bool,
     dry_run: bool,
 ) -> Result<()> {
-    let conn = db::open_db(kb_name, &config.config_dir)?;
+    let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
+    let conn = db::open_db_with_dims(kb_name, &config.config_dir, vec_dims)?;
     let watch_paths = config.expand_watch_paths(kb);
     let local_files = collect_files(config, &watch_paths);
     let changes = compute_changes(&conn, &local_files, force)?;
@@ -273,9 +328,41 @@ async fn sync_kb_json(
             }
         }
 
+        // Vector embeddings (JSON mode)
+        let mut vectors_embedded = 0usize;
+        if let Some(embed_cfg) = &config.embeddings {
+            if !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+                let embedder = Embedder::new(embed_cfg);
+                let paths_and_contents: Vec<(String, String)> = changes
+                    .to_upsert
+                    .iter()
+                    .filter_map(|(rel_path, abs_path)| {
+                        std::fs::read_to_string(abs_path)
+                            .ok()
+                            .map(|c| (rel_path.clone(), c))
+                    })
+                    .collect();
+
+                for chunk in paths_and_contents.chunks(20) {
+                    let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
+                    if let Ok(embeddings) = embedder.embed_batch(&texts).await {
+                        for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
+                            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                                use zerocopy::IntoBytes;
+                                if db::upsert_document_vec(&conn, doc_id, embedding.as_bytes()).is_ok() {
+                                    vectors_embedded += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         result["status"] = serde_json::Value::String("COMPLETE".to_string());
         result["entities_extracted"] = serde_json::Value::Number(entities_extracted.into());
         result["relationships_extracted"] = serde_json::Value::Number(rels_extracted.into());
+        result["vectors_embedded"] = serde_json::Value::Number(vectors_embedded.into());
     } else {
         result["status"] = serde_json::Value::String("DRY_RUN".to_string());
     }
