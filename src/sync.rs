@@ -317,8 +317,8 @@ async fn sync_kb_human(
             let mut embedded_count = 0usize;
             let mut embed_errors = 0usize;
 
-            // Batch 20 chunks at a time
-            for batch in chunk_items.chunks(20) {
+            // Batch 100 chunks at a time — matches Gemini batchEmbedContents limit
+            for batch in chunk_items.chunks(100) {
                 let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
                     (content.as_str(), Some(title.as_str()))
                 }).collect();
@@ -514,7 +514,7 @@ async fn sync_kb_json(
                     }
                 }
 
-                for batch in chunk_items.chunks(20) {
+                for batch in chunk_items.chunks(100) {
                     let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
                         (content.as_str(), Some(title.as_str()))
                     }).collect();

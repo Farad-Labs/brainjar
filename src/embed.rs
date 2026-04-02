@@ -166,103 +166,96 @@ impl Embedder {
         }
     }
 
-    /// Gemini embedding-001 style: uses taskType API parameter.
-    async fn embed_gemini_v1(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
+    /// Send a single batchEmbedContents request and return one Vec<f32> per input.
+    /// `requests` must be a JSON array of individual request objects.
+    async fn batch_embed_gemini_request(&self, requests: serde_json::Value) -> Result<Vec<Vec<f32>>> {
         let api_key = self.require_api_key()?;
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents?key={}",
+            self.config.model, api_key
+        );
+        let body = serde_json::json!({ "requests": requests });
 
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Gemini batchEmbedContents request failed")?;
+
+        let status = resp.status();
+        let json: serde_json::Value =
+            resp.json().await.context("Failed to parse Gemini batch embed response")?;
+
+        if !status.is_success() {
+            let err_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
+        }
+
+        let embeddings = json["embeddings"]
+            .as_array()
+            .context("Gemini: missing embeddings array in batch response")?;
+
+        embeddings
+            .iter()
+            .map(|emb| {
+                let values = emb["values"]
+                    .as_array()
+                    .context("Gemini: missing values in batch embedding")?;
+                Ok(values
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect())
+            })
+            .collect()
+    }
+
+    /// Gemini embedding-001 style: uses taskType API parameter.
+    /// Sends up to 100 texts per batchEmbedContents request.
+    async fn embed_gemini_v1(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
+        let model = &self.config.model;
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
-        for text in texts {
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
-                self.config.model, api_key
-            );
-            let body = serde_json::json!({
-                "model": format!("models/{}", self.config.model),
-                "content": {"parts": [{"text": text}]},
-                "taskType": task_type.as_gemini_v1_str()
-            });
-
-            let resp = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .context("Gemini embedContent request failed")?;
-
-            let status = resp.status();
-            let json: serde_json::Value =
-                resp.json().await.context("Failed to parse Gemini embed response")?;
-
-            if !status.is_success() {
-                let err_msg = json["error"]["message"]
-                    .as_str()
-                    .unwrap_or("unknown error");
-                anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
-            }
-
-            let values = json["embedding"]["values"]
-                .as_array()
-                .context("Gemini: missing embedding.values in response")?;
-
-            let embedding: Vec<f32> = values
+        for batch in texts.chunks(100) {
+            let requests: Vec<serde_json::Value> = batch
                 .iter()
-                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .map(|text| serde_json::json!({
+                    "model": format!("models/{}", model),
+                    "content": {"parts": [{"text": text}]},
+                    "taskType": task_type.as_gemini_v1_str()
+                }))
                 .collect();
 
-            all_embeddings.push(embedding);
+            let mut batch_embeddings =
+                self.batch_embed_gemini_request(serde_json::Value::Array(requests)).await?;
+            all_embeddings.append(&mut batch_embeddings);
         }
 
         Ok(all_embeddings)
     }
 
     /// Gemini embedding-2 style: text is already formatted with prefixes, no taskType param.
+    /// Sends up to 100 texts per batchEmbedContents request.
     async fn embed_gemini_raw(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let api_key = self.require_api_key()?;
-
+        let model = &self.config.model;
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
-        for text in texts {
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
-                self.config.model, api_key
-            );
+        for batch in texts.chunks(100) {
             // No taskType for v2 — task is encoded in the text prefix
-            let body = serde_json::json!({
-                "model": format!("models/{}", self.config.model),
-                "content": {"parts": [{"text": text}]}
-            });
-
-            let resp = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .context("Gemini embedContent request failed")?;
-
-            let status = resp.status();
-            let json: serde_json::Value =
-                resp.json().await.context("Failed to parse Gemini embed response")?;
-
-            if !status.is_success() {
-                let err_msg = json["error"]["message"]
-                    .as_str()
-                    .unwrap_or("unknown error");
-                anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
-            }
-
-            let values = json["embedding"]["values"]
-                .as_array()
-                .context("Gemini: missing embedding.values in response")?;
-
-            let embedding: Vec<f32> = values
+            let requests: Vec<serde_json::Value> = batch
                 .iter()
-                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .map(|text| serde_json::json!({
+                    "model": format!("models/{}", model),
+                    "content": {"parts": [{"text": text}]}
+                }))
                 .collect();
 
-            all_embeddings.push(embedding);
+            let mut batch_embeddings =
+                self.batch_embed_gemini_request(serde_json::Value::Array(requests)).await?;
+            all_embeddings.append(&mut batch_embeddings);
         }
 
         Ok(all_embeddings)
@@ -490,5 +483,63 @@ mod tests {
     fn test_format_gemini_v2_code_query() {
         let result = format_gemini_v2_text("parse json", TaskType::CodeRetrievalQuery, None);
         assert_eq!(result, "task: code retrieval | query: parse json");
+    }
+
+    #[test]
+    fn test_gemini_v1_batch_request_structure() {
+        let texts = ["text1", "text2", "text3"];
+        let model = "gemini-embedding-001";
+        let task_type_str = TaskType::RetrievalDocument.as_gemini_v1_str();
+
+        let requests: Vec<serde_json::Value> = texts
+            .iter()
+            .map(|text| serde_json::json!({
+                "model": format!("models/{}", model),
+                "content": {"parts": [{"text": text}]},
+                "taskType": task_type_str
+            }))
+            .collect();
+        let body = serde_json::json!({ "requests": requests });
+
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs.len(), 3);
+        assert_eq!(reqs[0]["model"], "models/gemini-embedding-001");
+        assert_eq!(reqs[0]["taskType"], "RETRIEVAL_DOCUMENT");
+        assert_eq!(reqs[0]["content"]["parts"][0]["text"], "text1");
+        assert_eq!(reqs[2]["content"]["parts"][0]["text"], "text3");
+    }
+
+    #[test]
+    fn test_gemini_raw_batch_request_structure() {
+        let texts = ["title: Doc | text: hello", "title: Other | text: world"];
+        let model = "gemini-embedding-2-preview";
+
+        let requests: Vec<serde_json::Value> = texts
+            .iter()
+            .map(|text| serde_json::json!({
+                "model": format!("models/{}", model),
+                "content": {"parts": [{"text": text}]}
+            }))
+            .collect();
+        let body = serde_json::json!({ "requests": requests });
+
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0]["model"], "models/gemini-embedding-2-preview");
+        // No taskType field for raw/v2 requests
+        assert!(reqs[0].get("taskType").is_none() || reqs[0]["taskType"].is_null());
+        assert_eq!(reqs[0]["content"]["parts"][0]["text"], "title: Doc | text: hello");
+        assert_eq!(reqs[1]["content"]["parts"][0]["text"], "title: Other | text: world");
+    }
+
+    #[test]
+    fn test_gemini_batch_chunks_at_100() {
+        // Verify that .chunks(100) correctly partitions a 101-element slice
+        let texts: Vec<&str> = (0..101).map(|_| "x").collect();
+        let mut batch_sizes = Vec::new();
+        for batch in texts.chunks(100) {
+            batch_sizes.push(batch.len());
+        }
+        assert_eq!(batch_sizes, vec![100, 1]);
     }
 }
