@@ -133,6 +133,8 @@ impl KnowledgeGraph {
     /// mention them (plus 1-hop neighbors for context).
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<GraphSearchResult>> {
         let query_lower = query.to_lowercase();
+        // Split query into words for multi-word matching
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
         // Return individual properties — avoids needing to navigate the node wrapper
         let all_entities = self
@@ -145,7 +147,10 @@ impl KnowledgeGraph {
 
         for row in all_entities.iter() {
             let name: String = row.get("ename").unwrap_or_default();
-            if !name.to_lowercase().contains(&query_lower) {
+            let name_lower = name.to_lowercase();
+            // Match if ANY query word is a substring of the entity name
+            let matches = query_words.iter().any(|word| name_lower.contains(word));
+            if !matches {
                 continue;
             }
             let id: String = row.get("eid").unwrap_or_default();
