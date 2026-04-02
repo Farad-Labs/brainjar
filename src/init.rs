@@ -64,46 +64,73 @@ struct ProviderEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn print_mascot() {
-    // Jar (cyan)
-    let jar_top   = "      .~~~~~~~~~~.";
-    let jar_1     = "     /  *  brain  \\";
-    let jar_2     = "    | .  in a jar. |";
-    let jar_3     = "    |  `-.___.-'   |";
-    let jar_bot   = "     \\____________/";
-    let jar_neck  = "          ||";
-    // Robot body (white/bold)
-    let bod_top   = "     .----||----.";
-    let bod_eye   = "     | (o)  (o) |";
-    let bod_mouth = "     |   \\___/  |";
-    let bod_bot   = "     `----+--+--'";
-    let arms      = "    /     |  |     \\";
-    let legs_top  = "          |  |";
-    let legs_bot  = "         /    \\";
-    let feet      = "        [_]  [_]";
+    use colored::Colorize;
+
+    // ── Glass dome (cyan walls, pink brain inside) ─────────────────
+    let d1 = "         ,------------,";
+    // d2–d5 are printed inline with split coloring (see below)
+    let d6 = "        \\~~~~~~~~~~~~~~/";
+
+    // ── Face collar / head band (yellow) ──────────────────────────
+    let f1 = "      .-[● ● ● ● ● ● ● ●]-.";
+    let f2 = "      |   (◉)       (◉)   |";
+    let f3 = "      |        \\_/        |";
+    let f4 = "      '-[● ● ● ● ● ● ● ●]-'";
+
+    // ── Body (white/bold) ──────────────────────────────────────────
+    let b1 = "     ----------------------";
+    let b2 = "     |                    |";
+    let b3 = "<{)==|    [__________]    |==(}>"; // arms at chest level
+    let b4 = "     |                    |";
+    let b5 = "     ----------------------";
+
+    // ── Legs & tank treads (white) ────────────────────────────────
+    let l1 = "           |        |";
+    let l2 = "          [=]      [=]";
+    let l3 = "         /   \\    /   \\";
+    let l4 = "        [=====]  [=====]";
+    let l5 = "         '----'  '----'";
 
     println!();
-    println!("{}", jar_top.cyan().bold());
-    println!("{}", jar_1.cyan());
-    println!("{}", jar_2.cyan());
-    println!("{}", jar_3.cyan());
-    println!("{}", jar_bot.cyan().bold());
-    println!("{}", jar_neck.white().bold());
-    println!("{}", bod_top.white().bold());
-    println!("{}", bod_eye.white().bold());
-    println!("{}", bod_mouth.white().bold());
-    println!("{}", bod_bot.white().bold());
-    println!("{}", arms.white());
-    println!("{}", legs_top.white());
-    println!("{}", legs_bot.white());
-    println!("{}", feet.white());
+
+    // Dome — walls in cyan, brain interior in bright magenta (pink)
+    println!("{}", d1.cyan().bold());
+    print!("{}", "        /  ".cyan());
+    print!("{}", "* ~~~ * ~~".bright_magenta());
+    println!("{}", "  \\".cyan());
+    print!("{}", "       |  ".cyan());
+    print!("{}", "/~~~~~~~~~~\\".bright_magenta());
+    println!("{}", "  |".cyan());
+    print!("{}", "       |  ".cyan());
+    print!("{}", "(~~~~~~~~~~)".bright_magenta());
+    println!("{}", "  |".cyan());
+    print!("{}", "       |  ".cyan());
+    print!("{}", "\\__________/".bright_magenta());
+    println!("{}", "  |".cyan());
+    println!("{}", d6.cyan().bold());
+
+    println!("{}", f1.yellow().bold());
+    println!("{}", f2.yellow().bold());
+    println!("{}", f3.yellow());
+    println!("{}", f4.yellow().bold());
+    println!("{}", b1.white().bold());
+    println!("{}", b2.white().bold());
+    println!("{}", b3.white().bold());
+    println!("{}", b4.white().bold());
+    println!("{}", b5.white().bold());
+    println!("{}", l1.white());
+    println!("{}", l2.white().bold());
+    println!("{}", l3.white());
+    println!("{}", l4.white().bold());
+    println!("{}", l5.white());
     println!();
-    println!("  {}",
+    println!("     {}",
         "B  R  A  I  N  J  A  R"
             .bold()
             .cyan()
     );
     println!(
-        "  {}",
+        "   {}",
         "Your local AI memory system".dimmed()
     );
     println!();
