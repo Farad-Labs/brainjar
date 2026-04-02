@@ -55,6 +55,7 @@ brainjar search --fuzzy "deploymnt workflw"
 | `--graph` | Entity graph traversal only | ~20ms | Concept/relationship queries |
 | `--vector` | Semantic vector (ANN) | ~50ms | Semantic similarity, paraphrase queries |
 | `--local` | Nucleo file scanner | ~50ms | Files not yet synced, raw file:line results |
+| `--smart` | LLM query extraction + fan-out | ~500ms | Conversational/natural language queries |
 
 ```bash
 # Default: FTS + graph merged via RRF
@@ -77,6 +78,11 @@ brainjar search --exact "brainjar.toml"
 
 # Limit results
 brainjar search --limit 10 "search"
+
+# Smart: LLM extracts 2-5 targeted queries from conversational text
+brainjar search --smart "should we use flash lite for auto-recall entity extraction?"
+# 🧠 Extracted 3 queries: "auto-recall", "flash lite", "entity extraction"
+# Results from all queries, deduplicated and ranked
 
 # Search a specific knowledge base
 brainjar search --kb personal "morning routine"
@@ -106,6 +112,18 @@ At search time with `--fuzzy`:
 3. If not found → closest match by Levenshtein distance (max 2 for short words, 3 for long)
 4. Corrected query is run through FTS5 + graph
 5. Corrections are shown: `✎ corrected: deploymnt → deployment`
+
+### Smart Search
+
+For conversational or natural language queries, use `--smart` to let the LLM extract 2-5 targeted search terms before running the search:
+
+```bash
+brainjar search --smart "should we use flash lite for auto-recall entity extraction?"
+# 🧠 Extracted 3 queries: "auto-recall", "flash lite", "entity extraction"
+# Results from all queries, deduplicated and ranked by score
+```
+
+Smart search fans out across all extracted queries, deduplicates results by chunk ID, and returns a single ranked list. Requires `[extraction]` config (uses the same LLM provider as GraphRAG). Cost: ~$0.000025 per search with Flash Lite.
 
 ## Entity Extraction (GraphRAG)
 

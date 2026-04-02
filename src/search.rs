@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::db;
@@ -74,6 +75,98 @@ pub struct VectorResult {
     pub chunk_type: Option<String>,
 }
 
+/// Use a cheap LLM to extract targeted search queries from conversational text.
+/// Public alias for use by mcp.rs.
+pub async fn extract_queries_pub(config: &Config, raw_text: &str) -> Result<Vec<String>> {
+    extract_queries(config, raw_text).await
+}
+
+async fn extract_queries(config: &Config, raw_text: &str) -> Result<Vec<String>> {
+    let ext_config = config.extraction.as_ref()
+        .context("Smart search requires [extraction] config for LLM query extraction")?;
+
+    let api_key = config.resolve_api_key(&ext_config.provider, ext_config.api_key.as_deref())
+        .context("No API key for extraction provider")?;
+
+    let prompt = format!(
+        "Extract 2-5 concise search queries from this text. Return ONLY a JSON array of strings, nothing else.\n\nText: {}",
+        raw_text
+    );
+
+    let client = reqwest::Client::new();
+
+    let result = match ext_config.provider.as_str() {
+        "gemini" => {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+                ext_config.model, api_key
+            );
+            let body = serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            });
+            let resp = client.post(&url).json(&body).send().await
+                .context("Smart search: LLM request failed")?;
+            let json: serde_json::Value = resp.json().await?;
+            json["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or("[]")
+                .to_string()
+        }
+        "openai" => {
+            let url = "https://api.openai.com/v1/chat/completions";
+            let body = serde_json::json!({
+                "model": ext_config.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            });
+            let resp = client.post(url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body).send().await?;
+            let json: serde_json::Value = resp.json().await?;
+            json["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("[]")
+                .to_string()
+        }
+        "ollama" => {
+            let base_url = config.resolve_base_url(&ext_config.provider, ext_config.base_url.as_deref())
+                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            let url = format!("{}/api/generate", base_url);
+            let body = serde_json::json!({
+                "model": ext_config.model,
+                "prompt": prompt,
+                "stream": false,
+                "format": "json"
+            });
+            let resp = client.post(&url).json(&body).send().await?;
+            let json: serde_json::Value = resp.json().await?;
+            json["response"].as_str().unwrap_or("[]").to_string()
+        }
+        p => anyhow::bail!("Unknown extraction provider for smart search: {}", p),
+    };
+
+    // Parse the JSON array of queries
+    let queries: Vec<String> = match serde_json::from_str::<Vec<String>>(&result) {
+        Ok(q) => q,
+        Err(_) => {
+            // Try to extract array from wrapper object (LLMs sometimes return {"queries": [...]})
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&result) {
+                if let Some(arr) = obj.as_object().and_then(|o| o.values().next()).and_then(|v| v.as_array()) {
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                } else {
+                    vec![raw_text.to_string()] // fallback: use raw text
+                }
+            } else {
+                vec![raw_text.to_string()]
+            }
+        }
+    };
+
+    // Limit to 5 queries max
+    Ok(queries.into_iter().take(5).collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_search(
     config: &Config,
@@ -85,7 +178,63 @@ pub async fn run_search(
     exact: bool,
     chunks: bool,
     doc_score: bool,
+    smart: bool,
 ) -> Result<()> {
+    // Smart mode: use LLM to extract targeted search queries from conversational text
+    if smart {
+        let queries = extract_queries(config, query).await?;
+        if !json {
+            eprintln!(
+                "{} Extracted {} quer{}: {}",
+                "🧠".dimmed(),
+                queries.len(),
+                if queries.len() == 1 { "y" } else { "ies" },
+                queries.iter().map(|q| format!("\"{}\"", q)).collect::<Vec<_>>().join(", ")
+            );
+        }
+
+        // Fan-out: run search for each extracted query, collect and merge results
+        let mut all_fts: Vec<FtsResult> = Vec::new();
+        let mut all_local: Vec<crate::local_search::LocalSearchResult> = Vec::new();
+        let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
+        let mut all_vector: Vec<VectorResult> = Vec::new();
+
+        for sub_query in &queries {
+            let (fts, local, graph, vector) =
+                collect_search_results(config, sub_query, kb_name, limit, mode, exact).await?;
+            all_fts.extend(fts);
+            all_local.extend(local);
+            all_graph.extend(graph);
+            all_vector.extend(vector);
+        }
+
+        // Deduplicate by chunk_id (keeping highest score) or by path for path-keyed results
+        all_fts = dedup_fts_results(all_fts);
+        all_local = dedup_local_results(all_local);
+        all_graph = dedup_graph_results(all_graph);
+        all_vector = dedup_vector_results(all_vector);
+
+        if json {
+            let unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            let output = serde_json::json!({ "results": unified, "smart_queries": queries });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            print_results(
+                query,
+                query,
+                &[],
+                &all_fts,
+                &all_local,
+                &all_graph,
+                &all_vector,
+                mode,
+                limit,
+                chunks,
+                doc_score,
+            );
+        }
+        return Ok(());
+    }
     let db_dir = config.effective_db_dir();
     let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
     let run_local = matches!(mode, SearchMode::Local);
@@ -285,6 +434,193 @@ pub async fn run_search(
     }
 
     Ok(())
+}
+
+/// Core search logic — collects raw results without printing or merging.
+/// Used by both normal mode and smart fan-out mode.
+#[allow(clippy::too_many_arguments)]
+async fn collect_search_results(
+    config: &Config,
+    query: &str,
+    kb_name: Option<&str>,
+    limit: usize,
+    mode: SearchMode,
+    exact: bool,
+) -> Result<(
+    Vec<FtsResult>,
+    Vec<crate::local_search::LocalSearchResult>,
+    Vec<crate::graph::GraphSearchResult>,
+    Vec<VectorResult>,
+)> {
+    let db_dir = config.effective_db_dir();
+    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
+    let run_local = matches!(mode, SearchMode::Local);
+    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
+    let run_vector = matches!(mode, SearchMode::All | SearchMode::Vector | SearchMode::Fuzzy);
+
+    let search_query = query;
+
+    // FTS results
+    let fts_results: Vec<FtsResult> = if run_fts {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
+                .collect()
+        };
+        let mut all: Vec<FtsResult> = Vec::new();
+        for (name, _kb) in &kbs {
+            let conn = db::open_db(name, &db_dir)?;
+            let results = search_fts(&conn, search_query, limit)?;
+            all.extend(results);
+        }
+        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all.truncate(limit);
+        all
+    } else {
+        Vec::new()
+    };
+
+    // Local fuzzy results
+    let local_results: Vec<crate::local_search::LocalSearchResult> = if run_local {
+        crate::local_search::run_local_search(config, query, limit, exact)?
+    } else {
+        Vec::new()
+    };
+
+    // Graph results
+    let graph_results: Vec<crate::graph::GraphSearchResult> = if run_graph {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
+                .collect()
+        };
+        let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
+        for (name, _kb) in &kbs {
+            if !crate::graph::KnowledgeGraph::exists(&db_dir, name) {
+                continue;
+            }
+            match crate::graph::KnowledgeGraph::open(&db_dir, name) {
+                Ok(kg) => match kg.search(search_query, limit) {
+                    Ok(results) => all_graph.extend(results),
+                    Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
+                },
+                Err(e) => eprintln!("Could not open graph DB for KB {}: {}", name, e),
+            }
+        }
+        all_graph
+    } else {
+        Vec::new()
+    };
+
+    // Vector KNN search
+    let vector_results: Vec<VectorResult> = if run_vector {
+        if let Some(embed_cfg) = &config.embeddings {
+            let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+            let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+            let embedder = crate::embed::Embedder::new(embed_cfg, api_key, base_url);
+            let all_paths: Vec<String> = if let Some(name) = kb_name {
+                let conn = crate::db::open_db(name, &config.effective_db_dir()).ok();
+                conn.and_then(|c| crate::db::get_all_paths(&c).ok()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let query_task = crate::embed::task_type_for_query(&all_paths);
+            match embedder.embed_batch_with_task(&[search_query], query_task).await {
+                Ok(vecs) if !vecs.is_empty() => {
+                    let query_vec = &vecs[0];
+                    let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+                        let kb = config.knowledge_bases.get(name)
+                            .with_context(|| format!("KB '{}' not found", name))?;
+                        vec![(name, kb)]
+                    } else {
+                        config.knowledge_bases.iter().map(|(n, kb): (&String, _)| (n.as_str(), kb)).collect()
+                    };
+                    let mut all_vec: Vec<VectorResult> = Vec::new();
+                    for (name, _kb) in &kbs {
+                        let conn = db::open_db(name, &db_dir)?;
+                        match search_vector(&conn, query_vec, limit) {
+                            Ok(results) => all_vec.extend(results),
+                            Err(e) => eprintln!("Vector search error in KB {}: {}", name, e),
+                        }
+                    }
+                    all_vec
+                }
+                Ok(_) => Vec::new(),
+                Err(e) => {
+                    eprintln!("Embedding query failed: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok((fts_results, local_results, graph_results, vector_results))
+}
+
+/// Deduplicate FTS results by chunk_id (or path if no chunk_id), keeping highest score.
+fn dedup_fts_results(mut results: Vec<FtsResult>) -> Vec<FtsResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen_chunks: HashSet<i64> = HashSet::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    results.retain(|r| {
+        if let Some(id) = r.chunk_id {
+            seen_chunks.insert(id)
+        } else {
+            seen_paths.insert(r.path.clone())
+        }
+    });
+    results
+}
+
+/// Deduplicate local search results by file path, keeping highest score.
+fn dedup_local_results(mut results: Vec<crate::local_search::LocalSearchResult>) -> Vec<crate::local_search::LocalSearchResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen: HashSet<String> = HashSet::new();
+    results.retain(|r| seen.insert(r.file.clone()));
+    results
+}
+
+/// Deduplicate graph results by file path, keeping highest score.
+fn dedup_graph_results(mut results: Vec<crate::graph::GraphSearchResult>) -> Vec<crate::graph::GraphSearchResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen: HashSet<String> = HashSet::new();
+    results.retain(|r| seen.insert(r.file.clone()));
+    results
+}
+
+/// Deduplicate vector results by chunk_id (or path if no chunk_id), keeping highest score.
+fn dedup_vector_results(mut results: Vec<VectorResult>) -> Vec<VectorResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen_chunks: HashSet<i64> = HashSet::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    results.retain(|r| {
+        if let Some(id) = r.chunk_id {
+            seen_chunks.insert(id)
+        } else {
+            seen_paths.insert(r.path.clone())
+        }
+    });
+    results
 }
 
 /// FTS5 BM25 search — queries `chunks_fts` if available, falls back to `documents_fts`.
