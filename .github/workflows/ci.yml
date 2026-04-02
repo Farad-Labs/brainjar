@@ -7,8 +7,8 @@ on:
     branches: [dev]
 
 jobs:
-  build-and-test:
-    name: build-and-test
+  ci:
+    name: ci-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -25,3 +25,16 @@ jobs:
         run: cargo build
       - name: Unit + integration tests
         run: cargo test
+
+  # Single status check that branch protection requires
+  build-and-test:
+    name: build-and-test
+    needs: ci
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - run: |
+          if [ "${{ needs.ci.result }}" != "success" ]; then
+            echo "CI failed"
+            exit 1
+          fi
