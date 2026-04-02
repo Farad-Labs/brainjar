@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use glob::Pattern;
 use walkdir::WalkDir;
 
+use crate::chunk;
 use crate::config::{Config, KnowledgeBaseConfig};
 use crate::db;
 use crate::embed::Embedder;
@@ -156,6 +157,14 @@ async fn sync_kb_human(
                 new_count += 1;
             }
             db::upsert_document(&conn, rel_path, &content, &hash)?;
+            // Chunk the document and (re)insert chunks
+            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                let _ = db::delete_chunks_for_doc(&conn, doc_id);
+                let file_chunks = chunk::chunk_file(rel_path, &content);
+                for c in &file_chunks {
+                    let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
+                }
+            }
             pb.inc(1);
         }
         pb.finish_and_clear();
@@ -280,63 +289,67 @@ async fn sync_kb_human(
             }
         }
 
-    // ── Optional: vector embeddings via sqlite-vec ───────────────────────────
+    // ── Optional: vector embeddings via sqlite-vec (per chunk) ────────────────
     if let Some(embed_cfg) = &config.embeddings
-        && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+        && !changes.to_upsert.is_empty() && db::chunks_vec_table_exists(&conn) {
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
             let embedder = Embedder::new(embed_cfg, api_key, base_url);
-            let paths_and_contents: Vec<(String, String)> = changes
-                .to_upsert
-                .iter()
-                .filter_map(|(rel_path, abs_path)| {
-                    std::fs::read_to_string(abs_path)
-                        .ok()
-                        .map(|c| (rel_path.clone(), c))
-                })
-                .collect();
+
+            // Collect all (chunk_id, content, title) for newly upserted docs
+            let mut chunk_items: Vec<(i64, String, String)> = Vec::new(); // (chunk_id, content, file_stem)
+            for rel_path in changes.to_upsert.keys() {
+                #[allow(clippy::collapsible_if)]
+                if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                    if let Ok(doc_chunks) = db::get_chunks_for_doc(&conn, doc_id) {
+                        let title = std::path::Path::new(rel_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        for (cid, content, _, _, _) in doc_chunks {
+                            chunk_items.push((cid, content, title.clone()));
+                        }
+                    }
+                }
+            }
 
             let mut embedded_count = 0usize;
             let mut embed_errors = 0usize;
 
-            // Batch 20 documents at a time
-            for chunk in paths_and_contents.chunks(20) {
-                let docs: Vec<(&str, Option<&str>)> = chunk.iter().map(|(rel_path, c)| {
-                    let title = std::path::Path::new(rel_path)
-                        .file_stem()
-                        .and_then(|s| s.to_str());
-                    (c.as_str(), title)
+            // Batch 20 chunks at a time
+            for batch in chunk_items.chunks(20) {
+                let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
+                    (content.as_str(), Some(title.as_str()))
                 }).collect();
                 match embedder.embed_documents(&docs).await {
                     Ok(embeddings) => {
-                        for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
-                            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
-                                use zerocopy::IntoBytes;
-                                if let Err(e) = db::upsert_document_vec(&conn, doc_id, embedding.as_bytes()) {
-                                    eprintln!("  ⚠ Vec upsert failed for {}: {}", rel_path, e);
-                                    embed_errors += 1;
-                                } else {
-                                    embedded_count += 1;
-                                }
+                        for ((chunk_id, _, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                            use zerocopy::IntoBytes;
+                            if let Err(e) = db::upsert_chunk_vec(&conn, *chunk_id, embedding.as_bytes()) {
+                                eprintln!("  ⚠ Chunk vec upsert failed for chunk {}: {}", chunk_id, e);
+                                embed_errors += 1;
+                            } else {
+                                embedded_count += 1;
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("  ⚠ Embedding batch failed: {}", e);
-                        embed_errors += chunk.len();
+                        embed_errors += batch.len();
                     }
                 }
             }
 
             if embed_errors == 0 {
                 println!(
-                    "  {} Generated embeddings ({} documents)",
+                    "  {} Generated embeddings ({} chunks)",
                     "✓".green(),
                     embedded_count
                 );
             } else {
                 println!(
-                    "  {} Generated embeddings ({} documents, {} errors)",
+                    "  {} Generated embeddings ({} chunks, {} errors)",
                     "\u{26a0}".yellow(),
                     embedded_count,
                     embed_errors
@@ -413,6 +426,14 @@ async fn sync_kb_json(
             let content = std::fs::read_to_string(abs_path)?;
             let hash = hash_content(content.as_bytes());
             db::upsert_document(&conn, rel_path, &content, &hash)?;
+            // Chunk the document
+            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                let _ = db::delete_chunks_for_doc(&conn, doc_id);
+                let file_chunks = chunk::chunk_file(rel_path, &content);
+                for c in &file_chunks {
+                    let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
+                }
+            }
         }
         for path in &changes.to_delete {
             db::delete_document(&conn, path)?;
@@ -468,37 +489,40 @@ async fn sync_kb_json(
                 }
             }
 
-        // Vector embeddings (JSON mode)
+        // Vector embeddings (JSON mode) — per chunk
         let mut vectors_embedded = 0usize;
         if let Some(embed_cfg) = &config.embeddings
-            && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+            && !changes.to_upsert.is_empty() && db::chunks_vec_table_exists(&conn) {
                 let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
                 let embedder = Embedder::new(embed_cfg, api_key, base_url);
-                let paths_and_contents: Vec<(String, String)> = changes
-                    .to_upsert
-                    .iter()
-                    .filter_map(|(rel_path, abs_path)| {
-                        std::fs::read_to_string(abs_path)
-                            .ok()
-                            .map(|c| (rel_path.clone(), c))
-                    })
-                    .collect();
 
-                for chunk in paths_and_contents.chunks(20) {
-                    let docs: Vec<(&str, Option<&str>)> = chunk.iter().map(|(rel_path, c)| {
-                        let title = std::path::Path::new(rel_path)
-                            .file_stem()
-                            .and_then(|s| s.to_str());
-                        (c.as_str(), title)
+                let mut chunk_items: Vec<(i64, String, String)> = Vec::new();
+                for rel_path in changes.to_upsert.keys() {
+                    #[allow(clippy::collapsible_if)]
+                    if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                        if let Ok(doc_chunks) = db::get_chunks_for_doc(&conn, doc_id) {
+                            let title = std::path::Path::new(rel_path)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            for (cid, content, _, _, _) in doc_chunks {
+                                chunk_items.push((cid, content, title.clone()));
+                            }
+                        }
+                    }
+                }
+
+                for batch in chunk_items.chunks(20) {
+                    let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
+                        (content.as_str(), Some(title.as_str()))
                     }).collect();
                     if let Ok(embeddings) = embedder.embed_documents(&docs).await {
-                        for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
-                            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
-                                use zerocopy::IntoBytes;
-                                if db::upsert_document_vec(&conn, doc_id, embedding.as_bytes()).is_ok() {
-                                    vectors_embedded += 1;
-                                }
+                        for ((chunk_id, _, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                            use zerocopy::IntoBytes;
+                            if db::upsert_chunk_vec(&conn, *chunk_id, embedding.as_bytes()).is_ok() {
+                                vectors_embedded += 1;
                             }
                         }
                     }

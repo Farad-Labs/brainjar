@@ -16,6 +16,12 @@ pub struct FtsResult {
     pub path: String,
     pub excerpt: String,
     pub score: f64,
+    /// Chunk id (from chunks_fts), if available
+    pub chunk_id: Option<i64>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
+    pub chunk_type: Option<String>,
+    pub content: Option<String>,
 }
 
 /// A unified search result (for JSON output).
@@ -26,6 +32,18 @@ pub struct UnifiedResult {
     pub sources: Vec<String>,
     pub excerpt: String,
     pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// Search mode
@@ -50,8 +68,13 @@ pub enum SearchMode {
 pub struct VectorResult {
     pub path: String,
     pub score: f64,
+    pub chunk_id: Option<i64>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
+    pub chunk_type: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_search(
     config: &Config,
     query: &str,
@@ -60,6 +83,8 @@ pub async fn run_search(
     json: bool,
     mode: SearchMode,
     exact: bool,
+    chunks: bool,
+    doc_score: bool,
 ) -> Result<()> {
     let db_dir = config.effective_db_dir();
     let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
@@ -233,7 +258,7 @@ pub async fn run_search(
     };
 
     if json {
-        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit);
+        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
             let corrections_json: Vec<serde_json::Value> = query_corrections
@@ -254,77 +279,186 @@ pub async fn run_search(
             &vector_results,
             mode,
             limit,
+            chunks,
+            doc_score,
         );
     }
 
     Ok(())
 }
 
-/// FTS5 BM25 search using the documents_fts virtual table.
+/// FTS5 BM25 search — queries `chunks_fts` if available, falls back to `documents_fts`.
 pub fn search_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
-    let mut stmt = conn.prepare(
-        r#"SELECT d.path,
-                  snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
-                  rank AS score
-           FROM documents_fts
-           JOIN documents d ON d.id = documents_fts.rowid
-           WHERE documents_fts MATCH ?1
-           ORDER BY rank
-           LIMIT ?2"#,
-    )?;
+    // Check if chunks_fts exists
+    let has_chunks_fts: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
 
-    let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
-        Ok(FtsResult {
-            path: row.get(0)?,
-            excerpt: row.get(1)?,
-            // FTS5 rank is negative (lower = better match). Negate to get a
-            // positive score where higher is better.
-            score: -row.get::<_, f64>(2)?,
-        })
-    })?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
+    if has_chunks_fts {
+        // Query chunks_fts, join with chunks + documents
+        let mut stmt = conn.prepare(
+            "SELECT d.path,
+                    snippet(chunks_fts, 0, '', '', '...', 32) AS excerpt,
+                    -bm25(chunks_fts) AS score,
+                    c.id AS chunk_id,
+                    c.line_start,
+                    c.line_end,
+                    COALESCE(c.chunk_type, '') AS chunk_type,
+                    c.content
+             FROM chunks_fts
+             JOIN chunks c ON c.id = chunks_fts.rowid
+             JOIN documents d ON d.id = c.doc_id
+             WHERE chunks_fts MATCH ?1
+             ORDER BY score DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+            Ok(FtsResult {
+                path: row.get(0)?,
+                excerpt: row.get(1)?,
+                score: row.get(2)?,
+                chunk_id: Some(row.get(3)?),
+                line_start: Some(row.get::<_, i64>(4)? as u32),
+                line_end: Some(row.get::<_, i64>(5)? as u32),
+                chunk_type: Some(row.get(6)?),
+                content: Some(row.get(7)?),
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        // If chunks_fts is empty, fall back to documents_fts (legacy compatibility)
+        if results.is_empty() {
+            let mut fallback_stmt = conn.prepare(
+                "SELECT d.path,
+                        snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
+                        rank AS score
+                 FROM documents_fts
+                 JOIN documents d ON d.id = documents_fts.rowid
+                 WHERE documents_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let fallback_rows = fallback_stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+                Ok(FtsResult {
+                    path: row.get(0)?,
+                    excerpt: row.get(1)?,
+                    score: -row.get::<_, f64>(2)?,
+                    chunk_id: None,
+                    line_start: None,
+                    line_end: None,
+                    chunk_type: None,
+                    content: None,
+                })
+            })?;
+            for row in fallback_rows {
+                results.push(row?);
+            }
+        }
+        Ok(results)
+    } else {
+        // Legacy fallback: documents_fts
+        let mut stmt = conn.prepare(
+            "SELECT d.path,
+                    snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
+                    rank AS score
+             FROM documents_fts
+             JOIN documents d ON d.id = documents_fts.rowid
+             WHERE documents_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+            Ok(FtsResult {
+                path: row.get(0)?,
+                excerpt: row.get(1)?,
+                score: -row.get::<_, f64>(2)?,
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: None,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
     }
-    Ok(results)
 }
 
-/// Vector KNN search using sqlite-vec documents_vec table.
+/// Vector KNN search — queries `chunks_vec` if available, falls back to `documents_vec`.
 pub fn search_vector(
     conn: &Connection,
     query_embedding: &[f32],
     limit: usize,
 ) -> Result<Vec<VectorResult>> {
-    if !db::vec_table_exists(conn) {
-        return Ok(Vec::new());
+    if db::chunks_vec_table_exists(conn) {
+        let mut stmt = conn.prepare(
+            "SELECT cv.chunk_id, cv.distance, d.path, c.line_start, c.line_end, COALESCE(c.chunk_type, '')
+             FROM chunks_vec cv
+             JOIN chunks c ON c.id = cv.chunk_id
+             JOIN documents d ON d.id = c.doc_id
+             WHERE cv.embedding MATCH ?1 AND k = ?2
+             ORDER BY cv.distance",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![query_embedding.as_bytes(), limit as i64],
+            |row| {
+                let distance: f64 = row.get(1)?;
+                Ok(VectorResult {
+                    path: row.get(2)?,
+                    score: 1.0 / (1.0 + distance),
+                    chunk_id: Some(row.get(0)?),
+                    line_start: Some(row.get::<_, i64>(3)? as u32),
+                    line_end: Some(row.get::<_, i64>(4)? as u32),
+                    chunk_type: Some(row.get(5)?),
+                })
+            },
+        )?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    } else if db::vec_table_exists(conn) {
+        // Legacy fallback: documents_vec
+        let mut stmt = conn.prepare(
+            "SELECT dv.document_id, dv.distance, d.path
+             FROM documents_vec dv
+             JOIN documents d ON d.id = dv.document_id
+             WHERE dv.embedding MATCH ?1 AND k = ?2
+             ORDER BY dv.distance",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![query_embedding.as_bytes(), limit as i64],
+            |row| {
+                let distance: f64 = row.get(1)?;
+                Ok(VectorResult {
+                    path: row.get(2)?,
+                    score: 1.0 / (1.0 + distance),
+                    chunk_id: None,
+                    line_start: None,
+                    line_end: None,
+                    chunk_type: None,
+                })
+            },
+        )?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    } else {
+        Ok(Vec::new())
     }
-
-    let mut stmt = conn.prepare(
-        r#"SELECT dv.document_id, dv.distance, d.path
-           FROM documents_vec dv
-           JOIN documents d ON d.id = dv.document_id
-           WHERE dv.embedding MATCH ?1 AND k = ?2
-           ORDER BY dv.distance"#,
-    )?;
-
-    let rows = stmt.query_map(
-        rusqlite::params![query_embedding.as_bytes(), limit as i64],
-        |row| {
-            let distance: f64 = row.get(1)?;
-            Ok(VectorResult {
-                path: row.get(2)?,
-                // Convert distance to similarity score (lower distance = better)
-                score: 1.0 / (1.0 + distance),
-            })
-        },
-    )?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
 }
 
 /// Reciprocal Rank Fusion over multiple ranked result sets.
@@ -357,64 +491,181 @@ fn build_unified_results(
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
     limit: usize,
+    include_content: bool,
+    doc_score: bool,
 ) -> Vec<UnifiedResult> {
-    // Build ranked lists for RRF
-    let fts_ranked: Vec<(String, f64)> =
-        fts.iter().map(|r| (r.path.clone(), r.score)).collect();
+    // Key: use chunk-level identity (chunk_id or path) for dedup
+    // We use chunk-keyed ranking: each chunk is its own ranked item
+    // If doc_score: aggregate top-3 chunk scores per document
+
+    // Build ranked lists for RRF using chunk_id where available, else path
+    let fts_ranked: Vec<(String, f64)> = fts.iter().map(|r| {
+        let key = r.chunk_id.map(|id| format!("chunk:{}", id))
+            .unwrap_or_else(|| r.path.clone());
+        (key, r.score)
+    }).collect();
     let local_ranked: Vec<(String, f64)> =
         local.iter().map(|r| (r.file.clone(), r.score)).collect();
     let graph_ranked: Vec<(String, f64)> =
         graph.iter().map(|r| (r.file.clone(), r.score)).collect();
-    let vector_ranked: Vec<(String, f64)> =
-        vector.iter().map(|r| (r.path.clone(), r.score)).collect();
+    let vector_ranked: Vec<(String, f64)> = vector.iter().map(|r| {
+        let key = r.chunk_id.map(|id| format!("chunk:{}", id))
+            .unwrap_or_else(|| r.path.clone());
+        (key, r.score)
+    }).collect();
 
     let merged = reciprocal_rank_fusion(vec![fts_ranked, local_ranked, graph_ranked, vector_ranked], 60.0);
 
-    // Build lookup maps for excerpts/lines/graph info
-    let fts_map: HashMap<&str, &FtsResult> =
+    // Build lookup maps
+    let fts_by_chunk: HashMap<i64, &FtsResult> =
+        fts.iter().filter_map(|r| r.chunk_id.map(|id| (id, r))).collect();
+    let fts_by_path: HashMap<&str, &FtsResult> =
         fts.iter().map(|r| (r.path.as_str(), r)).collect();
     let local_map: HashMap<&str, &LocalSearchResult> =
         local.iter().map(|r| (r.file.as_str(), r)).collect();
     let graph_map: HashMap<&str, &crate::graph::GraphSearchResult> =
         graph.iter().map(|r| (r.file.as_str(), r)).collect();
-    let vector_set: std::collections::HashSet<&str> =
-        vector.iter().map(|r| r.path.as_str()).collect();
+    let vector_by_chunk: HashMap<i64, &VectorResult> =
+        vector.iter().filter_map(|r| r.chunk_id.map(|id| (id, r))).collect();
+    let vector_by_path: HashMap<&str, &VectorResult> =
+        vector.iter().map(|r| (r.path.as_str(), r)).collect();
 
-    merged
+    let mut results: Vec<UnifiedResult> = merged
         .into_iter()
-        .take(limit)
-        .map(|(file, score)| {
+        .map(|(key, score)| {
             let mut sources = Vec::new();
             let mut excerpt = String::new();
-            let mut line = None;
+            let mut line: Option<u32> = None;
+            let mut chunk_id_out: Option<i64> = None;
+            let mut line_start: Option<u32> = None;
+            let mut line_end: Option<u32> = None;
+            let mut chunk_type: Option<String> = None;
+            let mut content_out: Option<String> = None;
+            let file: String;
 
-            if let Some(f) = fts_map.get(file.as_str()) {
-                sources.push("fts".to_string());
-                excerpt = f.excerpt.clone();
+            if let Some(id_str) = key.strip_prefix("chunk:") {
+                let chunk_id: i64 = id_str.parse().unwrap_or(0);
+                chunk_id_out = Some(chunk_id);
+
+                if let Some(f) = fts_by_chunk.get(&chunk_id) {
+                    sources.push("fts".to_string());
+                    excerpt = f.excerpt.clone();
+                    file = f.path.clone();
+                    line_start = f.line_start;
+                    line_end = f.line_end;
+                    chunk_type = f.chunk_type.clone();
+                    if include_content {
+                        content_out = f.content.clone();
+                    }
+                } else if let Some(v) = vector_by_chunk.get(&chunk_id) {
+                    sources.push("vector".to_string());
+                    file = v.path.clone();
+                    line_start = v.line_start;
+                    line_end = v.line_end;
+                    chunk_type = v.chunk_type.clone();
+                } else {
+                    file = key.clone();
+                }
+
+                #[allow(clippy::collapsible_if)]
+                if fts_by_chunk.contains_key(&chunk_id) {
+                    if !sources.contains(&"fts".to_string()) {
+                        sources.push("fts".to_string());
+                    }
+                }
+                if vector_by_chunk.contains_key(&chunk_id) && !sources.contains(&"vector".to_string()) {
+                    sources.push("vector".to_string());
+                }
+            } else {
+                // Path-keyed result (local/graph or legacy)
+                file = key.clone();
+                if let Some(f) = fts_by_path.get(key.as_str()) {
+                    sources.push("fts".to_string());
+                    excerpt = f.excerpt.clone();
+                }
+                if let Some(v) = vector_by_path.get(key.as_str()) {
+                    if !sources.contains(&"vector".to_string()) {
+                        sources.push("vector".to_string());
+                    }
+                    if excerpt.is_empty() && include_content {
+                        let _ = v;
+                    }
+                }
             }
+
             if let Some(l) = local_map.get(file.as_str()) {
-                sources.push("fuzzy".to_string());
+                if !sources.contains(&"fuzzy".to_string()) {
+                    sources.push("fuzzy".to_string());
+                }
                 if excerpt.is_empty() {
                     excerpt = l.matched_text.clone();
                 }
                 line = Some(l.line);
             }
-            if graph_map.contains_key(file.as_str()) {
+            if graph_map.contains_key(file.as_str()) && !sources.contains(&"graph".to_string()) {
                 sources.push("graph".to_string());
             }
-            if vector_set.contains(file.as_str()) {
-                sources.push("vector".to_string());
-            }
+
+            // Build preview (first 200 chars of content)
+            let preview = if !include_content && content_out.is_none() {
+                if !excerpt.is_empty() {
+                    Some(excerpt.chars().take(200).collect::<String>())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             UnifiedResult {
                 file,
                 score,
                 sources,
-                excerpt,
+                excerpt: excerpt.clone(),
                 line,
+                chunk_id: chunk_id_out,
+                line_start,
+                line_end,
+                chunk_type,
+                preview,
+                content: content_out,
             }
         })
-        .collect()
+        .collect();
+
+    if doc_score {
+        // Aggregate: sum top-3 chunk scores per document, return one result per doc
+        let mut doc_scores: HashMap<String, (f64, UnifiedResult)> = HashMap::new();
+        let mut doc_chunk_counts: HashMap<String, usize> = HashMap::new();
+        for result in results {
+            let count = doc_chunk_counts.entry(result.file.clone()).or_insert(0);
+            if *count < 3 {
+                *count += 1;
+                doc_scores
+                    .entry(result.file.clone())
+                    .and_modify(|(s, _)| *s += result.score)
+                    .or_insert((result.score, result));
+            }
+        }
+        let mut doc_results: Vec<UnifiedResult> = doc_scores
+            .into_values()
+            .map(|(agg_score, mut r)| {
+                r.score = agg_score;
+                r.chunk_id = None;
+                r.line_start = None;
+                r.line_end = None;
+                r.chunk_type = None;
+                r
+            })
+            .collect();
+        doc_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        doc_results.truncate(limit);
+        results = doc_results;
+    } else {
+        results.truncate(limit);
+    }
+
+    results
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -428,6 +679,8 @@ fn print_results(
     vector: &[VectorResult],
     mode: SearchMode,
     limit: usize,
+    include_content: bool,
+    doc_score: bool,
 ) {
     let has_fts = !fts.is_empty();
     let has_local = !local.is_empty();
@@ -467,7 +720,7 @@ fn print_results(
 
     if matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy) {
         // Show merged RRF results (or pure graph results)
-        let unified = build_unified_results(fts, local, graph, vector, limit);
+        let unified = build_unified_results(fts, local, graph, vector, limit, include_content, doc_score);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");
