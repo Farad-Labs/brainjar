@@ -146,11 +146,11 @@ Graph search traverses entity relationships to find documents connected to your 
 
 ### Supported Backends
 
-| Backend | Config | Notes |
-|---------|--------|-------|
-| Gemini | `provider = "gemini"` | Flash Lite recommended for cost |
-| OpenAI | `provider = "openai"` | GPT-4o-mini works well |
-| Ollama | `provider = "ollama"` | Local LLM, no API cost |
+| Backend | Status | Embeddings | Best For | Cost (1M tokens) |
+|---------|--------|------------|----------|------------------|
+| Gemini | ✅ Recommended | embedding-2 (3072 dims) | Highest quality (84.0% MTEB) | $0.20 |
+| OpenAI | ✅ Tested | text-embedding-3-small/large (1024 dims) | Cost-sensitive workloads | $0.02–$0.13 |
+| Ollama | ⚠️ Experimental | Local models | Local/offline use | Free (local) |
 
 ## Configuration
 
@@ -181,11 +181,11 @@ provider = "gemini"
 model = "gemini-3.1-flash-lite-preview"
 enabled = true
 
-# Optional: vector embeddings
+# Optional: vector embeddings (recommended: OpenAI for cost, Gemini for quality)
 [embeddings]
-provider = "gemini"
-model = "gemini-embedding-2-preview"
-dimensions = 3072
+provider = "openai"                                # 10x cheaper than Gemini
+model = "text-embedding-3-small"                   # 62.3% MTEB, 1536 dims (or 1024 with Matryoshka)
+# dimensions = 1024                               # Matryoshka reduction: 67% storage savings
 ```
 
 ### Knowledge Base Options

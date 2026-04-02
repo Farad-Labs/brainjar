@@ -1,0 +1,20 @@
+[providers.openai]
+api_key = "${OPENAI_API_KEY}"
+
+[embeddings]
+provider = "openai"
+model = "text-embedding-3-small"
+dimensions = 1024  # Test Matryoshka shortening (Matryoshka reduces from 1536 default)
+
+[extraction]
+provider = "openai"
+model = "gpt-5.4-nano"
+enabled = true
+
+# Use a separate DB so Gemini and OpenAI test corpora don't clobber each other
+data_dir = "${HOME}/.brainjar-openai-small"
+
+[knowledge_bases.test-corpus]
+watch_paths = ["./"]
+auto_sync = true
+description = "Golden test corpus for search validation (OpenAI text-embedding-3-small)"

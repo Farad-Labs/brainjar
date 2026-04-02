@@ -7,6 +7,8 @@ use crate::config::EmbeddingConfig;
 /// Different models handle these differently:
 /// - gemini-embedding-001: uses `taskType` API parameter
 /// - gemini-embedding-2-preview: uses text prefix format (e.g., "task: search result | query: ...")
+/// - openai (text-embedding-3-*): no task type support — task_type parameter is ignored
+/// - ollama: no task type support — task_type parameter is ignored
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskType {
     /// Embedding stored documents for retrieval
@@ -265,10 +267,17 @@ impl Embedder {
         let api_key = self.require_api_key()?;
         let url = "https://api.openai.com/v1/embeddings";
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.config.model,
             "input": texts,
         });
+
+        // Pass dimensions if configured — text-embedding-3-* support Matryoshka
+        // dimension reduction. Without this, the API returns the model's full
+        // default dimensions regardless of what brainjar.toml specifies.
+        if self.config.dimensions > 0 {
+            body["dimensions"] = serde_json::json!(self.config.dimensions);
+        }
 
         let resp = self
             .client
@@ -279,8 +288,19 @@ impl Embedder {
             .await
             .context("OpenAI embeddings request failed")?;
 
+        // Check HTTP status before attempting to parse the response body.
+        // Without this, a 429 rate-limit response produces a confusing
+        // "missing data array" error instead of a clear rate-limit message.
+        let status = resp.status();
         let json: serde_json::Value =
             resp.json().await.context("Failed to parse OpenAI embed response")?;
+
+        if !status.is_success() {
+            let err_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            anyhow::bail!("OpenAI API error ({}): {}", status, err_msg);
+        }
 
         let data = json["data"]
             .as_array()

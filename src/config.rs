@@ -152,7 +152,9 @@ impl Config {
             .data_dir
             .as_deref()
             .unwrap_or("~/.brainjar");
-        expand_tilde(raw)
+        // Expand environment variables (${HOME}, ${USER}, etc) then tilde
+        let expanded = expand_env_var(raw);
+        expand_tilde(&expanded)
     }
 
     pub fn expand_path(&self, p: &str) -> PathBuf {

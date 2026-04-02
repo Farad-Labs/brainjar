@@ -52,53 +52,74 @@ pub fn open_db_with_dims(kb_name: &str, db_dir: &Path, vec_dimensions: usize) ->
 
 /// Create the `documents_vec` virtual table if it doesn't already exist.
 /// `dimensions` must match the actual embedding dimensionality.
-fn ensure_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
-    let exists: bool = conn
+/// Extract the embedding dimension from a vec0 virtual table's CREATE sql.
+/// Returns None if the table doesn't exist or the SQL can't be parsed.
+fn get_vec_table_dimensions(conn: &Connection, table_name: &str) -> Option<usize> {
+    let sql: String = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents_vec'",
-            [],
-            |row| row.get::<_, i64>(0),
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table_name],
+            |row| row.get(0),
         )
-        .unwrap_or(0)
-        > 0;
+        .ok()?;
+    // Parse "float[1024]" from the CREATE VIRTUAL TABLE sql
+    let start = sql.find("float[")? + 6;
+    let end = sql[start..].find(']')? + start;
+    sql[start..end].parse().ok()
+}
 
-    if !exists {
-        let sql = format!(
-            "CREATE VIRTUAL TABLE documents_vec USING vec0(\
-             document_id INTEGER PRIMARY KEY, \
-             embedding float[{}]\
-             )",
-            dimensions
-        );
-        conn.execute_batch(&sql)
-            .context("Failed to create documents_vec virtual table")?;
+fn ensure_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
+    let existing_dims = get_vec_table_dimensions(conn, "documents_vec");
+
+    match existing_dims {
+        Some(d) if d == dimensions => return Ok(()), // already correct
+        Some(_) => {
+            // Dimension mismatch — drop old table so it can be recreated with new dims.
+            // All embeddings must be re-indexed anyway when the model changes.
+            conn.execute_batch("DROP TABLE IF EXISTS documents_vec")
+                .context("Failed to drop documents_vec for dimension change")?;
+        }
+        None => {} // table doesn't exist yet
     }
+
+    let sql = format!(
+        "CREATE VIRTUAL TABLE documents_vec USING vec0(\
+         document_id INTEGER PRIMARY KEY, \
+         embedding float[{}]\
+         )",
+        dimensions
+    );
+    conn.execute_batch(&sql)
+        .context("Failed to create documents_vec virtual table")?;
 
     Ok(())
 }
 
 /// Create the `chunks_vec` virtual table if it doesn't already exist.
+/// If the table exists with a different dimension count, it is dropped and
+/// recreated — the embeddings will be re-generated on the next sync.
 fn ensure_chunks_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
+    let existing_dims = get_vec_table_dimensions(conn, "chunks_vec");
 
-    if !exists {
-        let sql = format!(
-            "CREATE VIRTUAL TABLE chunks_vec USING vec0(\
-             chunk_id INTEGER PRIMARY KEY, \
-             embedding float[{}]\
-             )",
-            dimensions
-        );
-        conn.execute_batch(&sql)
-            .context("Failed to create chunks_vec virtual table")?;
+    match existing_dims {
+        Some(d) if d == dimensions => return Ok(()), // already correct
+        Some(_) => {
+            // Dimension mismatch — drop and recreate.
+            conn.execute_batch("DROP TABLE IF EXISTS chunks_vec")
+                .context("Failed to drop chunks_vec for dimension change")?;
+        }
+        None => {} // table doesn't exist yet
     }
+
+    let sql = format!(
+        "CREATE VIRTUAL TABLE chunks_vec USING vec0(\
+         chunk_id INTEGER PRIMARY KEY, \
+         embedding float[{}]\
+         )",
+        dimensions
+    );
+    conn.execute_batch(&sql)
+        .context("Failed to create chunks_vec virtual table")?;
 
     Ok(())
 }
