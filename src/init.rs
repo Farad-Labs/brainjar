@@ -119,13 +119,13 @@ fn print_mascot() {
     println!("{}", l4.white().bold());
     println!("{}", l5.white());
     println!();
-    println!("    {}",
+    println!("     {}",
         "B  R  A  I  N  J  A  R"
             .bold()
             .cyan()
     );
     println!(
-        "  {}",
+        "   {}",
         "Your local AI memory system".dimmed()
     );
     println!();
