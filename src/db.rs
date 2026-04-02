@@ -602,6 +602,16 @@ pub fn delete_chunk_vec(conn: &Connection, chunk_id: i64) {
     );
 }
 
+/// Get the raw content of a document by its id.
+pub fn get_document_content(conn: &Connection, doc_id: i64) -> Result<String> {
+    conn.query_row(
+        "SELECT content FROM documents WHERE id = ?1",
+        rusqlite::params![doc_id],
+        |row| row.get::<_, String>(0),
+    )
+    .context("Document not found")
+}
+
 /// Count total chunks in the database.
 pub fn count_chunks(conn: &Connection) -> Result<usize> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
