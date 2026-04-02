@@ -44,6 +44,7 @@ pub fn open_db_with_dims(kb_name: &str, db_dir: &Path, vec_dimensions: usize) ->
 
     if vec_dimensions > 0 {
         ensure_vec_table(&conn, vec_dimensions)?;
+        ensure_chunks_vec_table(&conn, vec_dimensions)?;
     }
 
     Ok(conn)
@@ -71,6 +72,32 @@ fn ensure_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
         );
         conn.execute_batch(&sql)
             .context("Failed to create documents_vec virtual table")?;
+    }
+
+    Ok(())
+}
+
+/// Create the `chunks_vec` virtual table if it doesn't already exist.
+fn ensure_chunks_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+
+    if !exists {
+        let sql = format!(
+            "CREATE VIRTUAL TABLE chunks_vec USING vec0(\
+             chunk_id INTEGER PRIMARY KEY, \
+             embedding float[{}]\
+             )",
+            dimensions
+        );
+        conn.execute_batch(&sql)
+            .context("Failed to create chunks_vec virtual table")?;
     }
 
     Ok(())
@@ -156,8 +183,40 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1')", [])?;
     }
 
-    // Future migrations go here:
-    // if version < 2 { ... }
+    if version < 2 {
+        // Create chunks table and FTS
+        conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS chunks (
+                id         INTEGER PRIMARY KEY,
+                doc_id     INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                content    TEXT NOT NULL,
+                line_start INTEGER NOT NULL,
+                line_end   INTEGER NOT NULL,
+                chunk_type TEXT
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                content,
+                content='chunks',
+                content_rowid='id'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES ('delete', old.id, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES ('delete', old.id, old.content);
+                INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+            END;
+        "#)?;
+
+        // Force re-sync to generate chunks
+        conn.execute_batch("UPDATE documents SET extracted = 0;")?;
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')", [])?;
+    }
 
     Ok(())
 }
@@ -316,6 +375,248 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 pub fn count_documents(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
     Ok(count)
+}
+
+// ─── Chunk functions ─────────────────────────────────────────────────────────
+
+/// A row from the chunks table, used by neighboring chunk queries.
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub chunk_id: i64,
+    pub doc_id: i64,
+    pub content: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub chunk_type: String,
+}
+
+/// A result from chunks FTS search.
+#[derive(Debug, Clone)]
+pub struct ChunkFtsResult {
+    pub chunk_id: i64,
+    pub doc_id: i64,
+    pub content: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub chunk_type: String,
+    pub path: String,
+    pub score: f64,
+}
+
+/// Insert a chunk and return its rowid.
+pub fn insert_chunk(
+    conn: &Connection,
+    doc_id: i64,
+    content: &str,
+    line_start: usize,
+    line_end: usize,
+    chunk_type: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO chunks (doc_id, content, line_start, line_end, chunk_type) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![doc_id, content, line_start as i64, line_end as i64, chunk_type],
+    )
+    .context("Failed to insert chunk")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Delete all chunks for a document (by doc_id).
+pub fn delete_chunks_for_doc(conn: &Connection, doc_id: i64) -> Result<()> {
+    // Delete chunk vectors first (if table exists)
+    let _ = conn.execute(
+        "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?1)",
+        rusqlite::params![doc_id],
+    );
+    conn.execute(
+        "DELETE FROM chunks WHERE doc_id = ?1",
+        rusqlite::params![doc_id],
+    )
+    .context("Failed to delete chunks for doc")?;
+    Ok(())
+}
+
+/// Get a single chunk with its parent document path.
+/// Returns (chunk_id, doc_id, content, line_start, line_end, chunk_type, file_path).
+pub fn get_chunk(
+    conn: &Connection,
+    chunk_id: i64,
+) -> Result<(i64, i64, String, usize, usize, String, String)> {
+    conn.query_row(
+        "SELECT c.id, c.doc_id, c.content, c.line_start, c.line_end,
+                COALESCE(c.chunk_type, ''), d.path
+         FROM chunks c
+         JOIN documents d ON d.id = c.doc_id
+         WHERE c.id = ?1",
+        rusqlite::params![chunk_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as usize,
+                row.get::<_, i64>(4)? as usize,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        },
+    )
+    .context("Chunk not found")
+}
+
+/// (chunk_id, content, line_start, line_end, chunk_type)
+type ChunkTuple = (i64, String, usize, usize, String);
+
+/// Get all chunks for a document.
+/// Returns vec of (chunk_id, content, line_start, line_end, chunk_type).
+pub fn get_chunks_for_doc(
+    conn: &Connection,
+    doc_id: i64,
+) -> Result<Vec<ChunkTuple>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content, line_start, line_end, COALESCE(chunk_type, '')
+         FROM chunks WHERE doc_id = ?1
+         ORDER BY line_start",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![doc_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? as usize,
+            row.get::<_, i64>(3)? as usize,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// Get chunks neighboring a given chunk_id (same document, ordered by line_start).
+/// Returns (before_chunks, this_chunk, after_chunks).
+pub fn get_neighboring_chunks(
+    conn: &Connection,
+    chunk_id: i64,
+    before: usize,
+    after: usize,
+) -> Result<(Vec<ChunkRow>, ChunkRow, Vec<ChunkRow>)> {
+    // First get the target chunk
+    let (_, doc_id, content, line_start, line_end, chunk_type, _) = get_chunk(conn, chunk_id)?;
+    let this_chunk = ChunkRow { chunk_id, doc_id, content, line_start, line_end, chunk_type };
+
+    // Get all chunks for this document ordered by line_start
+    let all = get_chunks_for_doc(conn, doc_id)?;
+    let pos = all.iter().position(|(id, _, _, _, _)| *id == chunk_id);
+
+    let pos = match pos {
+        Some(p) => p,
+        None => return Ok((vec![], this_chunk, vec![])),
+    };
+
+    let before_chunks: Vec<ChunkRow> = all[..pos]
+        .iter()
+        .rev()
+        .take(before)
+        .rev()
+        .map(|(cid, c, ls, le, ct)| ChunkRow {
+            chunk_id: *cid,
+            doc_id,
+            content: c.clone(),
+            line_start: *ls,
+            line_end: *le,
+            chunk_type: ct.clone(),
+        })
+        .collect();
+
+    let after_chunks: Vec<ChunkRow> = all[pos + 1..]
+        .iter()
+        .take(after)
+        .map(|(cid, c, ls, le, ct)| ChunkRow {
+            chunk_id: *cid,
+            doc_id,
+            content: c.clone(),
+            line_start: *ls,
+            line_end: *le,
+            chunk_type: ct.clone(),
+        })
+        .collect();
+
+    Ok((before_chunks, this_chunk, after_chunks))
+}
+
+/// FTS search over chunks_fts. Returns matches with BM25 score.
+pub fn search_chunks_fts(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<ChunkFtsResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.doc_id, c.content, c.line_start, c.line_end,
+                COALESCE(c.chunk_type, ''), d.path,
+                -bm25(chunks_fts) AS score
+         FROM chunks_fts
+         JOIN chunks c ON c.id = chunks_fts.rowid
+         JOIN documents d ON d.id = c.doc_id
+         WHERE chunks_fts MATCH ?1
+         ORDER BY score DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![query, limit as i64],
+        |row| {
+            Ok(ChunkFtsResult {
+                chunk_id: row.get(0)?,
+                doc_id: row.get(1)?,
+                content: row.get(2)?,
+                line_start: row.get::<_, i64>(3)? as usize,
+                line_end: row.get::<_, i64>(4)? as usize,
+                chunk_type: row.get(5)?,
+                path: row.get(6)?,
+                score: row.get(7)?,
+            })
+        },
+    )?;
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Upsert a chunk vector embedding.
+pub fn upsert_chunk_vec(conn: &Connection, chunk_id: i64, embedding: &[u8]) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
+        rusqlite::params![chunk_id, embedding],
+    )
+    .context("Failed to upsert chunk vector")?;
+    Ok(())
+}
+
+/// Remove a chunk vector embedding by chunk id (no-op if table doesn't exist).
+pub fn delete_chunk_vec(conn: &Connection, chunk_id: i64) {
+    let _ = conn.execute(
+        "DELETE FROM chunks_vec WHERE chunk_id = ?1",
+        rusqlite::params![chunk_id],
+    );
+}
+
+/// Count total chunks in the database.
+pub fn count_chunks(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+/// Check whether the chunks_vec table exists.
+pub fn chunks_vec_table_exists(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
 }
 
 #[cfg(test)]
@@ -497,9 +798,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = open_db("test", dir.path()).unwrap();
 
-        // schema_version should be 1
+        // schema_version should be 2 (latest)
         let version = get_meta(&conn, "schema_version").unwrap();
-        assert_eq!(version.as_deref(), Some("1"));
+        assert_eq!(version.as_deref(), Some("2"));
 
         // extracted column should exist and default to 0
         upsert_document(&conn, "a.md", "content", "h1").unwrap();
@@ -548,24 +849,25 @@ mod tests {
         // Re-open via open_db — migration should fire
         let conn = open_db("legacy", dir.path()).unwrap();
 
-        // schema_version bumped to 1
+        // schema_version bumped to 2 (latest)
         let version = get_meta(&conn, "schema_version").unwrap();
-        assert_eq!(version.as_deref(), Some("1"));
+        assert_eq!(version.as_deref(), Some("2"));
 
-        // existing rows get extracted=1 (migration marks all pre-existing docs as extracted)
-        let unextracted = get_unextracted_paths(&conn).unwrap();
-        assert_eq!(unextracted.len(), 0);
+        // v2 migration sets extracted=0 for re-chunking; re-open won't have extracted=1 anymore
+        // The existing doc should still be present
+        let paths = get_all_paths(&conn).unwrap();
+        assert!(paths.contains(&"old.md".to_string()));
     }
 
     #[test]
     fn test_already_migrated_db_reopens_without_error() {
         let dir = tempfile::tempdir().unwrap();
-        // First open migrates and sets schema_version = 1
+        // First open migrates and sets schema_version = 2
         open_db("test", dir.path()).unwrap();
-        // Second open should not error (migration is a no-op at v1)
+        // Second open should not error (migration is a no-op at v2)
         let conn = open_db("test", dir.path()).unwrap();
         let version = get_meta(&conn, "schema_version").unwrap();
-        assert_eq!(version.as_deref(), Some("1"));
+        assert_eq!(version.as_deref(), Some("2"));
     }
 
     #[test]

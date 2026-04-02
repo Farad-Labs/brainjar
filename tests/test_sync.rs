@@ -439,10 +439,10 @@ fn test_migration_adds_extracted_column() {
     let conn = db::open_db("legacy", dir.path()).unwrap();
     // schema_version bumped
     let version = db::get_meta(&conn, "schema_version").unwrap();
-    assert_eq!(version.as_deref(), Some("1"));
-    // Existing rows marked as extracted (migration assumes pre-existing docs were fully synced)
-    let unextracted = db::get_unextracted_paths(&conn).unwrap();
-    assert_eq!(unextracted.len(), 0);
+    assert_eq!(version.as_deref(), Some("2"));
+    // v2 migration sets extracted=0 for re-chunking; doc should still exist
+    let paths = db::get_all_paths(&conn).unwrap();
+    assert!(paths.contains(&"old.md".to_string()));
 }
 
 #[test]
