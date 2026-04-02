@@ -241,6 +241,193 @@ fn test_collect_files_single_file_watch_path() {
     assert!(files.keys().any(|k| k.contains("single.md")));
 }
 
+// ─── Extraction tracking ──────────────────────────────────────────────────────
+
+/// After a full sync with no extraction config, all docs should have extracted=0
+/// (extraction not attempted, but sync completed — we don't auto-mark extracted
+/// when extraction is disabled; the field stays 0 and the next sync with extraction
+/// enabled will correctly pick them up).
+#[tokio::test]
+async fn test_sync_without_extraction_extracted_stays_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    std::fs::write(notes.join("doc.md"), "Hello world").unwrap();
+
+    let config = make_config(dir.path(), &notes);
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+        .await
+        .unwrap();
+
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
+    let unextracted = db::get_unextracted_paths(&conn).unwrap();
+    // No extraction config → extracted stays 0, so the doc shows as unextracted
+    assert_eq!(unextracted.len(), 1);
+}
+
+/// Simulate an interruption: sync files (extracted=0), then re-run sync.
+/// The re-run should detect the unextracted docs and include them in extraction.
+/// Without extraction config the test just verifies the pending docs are detected.
+#[tokio::test]
+async fn test_interrupted_extraction_detected_on_resync() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    std::fs::write(notes.join("a.md"), "Rust is great").unwrap();
+    std::fs::write(notes.join("b.md"), "Python too").unwrap();
+
+    let config = make_config(dir.path(), &notes);
+
+    // First sync — files are indexed, extracted=0 (no extraction config)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+        .await
+        .unwrap();
+
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
+    let unextracted_after_first = db::get_unextracted_paths(&conn).unwrap();
+    // Both docs are unextracted (no extraction config ran)
+    assert_eq!(unextracted_after_first.len(), 2);
+
+    // Second sync — content unchanged, but unextracted docs should be detected
+    // (without extraction config they stay pending — the key test is that
+    // "nothing to sync" is NOT printed when there are unextracted docs)
+    // We verify the paths are still 0 (not falsely marked as done)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+        .await
+        .unwrap();
+
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
+    let unextracted_after_second = db::get_unextracted_paths(&conn2).unwrap();
+    // Still 2 — not falsely marked complete
+    assert_eq!(unextracted_after_second.len(), 2);
+}
+
+/// mark_extracted sets extracted=1 for the given path.
+#[test]
+fn test_mark_extracted_sets_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = db::open_db("test", dir.path()).unwrap();
+    db::upsert_document(&conn, "notes/a.md", "content", "h1").unwrap();
+
+    // Initially unextracted
+    let unextracted = db::get_unextracted_paths(&conn).unwrap();
+    assert!(unextracted.contains(&"notes/a.md".to_string()));
+
+    // Mark as extracted
+    db::mark_extracted(&conn, "notes/a.md").unwrap();
+
+    let unextracted_after = db::get_unextracted_paths(&conn).unwrap();
+    assert!(!unextracted_after.contains(&"notes/a.md".to_string()));
+}
+
+/// After content changes (re-upsert), extracted resets to 0.
+#[test]
+fn test_content_change_resets_extracted_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = db::open_db("test", dir.path()).unwrap();
+    db::upsert_document(&conn, "notes/a.md", "v1 content", "hash1").unwrap();
+    db::mark_extracted(&conn, "notes/a.md").unwrap();
+
+    // Confirm it's marked
+    let unextracted = db::get_unextracted_paths(&conn).unwrap();
+    assert!(unextracted.is_empty());
+
+    // Simulate content change
+    db::upsert_document(&conn, "notes/a.md", "v2 content", "hash2").unwrap();
+
+    // extracted should be reset to 0
+    let unextracted_after = db::get_unextracted_paths(&conn).unwrap();
+    assert!(unextracted_after.contains(&"notes/a.md".to_string()));
+}
+
+/// Multiple docs — partial extraction (only some marked) — unextracted returns only unmarked.
+#[test]
+fn test_get_unextracted_returns_only_unextracted() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = db::open_db("test", dir.path()).unwrap();
+    db::upsert_document(&conn, "a.md", "aaa", "h_a").unwrap();
+    db::upsert_document(&conn, "b.md", "bbb", "h_b").unwrap();
+    db::upsert_document(&conn, "c.md", "ccc", "h_c").unwrap();
+
+    db::mark_extracted(&conn, "a.md").unwrap();
+    db::mark_extracted(&conn, "c.md").unwrap();
+
+    let unextracted = db::get_unextracted_paths(&conn).unwrap();
+    assert_eq!(unextracted.len(), 1);
+    assert!(unextracted.contains(&"b.md".to_string()));
+}
+
+/// --force flag re-extracts everything: after marking all extracted, force sync
+/// should re-upsert all docs (resetting extracted=0 via the ON CONFLICT clause).
+#[tokio::test]
+async fn test_force_resets_extracted_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    std::fs::write(notes.join("x.md"), "some content").unwrap();
+
+    let config = make_config(dir.path(), &notes);
+
+    // First sync
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+        .await
+        .unwrap();
+
+    // Manually mark as extracted
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
+    let hashes = db::get_all_hashes(&conn).unwrap();
+    let first_path = hashes.keys().next().unwrap().clone();
+    db::mark_extracted(&conn, &first_path).unwrap();
+    drop(hashes);
+    drop(conn);
+
+    // Verify it's marked
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
+    assert!(db::get_unextracted_paths(&conn2).unwrap().is_empty());
+    drop(conn2);
+
+    // Force sync — should re-upsert all docs, resetting extracted=0
+    brainjar::sync::run_sync(&config, Some("test"), true, false, false, false)
+        .await
+        .unwrap();
+
+    let conn3 = db::open_db("test", &config.effective_db_dir()).unwrap();
+    let unextracted = db::get_unextracted_paths(&conn3).unwrap();
+    assert_eq!(unextracted.len(), 1);
+}
+
+/// Migration: open an existing v0 DB (no extracted column, no schema_version)
+/// — open_db should migrate it to v1 transparently.
+#[test]
+fn test_migration_adds_extracted_column() {
+    let dir = tempfile::tempdir().unwrap();
+    // Create a v0 DB without the extracted column and without schema_version
+    {
+        let db_path = dir.path().join("legacy.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(r#"
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY,
+                path TEXT UNIQUE NOT NULL,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO documents (path, content, content_hash) VALUES ('old.md', 'old content', 'oldhash');
+        "#).unwrap();
+    }
+    // Re-open via open_db — run_migrations should fire and add the column
+    let conn = db::open_db("legacy", dir.path()).unwrap();
+    // schema_version bumped
+    let version = db::get_meta(&conn, "schema_version").unwrap();
+    assert_eq!(version.as_deref(), Some("1"));
+    // Existing row defaults to extracted=0
+    let unextracted = db::get_unextracted_paths(&conn).unwrap();
+    assert_eq!(unextracted.len(), 1);
+    assert!(unextracted.contains(&"old.md".to_string()));
+}
+
 #[test]
 fn test_collect_files_nested_dirs() {
     let tmp = tempfile::tempdir().unwrap();

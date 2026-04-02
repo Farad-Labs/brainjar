@@ -76,16 +76,40 @@ async fn sync_kb_human(
     let total_upsert = changes.to_upsert.len();
     let total_delete = changes.to_delete.len();
 
-    if total_upsert == 0 && total_delete == 0 {
+    // Docs that were synced before but whose extraction was interrupted.
+    // We need their absolute paths too — build from local_files map.
+    let unextracted_paths = if !force {
+        db::get_unextracted_paths(&conn)?
+    } else {
+        Vec::new() // force re-extracts everything via to_upsert
+    };
+    let unextracted: HashMap<String, std::path::PathBuf> = unextracted_paths
+        .into_iter()
+        .filter(|p| !changes.to_upsert.contains_key(p)) // avoid double-counting
+        .filter_map(|p| {
+            local_files.get(&p).cloned().map(|abs| (p, abs))
+        })
+        .collect();
+
+    if total_upsert == 0 && total_delete == 0 && unextracted.is_empty() {
         println!("  {} Nothing to sync", "✓".green());
         return Ok(());
     }
 
-    println!(
-        "  {} files to update, {} to delete",
-        total_upsert.to_string().cyan(),
-        total_delete.to_string().yellow()
-    );
+    if !unextracted.is_empty() && total_upsert == 0 && total_delete == 0 {
+        println!(
+            "  {} {} document(s) pending extraction (interrupted previously)",
+            "⚠".yellow(),
+            unextracted.len().to_string().yellow()
+        );
+    } else {
+
+        println!(
+            "  {} files to update, {} to delete",
+            total_upsert.to_string().cyan(),
+            total_delete.to_string().yellow()
+        );
+    }
 
     if dry_run {
         println!("  {} (dry run, no changes made)", "DRY RUN".yellow().bold());
@@ -160,14 +184,21 @@ async fn sync_kb_human(
     }
 
     // ── Optional: entity extraction via configured LLM ──────────────────────
+    // Extract: newly upserted docs + previously-interrupted docs
+    let docs_to_extract: HashMap<&String, &std::path::PathBuf> = changes
+        .to_upsert
+        .iter()
+        .chain(unextracted.iter())
+        .collect();
+
     if let Some(extraction_cfg) = &config.extraction
-        && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+        && extraction_cfg.enabled && !docs_to_extract.is_empty() {
             let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
             let extractor = Extractor::new(extraction_cfg, api_key, base_url);
             match KnowledgeGraph::open(&db_dir, kb_name) {
                 Ok(kg) => {
-                    let extract_total = changes.to_upsert.len() as u64;
+                    let extract_total = docs_to_extract.len() as u64;
                     let epb = ProgressBar::new(extract_total);
                     epb.set_style(
                         ProgressStyle::default_bar()
@@ -180,11 +211,11 @@ async fn sync_kb_human(
                     let mut total_rels = 0usize;
                     let mut extraction_errors = 0usize;
 
-                    for (rel_path, abs_path) in &changes.to_upsert {
+                    for (rel_path, abs_path) in &docs_to_extract {
                         let display_name = if rel_path.len() > 60 {
                             format!("...{}", &rel_path[rel_path.len() - 57..])
                         } else {
-                            rel_path.clone()
+                            rel_path.to_string()
                         };
                         epb.set_message(display_name);
                         let content = match std::fs::read_to_string(abs_path) {
@@ -202,13 +233,19 @@ async fn sync_kb_human(
                             Ok(result) => {
                                 total_entities += result.entities.len();
                                 total_rels += result.relationships.len();
-                                if let Err(e) = kg.ingest_entities(
+                                let ingest_ok = kg.ingest_entities(
                                     rel_path,
                                     &result.entities,
                                     &result.relationships,
-                                ) {
+                                );
+                                if let Err(e) = ingest_ok {
                                     eprintln!("  ⚠ Graph ingest failed for {}: {}", rel_path, e);
                                     extraction_errors += 1;
+                                } else {
+                                    // Mark as extracted only on full success
+                                    if let Err(e) = db::mark_extracted(&conn, rel_path) {
+                                        eprintln!("  ⚠ mark_extracted failed for {}: {}", rel_path, e);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -359,16 +396,33 @@ async fn sync_kb_json(
         let vocab_count = fuzzy::build_vocabulary(&conn).unwrap_or(0);
         result["vocabulary_words"] = serde_json::Value::Number(vocab_count.into());
 
+        // Docs needing extraction: newly upserted + previously interrupted
+        let unextracted_paths = if !force {
+            db::get_unextracted_paths(&conn)?
+        } else {
+            Vec::new()
+        };
+        let unextracted_json: HashMap<String, std::path::PathBuf> = unextracted_paths
+            .into_iter()
+            .filter(|p| !changes.to_upsert.contains_key(p))
+            .filter_map(|p| local_files.get(&p).cloned().map(|abs| (p, abs)))
+            .collect();
+        let docs_to_extract_json: HashMap<&String, &std::path::PathBuf> = changes
+            .to_upsert
+            .iter()
+            .chain(unextracted_json.iter())
+            .collect();
+
         // Optional entity extraction
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
         if let Some(extraction_cfg) = &config.extraction
-            && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+            && extraction_cfg.enabled && !docs_to_extract_json.is_empty() {
                 let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
                 let extractor = Extractor::new(extraction_cfg, api_key, base_url);
                 if let Ok(kg) = KnowledgeGraph::open(&db_dir, kb_name) {
-                    for (rel_path, abs_path) in &changes.to_upsert {
+                    for (rel_path, abs_path) in &docs_to_extract_json {
                         let content = match std::fs::read_to_string(abs_path) {
                             Ok(c) => c,
                             Err(_) => continue,
@@ -377,7 +431,9 @@ async fn sync_kb_json(
                         if let Ok(res) = extractor.extract(&content, rel_path).await {
                             entities_extracted += res.entities.len();
                             rels_extracted += res.relationships.len();
-                            let _ = kg.ingest_entities(rel_path, &res.entities, &res.relationships);
+                            if kg.ingest_entities(rel_path, &res.entities, &res.relationships).is_ok() {
+                                let _ = db::mark_extracted(&conn, rel_path);
+                            }
                         }
                     }
                 }

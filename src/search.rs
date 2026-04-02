@@ -559,6 +559,7 @@ mod tests {
                 path         TEXT UNIQUE NOT NULL,
                 content      TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                extracted    INTEGER NOT NULL DEFAULT 0,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
