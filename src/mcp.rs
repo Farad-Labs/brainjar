@@ -190,6 +190,14 @@ fn handle_tools_list() -> Result<Value> {
                         }
                     }
                 }
+            },
+            {
+                "name": "memory_list",
+                "description": "List all configured knowledge bases with their names, descriptions, watch paths, auto-sync status, document counts, and last sync times",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     }))
@@ -275,10 +283,10 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let graph_results: Vec<crate::graph::GraphSearchResult> = if run_graph {
                 let mut all = Vec::new();
                 for (name, _kb_config) in &kbs {
-                    if !crate::graph::KnowledgeGraph::exists(&config.config_dir, name) {
+                    if !crate::graph::KnowledgeGraph::exists(&config.effective_db_dir(), name) {
                         continue;
                     }
-                    match crate::graph::KnowledgeGraph::open(&config.config_dir, name) {
+                    match crate::graph::KnowledgeGraph::open(&config.effective_db_dir(), name) {
                         Ok(kg) => match kg.search(query, limit) {
                             Ok(results) => all.extend(results),
                             Err(e) => eprintln!("[brainjar mcp] Graph search error for KB {}: {}", name, e),
@@ -324,7 +332,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             let mut status_lines = Vec::new();
             for (name, _kb_config) in &kbs {
-                let conn = match crate::db::open_db(name, &config.config_dir) {
+                let conn = match crate::db::open_db(name, &config.effective_db_dir()) {
                     Ok(c) => c,
                     Err(_) => {
                         status_lines.push(format!("{}: DB not initialized (run brainjar sync)", name));
@@ -342,6 +350,46 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             }
 
             Ok(tool_text(status_lines.join("\n")))
+        }
+
+        "memory_list" => {
+            let mut kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = config
+                .knowledge_bases
+                .iter()
+                .map(|(n, k): (&String, _)| (n.as_str(), k))
+                .collect();
+            kbs.sort_by_key(|(n, _)| *n);
+
+            let mut entries = Vec::new();
+            for (name, kb) in &kbs {
+                let db_dir = config.effective_db_dir();
+                let db_path = db_dir.join(format!("{}.db", name));
+                let db_exists = db_path.exists();
+                let (doc_count, last_sync) = if db_exists {
+                    if let Ok(conn) = crate::db::open_db(name, &config.effective_db_dir()) {
+                        let count = crate::db::count_documents(&conn).unwrap_or(0);
+                        let sync_time = crate::db::get_meta(&conn, "last_sync")
+                            .unwrap_or_default()
+                            .unwrap_or_else(|| "never".to_string());
+                        (count, sync_time)
+                    } else {
+                        (0, "never".to_string())
+                    }
+                } else {
+                    (0, "never".to_string())
+                };
+                entries.push(serde_json::json!({
+                    "name": name,
+                    "description": kb.description,
+                    "watch_paths": kb.watch_paths,
+                    "auto_sync": kb.auto_sync,
+                    "document_count": doc_count,
+                    "last_sync": last_sync,
+                    "db_exists": db_exists,
+                }));
+            }
+
+            Ok(tool_text(serde_json::to_string_pretty(&entries)?))
         }
 
         name => Ok(tool_error(format!("Unknown tool: {}", name))),

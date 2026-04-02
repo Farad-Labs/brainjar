@@ -23,12 +23,12 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
     let mut all_statuses = Vec::new();
 
     for (name, kb) in &kbs {
-        let db_dir = config.config_dir.join(".brainjar");
+        let db_dir = config.effective_db_dir();
         let db_path = db_dir.join(format!("{}.db", name));
         let db_exists = db_path.exists();
 
         let (doc_count, last_sync) = if db_exists {
-            let conn = db::open_db(name, &config.config_dir)?;
+            let conn = db::open_db(name, &db_dir)?;
             let count = db::count_documents(&conn)?;
             let sync_time = db::get_meta(&conn, "last_sync")?.unwrap_or_else(|| "Never".to_string());
             (count, sync_time)
@@ -38,9 +38,9 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
 
         // Graph stats (optional — only if graph DB exists)
         let graph_stats: Option<crate::graph::GraphStats> = if db_exists
-            && KnowledgeGraph::exists(&config.config_dir, name)
+            && KnowledgeGraph::exists(&db_dir, name)
         {
-            KnowledgeGraph::open(&config.config_dir, name)
+            KnowledgeGraph::open(&db_dir, name)
                 .ok()
                 .and_then(|kg| kg.stats().ok())
         } else {
@@ -50,6 +50,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
         if json {
             let mut entry = serde_json::json!({
                 "name": name,
+                "description": kb.description,
                 "db_path": db_path.display().to_string(),
                 "db_exists": db_exists,
                 "document_count": doc_count,
@@ -83,6 +84,9 @@ fn print_kb_status(
     graph_stats: Option<&crate::graph::GraphStats>,
 ) {
     println!("\n{} {}", "📦".cyan(), name.bold().white());
+    if let Some(desc) = &kb.description {
+        println!("  {}", desc.dimmed());
+    }
     println!(
         "  {:<20} {}",
         "Backend:".dimmed(),

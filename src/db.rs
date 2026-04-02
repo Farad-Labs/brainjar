@@ -16,21 +16,21 @@ pub fn init_vec_extension() {
 }
 
 /// Open (or create) the SQLite database for a knowledge base.
-/// The DB is stored at `<config_dir>/.brainjar/<kb_name>.db`.
+/// `db_dir` is the directory that will contain `<kb_name>.db`.
+/// (This is typically `config.effective_db_dir()`.)
 /// Tables and FTS triggers are created on first open.
 ///
 /// `vec_dimensions` — if > 0 **and** the `documents_vec` virtual table does
 /// not yet exist, it will be created with that many float dimensions.
-pub fn open_db(kb_name: &str, config_dir: &Path) -> Result<Connection> {
-    open_db_with_dims(kb_name, config_dir, 0)
+pub fn open_db(kb_name: &str, db_dir: &Path) -> Result<Connection> {
+    open_db_with_dims(kb_name, db_dir, 0)
 }
 
 /// Like `open_db` but creates the `documents_vec` virtual table when
 /// `vec_dimensions > 0` and the table is not present yet.
-pub fn open_db_with_dims(kb_name: &str, config_dir: &Path, vec_dimensions: usize) -> Result<Connection> {
-    let db_dir = config_dir.join(".brainjar");
-    std::fs::create_dir_all(&db_dir)
-        .with_context(|| format!("Failed to create .brainjar directory: {}", db_dir.display()))?;
+pub fn open_db_with_dims(kb_name: &str, db_dir: &Path, vec_dimensions: usize) -> Result<Connection> {
+    std::fs::create_dir_all(db_dir)
+        .with_context(|| format!("Failed to create db directory: {}", db_dir.display()))?;
 
     let db_path = db_dir.join(format!("{}.db", kb_name));
     let conn = Connection::open(&db_path)

@@ -43,20 +43,20 @@ pub struct KnowledgeGraph {
 
 impl KnowledgeGraph {
     /// Open (or create) the graph database for a knowledge base.
-    pub fn open(config_dir: &Path, kb_name: &str) -> Result<Self> {
-        let graph_dir = config_dir.join(".brainjar");
-        std::fs::create_dir_all(&graph_dir)
-            .with_context(|| format!("Failed to create graph dir: {}", graph_dir.display()))?;
-        let path = graph_dir.join(format!("{kb_name}_graph.db"));
+    /// `db_dir` is the directory that contains brainjar databases
+    /// (typically `config.effective_db_dir()`).
+    pub fn open(db_dir: &Path, kb_name: &str) -> Result<Self> {
+        std::fs::create_dir_all(db_dir)
+            .with_context(|| format!("Failed to create db dir: {}", db_dir.display()))?;
+        let path = db_dir.join(format!("{kb_name}_graph.db"));
         let graph = Graph::open(&path)
             .with_context(|| format!("Failed to open graph DB: {}", path.display()))?;
         Ok(Self { graph })
     }
 
     /// Returns true if a graph DB file already exists for this KB.
-    pub fn exists(config_dir: &Path, kb_name: &str) -> bool {
-        config_dir
-            .join(".brainjar")
+    pub fn exists(db_dir: &Path, kb_name: &str) -> bool {
+        db_dir
             .join(format!("{kb_name}_graph.db"))
             .exists()
     }

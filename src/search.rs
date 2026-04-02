@@ -61,6 +61,7 @@ pub async fn run_search(
     mode: SearchMode,
     exact: bool,
 ) -> Result<()> {
+    let db_dir = config.effective_db_dir();
     let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
     let run_local = matches!(mode, SearchMode::Local);
     let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
@@ -84,7 +85,7 @@ pub async fn run_search(
         };
 
         if let Some((first_kb_name, _)) = kbs.first() {
-            let conn = db::open_db(first_kb_name, &config.config_dir)?;
+            let conn = db::open_db(first_kb_name, &db_dir)?;
             match fuzzy::correct_query(&conn, query) {
                 Ok((corrected, corrections)) => (corrected, corrections),
                 Err(_) => (query.to_string(), Vec::new()),
@@ -116,7 +117,7 @@ pub async fn run_search(
 
         let mut all: Vec<FtsResult> = Vec::new();
         for (name, _kb) in &kbs {
-            let conn = db::open_db(name, &config.config_dir)?;
+            let conn = db::open_db(name, &db_dir)?;
             let results = search_fts(&conn, search_query, limit)?;
             all.extend(results);
         }
@@ -168,10 +169,10 @@ pub async fn run_search(
 
         let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
         for (name, _kb) in &kbs {
-            if !crate::graph::KnowledgeGraph::exists(&config.config_dir, name) {
+            if !crate::graph::KnowledgeGraph::exists(&db_dir, name) {
                 continue;
             }
-            match crate::graph::KnowledgeGraph::open(&config.config_dir, name) {
+            match crate::graph::KnowledgeGraph::open(&db_dir, name) {
                 Ok(kg) => match kg.search(&graph_query, limit) {
                     Ok(results) => all_graph.extend(results),
                     Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
@@ -202,7 +203,7 @@ pub async fn run_search(
                     };
                     let mut all_vec: Vec<VectorResult> = Vec::new();
                     for (name, _kb) in &kbs {
-                        let conn = db::open_db(name, &config.config_dir)?;
+                        let conn = db::open_db(name, &db_dir)?;
                         match search_vector(&conn, query_vec, limit) {
                             Ok(results) => all_vec.extend(results),
                             Err(e) => eprintln!("Vector search error in KB {}: {}", name, e),
@@ -540,7 +541,8 @@ pub fn search_fts_for_kb(
     query: &str,
     limit: usize,
 ) -> Result<Vec<FtsResult>> {
-    let conn = db::open_db(kb_name, &config.config_dir)?;
+    let db_dir = config.effective_db_dir();
+    let conn = db::open_db(kb_name, &db_dir)?;
     search_fts(&conn, query, limit)
 }
 

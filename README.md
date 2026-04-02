@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="300" />
+</p>
+
+<p align="center">
+  <a href="https://buymeacoffee.com/lukel99"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee" /></a>
+</p>
+
 # 🧠 brainjar
 
 > Local-first AI memory with hybrid search — FTS5, vocabulary fuzzy, graph traversal, and vector embeddings
@@ -50,7 +58,7 @@ brainjar search --fuzzy "deploymnt workflw"
 
 ```bash
 # Default: FTS + graph merged via RRF
-brainjar search "localpage deployment"
+brainjar search "deployment workflow"
 
 # Fuzzy: corrects "knowlege grph" → "knowledge graph" before searching
 brainjar search --fuzzy "knowlege grph"
@@ -59,7 +67,7 @@ brainjar search --fuzzy "knowlege grph"
 brainjar search --text "entity extraction"
 
 # Graph only (traverses entity relationships)
-brainjar search --graph "LocalPage entities"
+brainjar search --graph "project entities"
 
 # Raw file scanner (nucleo, returns file:line)
 brainjar search --local "brainjar"
@@ -139,8 +147,8 @@ openai.api_key = "${OPENAI_API_KEY}"
 watch_paths = ["~/Documents/notes", "~/Documents/journal"]
 auto_sync = true
 
-[knowledge_bases.localpage]
-watch_paths = ["~/Code/localpage-kb"]
+[knowledge_bases.work]
+watch_paths = ["~/Code/my-project"]
 auto_sync = true
 
 # Optional: entity extraction via LLM

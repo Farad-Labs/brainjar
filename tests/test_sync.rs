@@ -11,6 +11,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         KnowledgeBaseConfig {
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
             auto_sync: true,
+            description: None,
         },
     );
     Config {
@@ -18,6 +19,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         knowledge_bases: kbs,
         embeddings: None,
         extraction: None,
+        data_dir: Some(config_dir.to_string_lossy().to_string()),
         config_dir: config_dir.to_path_buf(),
     }
 }
@@ -38,7 +40,7 @@ async fn test_full_sync_cycle_documents_populated() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let count = db::count_documents(&conn).unwrap();
     assert_eq!(count, 2);
 }
@@ -55,7 +57,7 @@ async fn test_full_sync_cycle_fts_works() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let results = brainjar::search::search_fts(&conn, "embedded", 5).unwrap();
     assert!(!results.is_empty());
     assert!(results[0].path.contains("sqlite"));
@@ -76,7 +78,7 @@ async fn test_search_pipeline_fts_ranked() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let results = brainjar::search::search_fts(&conn, "brainjar", 5).unwrap();
     // Both documents should be found
     assert!(results.len() >= 2);
@@ -104,7 +106,7 @@ async fn test_incremental_sync_only_updates_changed_file() {
         .unwrap();
 
     // Record the hash of stable.md after first sync
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let hashes_before = db::get_all_hashes(&conn).unwrap();
     let stable_hash_before = hashes_before
         .iter()
@@ -161,7 +163,7 @@ async fn test_delete_detection() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     assert_eq!(db::count_documents(&conn).unwrap(), 2);
 
     // Delete one file
@@ -197,7 +199,7 @@ async fn test_brainjarignore_skips_patterns() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let hashes = db::get_all_hashes(&conn).unwrap();
     assert!(hashes.keys().any(|k| k.contains("public")));
     assert!(!hashes.keys().any(|k| k.contains("secret")));
@@ -217,7 +219,7 @@ async fn test_brainjarignore_with_extension_pattern() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let hashes = db::get_all_hashes(&conn).unwrap();
     assert!(hashes.keys().any(|k| k.contains("doc.md")));
     assert!(!hashes.keys().any(|k| k.contains("notes.txt")));

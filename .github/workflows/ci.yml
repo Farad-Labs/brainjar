@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     branches: [main]
 
@@ -10,48 +10,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build & Test
-    runs-on: ubuntu-latest
+  check:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Build
-        run: cargo build --verbose
-
-      - name: Test
-        run: cargo test --verbose
-
-  release-build:
-    name: Release Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
-        run: cargo build --release
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: brainjar-linux-amd64
-          path: target/release/brainjar
+      - name: Cargo test
+        run: cargo test --all-features

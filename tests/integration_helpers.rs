@@ -12,6 +12,7 @@ pub fn make_config(config_dir: &Path, watch_path: &Path) -> Config {
         KnowledgeBaseConfig {
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
             auto_sync: true,
+            description: None,
         },
     );
     Config {
@@ -19,6 +20,7 @@ pub fn make_config(config_dir: &Path, watch_path: &Path) -> Config {
         knowledge_bases: kbs,
         embeddings: None,
         extraction: None,
+        data_dir: Some(config_dir.to_string_lossy().to_string()),
         config_dir: config_dir.to_path_buf(),
     }
 }

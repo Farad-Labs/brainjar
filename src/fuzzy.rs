@@ -61,7 +61,7 @@ pub fn correct_query(conn: &Connection, query: &str) -> Result<(String, Vec<(Str
     // Load vocabulary into memory (small — ~7K words for 276 docs)
     let mut stmt = conn.prepare("SELECT word, frequency FROM vocabulary")?;
     let vocab: Vec<(String, usize)> = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?)))?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize)))?
         .filter_map(|r| r.ok())
         .collect();
 
