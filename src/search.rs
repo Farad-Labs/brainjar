@@ -304,9 +304,8 @@ pub fn search_vector(
         r#"SELECT dv.document_id, dv.distance, d.path
            FROM documents_vec dv
            JOIN documents d ON d.id = dv.document_id
-           WHERE dv.embedding MATCH ?1
-           ORDER BY dv.distance
-           LIMIT ?2"#,
+           WHERE dv.embedding MATCH ?1 AND k = ?2
+           ORDER BY dv.distance"#,
     )?;
 
     let rows = stmt.query_map(
