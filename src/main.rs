@@ -76,6 +76,9 @@ enum Commands {
         /// Aggregate chunk scores per document (one result per doc)
         #[arg(long)]
         doc_score: bool,
+        /// Use LLM to extract search queries from conversational text
+        #[arg(long)]
+        smart: bool,
     },
     /// Show knowledge base status
     Status {
@@ -274,6 +277,7 @@ async fn main() -> Result<()> {
             exact,
             chunks,
             doc_score,
+            smart,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             let mode = if local {
@@ -289,7 +293,7 @@ async fn main() -> Result<()> {
             } else {
                 brainjar::search::SearchMode::All
             };
-            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score)
+            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score, smart)
                 .await?;
         }
         Commands::Status { kb_name, json } => {

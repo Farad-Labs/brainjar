@@ -165,6 +165,11 @@ fn handle_tools_list() -> Result<Value> {
                             "type": "boolean",
                             "description": "Aggregate chunk scores per document and return one result per document",
                             "default": false
+                        },
+                        "smart": {
+                            "type": "boolean",
+                            "description": "Use LLM to extract targeted search queries from conversational text before searching. Requires [extraction] config.",
+                            "default": false
                         }
                     },
                     "required": ["query"]
@@ -277,25 +282,98 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             let include_content = args.get("include_content").and_then(|v| v.as_bool()).unwrap_or(false);
             let doc_score = args.get("doc_score").and_then(|v| v.as_bool()).unwrap_or(false);
+            let smart = args.get("smart").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text | crate::search::SearchMode::Fuzzy);
-            let run_local = matches!(mode, crate::search::SearchMode::Local | crate::search::SearchMode::Fuzzy);
-            let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph | crate::search::SearchMode::Fuzzy);
-
-            // Determine KBs to search
-            let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
+            // Build KB list early (needed for both smart and normal paths)
+            let kbs_owned: Vec<(String, crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
                 if let Some(k) = config.knowledge_bases.get(name) {
-                    vec![(name, k)]
+                    vec![(name.to_string(), k.clone())]
                 } else {
                     return Ok(tool_error(format!("KB '{}' not found", name)));
                 }
             } else {
-                config
-                    .knowledge_bases
-                    .iter()
-                    .map(|(n, k): (&String, _)| (n.as_str(), k))
-                    .collect()
+                config.knowledge_bases.iter().map(|(n, k)| (n.clone(), k.clone())).collect()
             };
+            let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> =
+                kbs_owned.iter().map(|(n, k)| (n.as_str(), k)).collect();
+
+            // Smart mode: fan-out search with LLM-extracted queries
+            if smart {
+                use crate::search::{SearchMode as SM};
+                let queries = match crate::search::extract_queries_pub(config, query).await {
+                    Ok(q) => q,
+                    Err(e) => return Ok(tool_error(format!("Smart search query extraction failed: {}", e))),
+                };
+
+                let mut all_fts: Vec<crate::search::FtsResult> = Vec::new();
+                let mut all_local: Vec<crate::local_search::LocalSearchResult> = Vec::new();
+                let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
+
+                let run_fts_inner = matches!(mode, SM::All | SM::Text | SM::Fuzzy);
+                let run_graph_inner = matches!(mode, SM::All | SM::Graph | SM::Fuzzy);
+
+                for sub_query in &queries {
+                    if run_fts_inner {
+                        for (name, _kb_config) in &kbs {
+                            match crate::search::search_fts_for_kb(config, name, sub_query, limit) {
+                                Ok(results) => all_fts.extend(results),
+                                Err(e) => eprintln!("[brainjar mcp] FTS error for KB {}: {}", name, e),
+                            }
+                        }
+                    }
+                    if run_graph_inner {
+                        for (name, _kb_config) in &kbs {
+                            if !crate::graph::KnowledgeGraph::exists(&config.effective_db_dir(), name) {
+                                continue;
+                            }
+                            match crate::graph::KnowledgeGraph::open(&config.effective_db_dir(), name) {
+                                Ok(kg) => match kg.search(sub_query, limit) {
+                                    Ok(results) => all_graph.extend(results),
+                                    Err(e) => eprintln!("[brainjar mcp] Graph error for KB {}: {}", name, e),
+                                },
+                                Err(e) => eprintln!("[brainjar mcp] Graph open error for KB {}: {}", name, e),
+                            }
+                        }
+                    }
+                    match crate::local_search::run_local_search(config, sub_query, limit, exact) {
+                        Ok(r) => all_local.extend(r),
+                        Err(e) => eprintln!("[brainjar mcp] Local search error: {}", e),
+                    }
+                }
+
+                // Deduplicate
+                all_fts.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                {
+                    let mut seen_chunks = std::collections::HashSet::new();
+                    let mut seen_paths = std::collections::HashSet::new();
+                    all_fts.retain(|r| {
+                        if let Some(id) = r.chunk_id { seen_chunks.insert(id) }
+                        else { seen_paths.insert(r.path.clone()) }
+                    });
+                }
+                all_local.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    all_local.retain(|r| seen.insert(r.file.clone()));
+                }
+                all_graph.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    all_graph.retain(|r| seen.insert(r.file.clone()));
+                }
+
+                let mut text = format!("🧠 Smart search extracted {} quer{}: {}\n\n",
+                    queries.len(),
+                    if queries.len() == 1 { "y" } else { "ies" },
+                    queries.iter().map(|q| format!("\"{}\"", q)).collect::<Vec<_>>().join(", ")
+                );
+                text.push_str(&format_search_text(query, &all_fts, &all_local, &all_graph, mode, include_content, doc_score));
+                return Ok(tool_text(text));
+            }
+
+            let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text | crate::search::SearchMode::Fuzzy);
+            let run_local = matches!(mode, crate::search::SearchMode::Local | crate::search::SearchMode::Fuzzy);
+            let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph | crate::search::SearchMode::Fuzzy);
 
             // FTS results
             let fts_results: Vec<crate::search::FtsResult> = if run_fts {
