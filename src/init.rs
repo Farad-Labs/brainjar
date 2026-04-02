@@ -65,45 +65,50 @@ struct ProviderEntry {
 
 fn print_mascot() {
     use colored::Colorize;
- 
-    // ── Glass dome (cyan) ──────────────────────────────────────────
-    //   Rounded capsule shape with brain & sparkle texture inside
+
+    // ── Glass dome (cyan walls, pink brain inside) ─────────────────
     let d1 = "         ,------------,";
-    let d2 = "        /  * ~~~ * ~~  \\";
-    let d3 = "       |  /~~~~~~~~~\\   |";
-    let d4 = "       |  (~~~~~~~~~~)  |";
-    let d5 = "       |  \\__________/  |";
+    // d2–d5 are printed inline with split coloring (see below)
     let d6 = "        \\~~~~~~~~~~~~~~/";
- 
+
     // ── Face collar / head band (yellow) ──────────────────────────
-    //   Riveted band housing the eyes and mouth
     let f1 = "      .-[● ● ● ● ● ● ● ●]-.";
     let f2 = "      |   (◉)       (◉)   |";
     let f3 = "      |        \\_/        |";
     let f4 = "      '-[● ● ● ● ● ● ● ●]-'";
- 
+
     // ── Body (white/bold) ──────────────────────────────────────────
-    //   Claw arm on left, pointing arm on right, chest plate center
     let b1 = "     ----------------------";
     let b2 = "     |                    |";
-    let b3 = "<{)==|    [__________]    |==(}>";    // arms at chest level
+    let b3 = "<{)==|    [__________]    |==(}>"; // arms at chest level
     let b4 = "     |                    |";
     let b5 = "     ----------------------";
- 
+
     // ── Legs & tank treads (white) ────────────────────────────────
     let l1 = "           |        |";
     let l2 = "          [=]      [=]";
     let l3 = "         /   \\    /   \\";
     let l4 = "        [=====]  [=====]";
     let l5 = "         '----'  '----'";
- 
+
     println!();
+
+    // Dome — walls in cyan, brain interior in bright magenta (pink)
     println!("{}", d1.cyan().bold());
-    println!("{}", d2.cyan());
-    println!("{}", d3.cyan());
-    println!("{}", d4.cyan());
-    println!("{}", d5.cyan());
+    print!("{}", "        /  ".cyan());
+    print!("{}", "* ~~~ * ~~".bright_magenta());
+    println!("{}", "  \\".cyan());
+    print!("{}", "       |  ".cyan());
+    print!("{}", "/~~~~~~~~~~\\".bright_magenta());
+    println!("{}", "  |".cyan());
+    print!("{}", "       |  ".cyan());
+    print!("{}", "(~~~~~~~~~~)".bright_magenta());
+    println!("{}", "  |".cyan());
+    print!("{}", "       |  ".cyan());
+    print!("{}", "\\__________/".bright_magenta());
+    println!("{}", "  |".cyan());
     println!("{}", d6.cyan().bold());
+
     println!("{}", f1.yellow().bold());
     println!("{}", f2.yellow().bold());
     println!("{}", f3.yellow());
