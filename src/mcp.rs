@@ -272,12 +272,11 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("all");
 
             let mode = match mode_str {
-                "local" => crate::search::SearchMode::Local,
-                "text" => crate::search::SearchMode::Text,
-                "graph" => crate::search::SearchMode::Graph,
-                "fuzzy" => crate::search::SearchMode::Fuzzy,
-                "vector" => crate::search::SearchMode::Vector,
-                _ => crate::search::SearchMode::All,
+                "local" => crate::search::SearchMode::from_flags(false, false, false, true),
+                "text" => crate::search::SearchMode::from_flags(true, false, false, false),
+                "graph" => crate::search::SearchMode::from_flags(false, true, false, false),
+                "vector" => crate::search::SearchMode::from_flags(false, false, true, false),
+                _ => crate::search::SearchMode::default_mode(),
             };
 
             let include_content = args.get("include_content").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -299,7 +298,6 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             // Smart mode: fan-out search with LLM-extracted queries
             if smart {
-                use crate::search::{SearchMode as SM};
                 let queries = match crate::search::extract_queries_pub(config, query).await {
                     Ok(q) => q,
                     Err(e) => return Ok(tool_error(format!("Smart search query extraction failed: {}", e))),
@@ -309,8 +307,8 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 let mut all_local: Vec<crate::local_search::LocalSearchResult> = Vec::new();
                 let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
 
-                let run_fts_inner = matches!(mode, SM::All | SM::Text | SM::Fuzzy);
-                let run_graph_inner = matches!(mode, SM::All | SM::Graph | SM::Fuzzy);
+                let run_fts_inner = mode.run_fts();
+                let run_graph_inner = mode.run_graph();
 
                 for sub_query in &queries {
                     if run_fts_inner {
@@ -371,9 +369,9 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 return Ok(tool_text(text));
             }
 
-            let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text | crate::search::SearchMode::Fuzzy);
-            let run_local = matches!(mode, crate::search::SearchMode::Local | crate::search::SearchMode::Fuzzy);
-            let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph | crate::search::SearchMode::Fuzzy);
+            let run_fts = mode.run_fts();
+            let run_local = mode.run_local();
+            let run_graph = mode.run_graph();
 
             // FTS results
             let fts_results: Vec<crate::search::FtsResult> = if run_fts {
@@ -651,7 +649,7 @@ fn format_search_text(
 
     let mut out = format!("Results for \"{}\"\n\n", query);
 
-    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text) {
+    if mode.run_fts() {
         out.push_str("=== FTS5 (text search) ===\n");
         if fts.is_empty() {
             out.push_str("No text results\n\n");
@@ -695,7 +693,7 @@ fn format_search_text(
         }
     }
 
-    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Local) {
+    if mode.run_local() {
         out.push_str("=== Local (fuzzy) ===\n");
         if local.is_empty() {
             out.push_str("No local results\n\n");
@@ -713,7 +711,7 @@ fn format_search_text(
         }
     }
 
-    if matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph) {
+    if mode.run_graph() {
         out.push_str("=== Graph (entity search) ===\n");
         if graph.is_empty() {
             out.push_str("No graph results\n\n");

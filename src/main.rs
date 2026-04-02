@@ -52,20 +52,17 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Local fuzzy search only (nucleo)
-        #[arg(long, conflicts_with = "text", conflicts_with = "graph", conflicts_with = "fuzzy")]
+        /// Local fuzzy file search (nucleo) — cannot combine with other modes
+        #[arg(long, conflicts_with = "text", conflicts_with = "graph", conflicts_with = "vector")]
         local: bool,
-        /// FTS5 text search only
-        #[arg(long, conflicts_with = "local", conflicts_with = "graph", conflicts_with = "fuzzy")]
+        /// FTS5 text search (no fuzzy correction) — combinable with --graph, --vector
+        #[arg(long, conflicts_with = "local")]
         text: bool,
-        /// Graph entity traversal search
-        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "fuzzy")]
+        /// Graph entity traversal — combinable with --text, --vector
+        #[arg(long, conflicts_with = "local")]
         graph: bool,
-        /// Include fuzzy matching in search (slower, more comprehensive)
-        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "graph", conflicts_with = "vector")]
-        fuzzy: bool,
-        /// Vector similarity search only (requires embeddings config)
-        #[arg(long, conflicts_with = "local", conflicts_with = "text", conflicts_with = "graph", conflicts_with = "fuzzy")]
+        /// Vector similarity search — combinable with --text, --graph
+        #[arg(long, conflicts_with = "local")]
         vector: bool,
         /// Use exact (case-insensitive substring) matching for local search
         #[arg(long)]
@@ -272,7 +269,6 @@ async fn main() -> Result<()> {
             local,
             text,
             graph,
-            fuzzy,
             vector,
             exact,
             chunks,
@@ -280,19 +276,7 @@ async fn main() -> Result<()> {
             smart,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            let mode = if local {
-                brainjar::search::SearchMode::Local
-            } else if text {
-                brainjar::search::SearchMode::Text
-            } else if graph {
-                brainjar::search::SearchMode::Graph
-            } else if fuzzy {
-                brainjar::search::SearchMode::Fuzzy
-            } else if vector {
-                brainjar::search::SearchMode::Vector
-            } else {
-                brainjar::search::SearchMode::All
-            };
+            let mode = brainjar::search::SearchMode::from_flags(text, graph, vector, local);
             brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score, smart)
                 .await?;
         }
