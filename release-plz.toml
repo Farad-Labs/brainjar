@@ -6,8 +6,7 @@ git_tag_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
 
-# Don't publish to crates.io yet — we'll enable this for v1.0
-publish = false
+publish = true
 
 [[package]]
 name = "brainjar"
