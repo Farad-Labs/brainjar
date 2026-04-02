@@ -146,11 +146,11 @@ Graph search traverses entity relationships to find documents connected to your 
 
 ### Supported Backends
 
-| Backend | Config | Notes |
-|---------|--------|-------|
-| Gemini | `provider = "gemini"` | Flash Lite recommended for cost |
-| OpenAI | `provider = "openai"` | GPT-4o-mini works well |
-| Ollama | `provider = "ollama"` | Local LLM, no API cost |
+| Backend | Config | Extraction | Embeddings | Notes |
+|---------|--------|------------|------------|-------|
+| Gemini | `provider = "gemini"` | ✅ | ✅ | Flash Lite for extraction, embedding-2 for vectors |
+| OpenAI | `provider = "openai"` | ⚠️ | ✅ | text-embedding-3-large recommended (embeddings working, extraction needs fix) |
+| Ollama | `provider = "ollama"` | ✅ | ❌ | Local LLM, no API cost, extraction only |
 
 ## Configuration
 
@@ -183,9 +183,9 @@ enabled = true
 
 # Optional: vector embeddings
 [embeddings]
-provider = "gemini"
-model = "gemini-embedding-2-preview"
-dimensions = 3072
+provider = "openai"  # or "gemini"
+model = "text-embedding-3-large"  # or "gemini-embedding-2-preview"
+dimensions = 1024  # Matryoshka reduction: 67% storage savings vs 3072
 ```
 
 ### Knowledge Base Options

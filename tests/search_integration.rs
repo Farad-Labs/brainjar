@@ -30,6 +30,10 @@ fn brainjar_bin() -> PathBuf {
 }
 
 fn test_corpus_config() -> PathBuf {
+    // Allow overriding the config for multi-provider testing
+    if let Ok(path) = std::env::var("BRAINJAR_TEST_CONFIG") {
+        return PathBuf::from(path);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("test-corpus")
         .join("brainjar.toml")
@@ -46,9 +50,12 @@ fn run_search(query: &str, mode_flag: &str) -> String {
         .arg("--limit")
         .arg("10");
 
-    // Pass GOOGLE_API_KEY through for vector search (query embedding)
+    // Pass API keys through for vector search (query embedding)
     if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
         cmd.env("GOOGLE_API_KEY", key);
+    }
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        cmd.env("OPENAI_API_KEY", key);
     }
 
     if !mode_flag.is_empty() {

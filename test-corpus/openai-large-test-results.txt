@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running tests/search_integration.rs (target/debug/deps/search_integration-b55068ed0701a3d8)
+
+running 16 tests
+test test_fts_finds_exact_terms ... ok
+test test_fts_misses_synonyms ... ok
+test test_fts_finds_replacement_keyword ... ok
+test test_graph_executive_sponsorship ... ok
+test test_graph_finds_account_transfer ... ok
+test test_graph_multi_hop ... ok
+test test_graph_traverses_relationships ... ok
+test test_vector_finds_synonyms ... ok
+test test_vector_understands_performance_synonyms ... ok
+test test_fuzzy_bidirectional ... ok
+test test_fuzzy_corrects_typos ... ok
+test test_vector_finds_paraphrased_concepts ... ok
+test test_vector_semantic_cost_overruns ... ok
+test test_vector_beats_fts_on_semantic_queries ... ok
+test test_all_mode_merges_signals ... ok
+test test_fuzzy_handles_postgres_variations ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+

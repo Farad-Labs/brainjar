@@ -1,0 +1,30 @@
+
+thread 'test_vector_finds_synonyms' (7097710) panicked at tests/search_integration.rs:124:5:
+Vector search should find synonym-concepts.md via semantic similarity.
+Results: {
+  "results": []
+}
+
+test test_vector_finds_synonyms ... FAILED
+test test_fuzzy_bidirectional ... ok
+
+thread 'test_vector_understands_performance_synonyms' (7097746) panicked at tests/search_integration.rs:160:5:
+Vector should connect 'performance problems' to load/throttling descriptions.
+Results: {
+  "results": []
+}
+
+test test_vector_understands_performance_synonyms ... FAILED
+
+failures:
+
+failures:
+    test_vector_beats_fts_on_semantic_queries
+    test_vector_finds_paraphrased_concepts
+    test_vector_finds_synonyms
+    test_vector_semantic_cost_overruns
+    test_vector_understands_performance_synonyms
+
+test result: FAILED. 11 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+error: test failed, to rerun pass `--test search_integration`

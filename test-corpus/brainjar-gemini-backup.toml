@@ -1,0 +1,17 @@
+[providers.gemini]
+api_key = "${GOOGLE_API_KEY}"
+
+[embeddings]
+provider = "gemini"
+model = "gemini-embedding-2-preview"
+dimensions = 3072
+
+[extraction]
+provider = "gemini"
+model = "gemini-3.1-flash-lite-preview"
+enabled = true
+
+[knowledge_bases.test-corpus]
+watch_paths = ["./"]
+auto_sync = true
+description = "Golden test corpus for search validation"
