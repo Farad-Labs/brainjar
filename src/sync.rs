@@ -301,8 +301,13 @@ async fn sync_kb_human(
 
             // Batch 20 documents at a time
             for chunk in paths_and_contents.chunks(20) {
-                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
-                match embedder.embed_batch(&texts).await {
+                let docs: Vec<(&str, Option<&str>)> = chunk.iter().map(|(rel_path, c)| {
+                    let title = std::path::Path::new(rel_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str());
+                    (c.as_str(), title)
+                }).collect();
+                match embedder.embed_documents(&docs).await {
                     Ok(embeddings) => {
                         for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
                             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
@@ -481,8 +486,13 @@ async fn sync_kb_json(
                     .collect();
 
                 for chunk in paths_and_contents.chunks(20) {
-                    let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
-                    if let Ok(embeddings) = embedder.embed_batch(&texts).await {
+                    let docs: Vec<(&str, Option<&str>)> = chunk.iter().map(|(rel_path, c)| {
+                        let title = std::path::Path::new(rel_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str());
+                        (c.as_str(), title)
+                    }).collect();
+                    if let Ok(embeddings) = embedder.embed_documents(&docs).await {
                         for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
                             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                                 use zerocopy::IntoBytes;

@@ -3,7 +3,10 @@ use std::path::Path;
 
 use crate::config::EmbeddingConfig;
 
-/// Gemini embedding task types for optimized retrieval.
+/// Embedding task types for optimized retrieval.
+/// Different models handle these differently:
+/// - gemini-embedding-001: uses `taskType` API parameter
+/// - gemini-embedding-2-preview: uses text prefix format (e.g., "task: search result | query: ...")
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskType {
     /// Embedding stored documents for retrieval
@@ -15,12 +18,35 @@ pub enum TaskType {
 }
 
 impl TaskType {
-    /// Returns the Gemini API task type string.
-    pub fn as_gemini_str(self) -> &'static str {
+    /// Returns the Gemini embedding-001 API task type string.
+    pub fn as_gemini_v1_str(self) -> &'static str {
         match self {
             Self::RetrievalDocument => "RETRIEVAL_DOCUMENT",
             Self::RetrievalQuery => "RETRIEVAL_QUERY",
             Self::CodeRetrievalQuery => "CODE_RETRIEVAL_QUERY",
+        }
+    }
+}
+
+/// Returns true if the model uses text prefix format instead of taskType parameter.
+/// gemini-embedding-2-preview (and future v2+ models) use prefix format.
+fn is_gemini_v2_embedding(model: &str) -> bool {
+    model.contains("embedding-2") || model.contains("embedding-3")
+}
+
+/// Format text with the appropriate task prefix for gemini-embedding-2.
+/// See: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/embeddings/get-multimodal-embeddings
+fn format_gemini_v2_text(text: &str, task_type: TaskType, title: Option<&str>) -> String {
+    match task_type {
+        TaskType::RetrievalDocument => {
+            let t = title.unwrap_or("none");
+            format!("title: {} | text: {}", t, text)
+        }
+        TaskType::RetrievalQuery => {
+            format!("task: search result | query: {}", text)
+        }
+        TaskType::CodeRetrievalQuery => {
+            format!("task: code retrieval | query: {}", text)
         }
     }
 }
@@ -88,6 +114,24 @@ impl Embedder {
         self.embed_batch_with_task(texts, TaskType::RetrievalDocument).await
     }
 
+    /// Embed a batch of document texts with optional titles for better v2 embeddings.
+    /// For gemini-embedding-2, titles are prepended as "title: X | text: Y".
+    pub async fn embed_documents(&self, docs: &[(&str, Option<&str>)]) -> Result<Vec<Vec<f32>>> {
+        if self.config.provider == "gemini" && is_gemini_v2_embedding(&self.config.model) {
+            // For v2, format each text with its title prefix
+            let formatted: Vec<String> = docs
+                .iter()
+                .map(|(text, title)| format_gemini_v2_text(text, TaskType::RetrievalDocument, *title))
+                .collect();
+            let refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
+            self.embed_gemini_raw(&refs).await
+        } else {
+            // For v1 / non-gemini, just use the text with task type
+            let texts: Vec<&str> = docs.iter().map(|(text, _)| *text).collect();
+            self.embed_batch_with_task(&texts, TaskType::RetrievalDocument).await
+        }
+    }
+
     /// Embed a batch of texts with a specific task type.
     pub async fn embed_batch_with_task(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
         match self.config.provider.as_str() {
@@ -108,12 +152,26 @@ impl Embedder {
 
 impl Embedder {
     async fn embed_gemini(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
+        if is_gemini_v2_embedding(&self.config.model) {
+            // v2: format with text prefix, no taskType parameter
+            let formatted: Vec<String> = texts
+                .iter()
+                .map(|text| format_gemini_v2_text(text, task_type, None))
+                .collect();
+            let refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
+            self.embed_gemini_raw(&refs).await
+        } else {
+            // v1: use taskType parameter
+            self.embed_gemini_v1(texts, task_type).await
+        }
+    }
+
+    /// Gemini embedding-001 style: uses taskType API parameter.
+    async fn embed_gemini_v1(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
         let api_key = self.require_api_key()?;
 
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
-        // Gemini embedContent works one text at a time (batchEmbedContents also
-        // exists but for simplicity we loop here — fine for Phase 2).
         for text in texts {
             let url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
@@ -122,7 +180,58 @@ impl Embedder {
             let body = serde_json::json!({
                 "model": format!("models/{}", self.config.model),
                 "content": {"parts": [{"text": text}]},
-                "taskType": task_type.as_gemini_str()
+                "taskType": task_type.as_gemini_v1_str()
+            });
+
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .context("Gemini embedContent request failed")?;
+
+            let status = resp.status();
+            let json: serde_json::Value =
+                resp.json().await.context("Failed to parse Gemini embed response")?;
+
+            if !status.is_success() {
+                let err_msg = json["error"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown error");
+                anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
+            }
+
+            let values = json["embedding"]["values"]
+                .as_array()
+                .context("Gemini: missing embedding.values in response")?;
+
+            let embedding: Vec<f32> = values
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+
+            all_embeddings.push(embedding);
+        }
+
+        Ok(all_embeddings)
+    }
+
+    /// Gemini embedding-2 style: text is already formatted with prefixes, no taskType param.
+    async fn embed_gemini_raw(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let api_key = self.require_api_key()?;
+
+        let mut all_embeddings = Vec::with_capacity(texts.len());
+
+        for text in texts {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
+                self.config.model, api_key
+            );
+            // No taskType for v2 — task is encoded in the text prefix
+            let body = serde_json::json!({
+                "model": format!("models/{}", self.config.model),
+                "content": {"parts": [{"text": text}]}
             });
 
             let resp = self
@@ -345,9 +454,41 @@ mod tests {
     }
 
     #[test]
-    fn test_task_type_gemini_strings() {
-        assert_eq!(TaskType::RetrievalDocument.as_gemini_str(), "RETRIEVAL_DOCUMENT");
-        assert_eq!(TaskType::RetrievalQuery.as_gemini_str(), "RETRIEVAL_QUERY");
-        assert_eq!(TaskType::CodeRetrievalQuery.as_gemini_str(), "CODE_RETRIEVAL_QUERY");
+    fn test_task_type_gemini_v1_strings() {
+        assert_eq!(TaskType::RetrievalDocument.as_gemini_v1_str(), "RETRIEVAL_DOCUMENT");
+        assert_eq!(TaskType::RetrievalQuery.as_gemini_v1_str(), "RETRIEVAL_QUERY");
+        assert_eq!(TaskType::CodeRetrievalQuery.as_gemini_v1_str(), "CODE_RETRIEVAL_QUERY");
+    }
+
+    #[test]
+    fn test_is_gemini_v2_embedding() {
+        assert!(is_gemini_v2_embedding("gemini-embedding-2-preview"));
+        assert!(is_gemini_v2_embedding("gemini-embedding-3-something"));
+        assert!(!is_gemini_v2_embedding("gemini-embedding-001"));
+        assert!(!is_gemini_v2_embedding("text-embedding-004"));
+    }
+
+    #[test]
+    fn test_format_gemini_v2_document() {
+        let result = format_gemini_v2_text("hello world", TaskType::RetrievalDocument, Some("My Doc"));
+        assert_eq!(result, "title: My Doc | text: hello world");
+    }
+
+    #[test]
+    fn test_format_gemini_v2_document_no_title() {
+        let result = format_gemini_v2_text("hello world", TaskType::RetrievalDocument, None);
+        assert_eq!(result, "title: none | text: hello world");
+    }
+
+    #[test]
+    fn test_format_gemini_v2_query() {
+        let result = format_gemini_v2_text("find me stuff", TaskType::RetrievalQuery, None);
+        assert_eq!(result, "task: search result | query: find me stuff");
+    }
+
+    #[test]
+    fn test_format_gemini_v2_code_query() {
+        let result = format_gemini_v2_text("parse json", TaskType::CodeRetrievalQuery, None);
+        assert_eq!(result, "task: code retrieval | query: parse json");
     }
 }
