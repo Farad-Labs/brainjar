@@ -146,7 +146,11 @@ pub async fn run_init() -> Result<()> {
     let theme = ColorfulTheme::default();
 
     // Guard against overwriting existing config
-    let config_path = PathBuf::from("brainjar.toml");
+    let brainjar_home = dirs::home_dir()
+        .map(|h| h.join(".brainjar"))
+        .unwrap_or_else(|| PathBuf::from(".brainjar"));
+    std::fs::create_dir_all(&brainjar_home).ok();
+    let config_path = brainjar_home.join("brainjar.toml");
     if config_path.exists() {
         let overwrite = Confirm::with_theme(&theme)
             .with_prompt("brainjar.toml already exists. Overwrite?")
@@ -678,8 +682,14 @@ fn generate_brainjar_toml(
         ));
     }
 
-    std::fs::write("brainjar.toml", &toml).context("Failed to write brainjar.toml")?;
-    println!("  {} Generated {}", "\u{2713}".green(), "brainjar.toml".cyan());
+    let brainjar_home = dirs::home_dir()
+        .map(|h| h.join(".brainjar"))
+        .unwrap_or_else(|| PathBuf::from(".brainjar"));
+    std::fs::create_dir_all(&brainjar_home).ok();
+    let config_path = brainjar_home.join("brainjar.toml");
+    std::fs::write(&config_path, &toml)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+    println!("  {} Generated {}", "\u{2713}".green(), config_path.display().to_string().cyan());
 
     Ok(())
 }
