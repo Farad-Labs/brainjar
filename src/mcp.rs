@@ -155,9 +155,53 @@ fn handle_tools_list() -> Result<Value> {
                             "type": "boolean",
                             "description": "Use exact (case-insensitive substring) matching for local search instead of fuzzy",
                             "default": false
+                        },
+                        "include_content": {
+                            "type": "boolean",
+                            "description": "Return full chunk content in results instead of a short preview",
+                            "default": false
+                        },
+                        "doc_score": {
+                            "type": "boolean",
+                            "description": "Aggregate chunk scores per document and return one result per document",
+                            "default": false
                         }
                     },
                     "required": ["query"]
+                }
+            },
+            {
+                "name": "retrieve_chunk",
+                "description": "Retrieve a specific chunk by ID with optional context expansion (surrounding lines from the parent document or neighboring chunks)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "chunk_id": {
+                            "type": "integer",
+                            "description": "The chunk ID to retrieve"
+                        },
+                        "lines_before": {
+                            "type": "integer",
+                            "description": "Number of lines of context before the chunk from the parent document",
+                            "default": 0
+                        },
+                        "lines_after": {
+                            "type": "integer",
+                            "description": "Number of lines of context after the chunk from the parent document",
+                            "default": 0
+                        },
+                        "chunks_before": {
+                            "type": "integer",
+                            "description": "Number of preceding chunks to include",
+                            "default": 0
+                        },
+                        "chunks_after": {
+                            "type": "integer",
+                            "description": "Number of following chunks to include",
+                            "default": 0
+                        }
+                    },
+                    "required": ["chunk_id"]
                 }
             },
             {
@@ -231,6 +275,9 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 _ => crate::search::SearchMode::All,
             };
 
+            let include_content = args.get("include_content").and_then(|v| v.as_bool()).unwrap_or(false);
+            let doc_score = args.get("doc_score").and_then(|v| v.as_bool()).unwrap_or(false);
+
             let run_fts = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Text | crate::search::SearchMode::Fuzzy);
             let run_local = matches!(mode, crate::search::SearchMode::Local | crate::search::SearchMode::Fuzzy);
             let run_graph = matches!(mode, crate::search::SearchMode::All | crate::search::SearchMode::Graph | crate::search::SearchMode::Fuzzy);
@@ -299,7 +346,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 Vec::new()
             };
 
-            let text = format_search_text(query, &fts_results, &local_results, &graph_results, mode);
+            let text = format_search_text(query, &fts_results, &local_results, &graph_results, mode, include_content, doc_score);
             Ok(tool_text(text))
         }
 
@@ -392,6 +439,108 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             Ok(tool_text(serde_json::to_string_pretty(&entries)?))
         }
 
+        "retrieve_chunk" => {
+            let chunk_id = args
+                .get("chunk_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| anyhow::anyhow!("Missing chunk_id argument"))?;
+            let lines_before = args.get("lines_before").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let lines_after = args.get("lines_after").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let chunks_before = args.get("chunks_before").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let chunks_after = args.get("chunks_after").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+            // Search all KBs for the chunk
+            let mut found_conn: Option<rusqlite::Connection> = None;
+            for name in config.knowledge_bases.keys() {
+                let conn = match crate::db::open_db(name, &config.effective_db_dir()) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let exists: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chunks WHERE id = ?1",
+                        rusqlite::params![chunk_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if exists > 0 {
+                    found_conn = Some(conn);
+                    break;
+                }
+            }
+
+            let conn = match found_conn {
+                Some(c) => c,
+                None => return Ok(tool_error(format!("Chunk {} not found", chunk_id))),
+            };
+
+            let (_, doc_id, content, line_start, line_end, chunk_type, file_path) =
+                match crate::db::get_chunk(&conn, chunk_id) {
+                    Ok(r) => r,
+                    Err(e) => return Ok(tool_error(e.to_string())),
+                };
+
+            // Line context
+            let (raw_before, raw_after): (Vec<String>, Vec<String>) =
+                if lines_before > 0 || lines_after > 0 {
+                    match crate::db::get_document_content(&conn, doc_id) {
+                        Ok(doc_content) => {
+                            let doc_lines: Vec<&str> = doc_content.lines().collect();
+                            let total = doc_lines.len();
+                            let before_start = line_start.saturating_sub(lines_before);
+                            let rb: Vec<String> = doc_lines[before_start..line_start]
+                                .iter().map(|l| l.to_string()).collect();
+                            let after_end = (line_end + 1 + lines_after).min(total);
+                            let ra: Vec<String> = if line_end + 1 < total {
+                                doc_lines[(line_end + 1)..after_end]
+                                    .iter().map(|l| l.to_string()).collect()
+                            } else {
+                                Vec::new()
+                            };
+                            (rb, ra)
+                        }
+                        Err(e) => return Ok(tool_error(e.to_string())),
+                    }
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
+            // Neighboring chunks
+            let (before_chunks, _, after_chunks) = if chunks_before > 0 || chunks_after > 0 {
+                match crate::db::get_neighboring_chunks(&conn, chunk_id, chunks_before, chunks_after) {
+                    Ok(r) => r,
+                    Err(e) => return Ok(tool_error(e.to_string())),
+                }
+            } else {
+                (Vec::new(), crate::db::ChunkRow {
+                    chunk_id,
+                    doc_id,
+                    content: content.clone(),
+                    line_start,
+                    line_end,
+                    chunk_type: chunk_type.clone(),
+                }, Vec::new())
+            };
+
+            let mut text = format!("─── {}:{}-{} ({}) ───\n", file_path, line_start, line_end, chunk_type);
+
+            for c in &before_chunks {
+                text.push_str(&format!("[prev] lines {}-{}:\n{}\n\n", c.line_start, c.line_end, c.content));
+            }
+            if !raw_before.is_empty() {
+                text.push_str(&format!("[context before]:\n{}\n\n", raw_before.join("\n")));
+            }
+            text.push_str(&format!("[match]:\n{}\n", content));
+            if !raw_after.is_empty() {
+                text.push_str(&format!("\n[context after]:\n{}\n", raw_after.join("\n")));
+            }
+            for c in &after_chunks {
+                text.push_str(&format!("\n[next] lines {}-{}:\n{}\n", c.line_start, c.line_end, c.content));
+            }
+
+            Ok(tool_text(text))
+        }
+
         name => Ok(tool_error(format!("Unknown tool: {}", name))),
     }
 }
@@ -415,6 +564,8 @@ fn format_search_text(
     local: &[crate::local_search::LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
     mode: crate::search::SearchMode,
+    include_content: bool,
+    doc_score: bool,
 ) -> String {
     if fts.is_empty() && local.is_empty() && graph.is_empty() {
         return format!("No results found for \"{}\"", query);
@@ -427,13 +578,40 @@ fn format_search_text(
         if fts.is_empty() {
             out.push_str("No text results\n\n");
         } else {
-            for (i, r) in fts.iter().enumerate() {
+            // Optionally aggregate by document
+            let display_fts: Vec<(usize, &crate::search::FtsResult)> = if doc_score {
+                // Keep only the best-scoring chunk per path
+                let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                let mut deduped: Vec<&crate::search::FtsResult> = Vec::new();
+                for r in fts {
+                    let entry = seen.entry(r.path.as_str()).or_insert(deduped.len());
+                    if *entry == deduped.len() {
+                        deduped.push(r);
+                    } else if r.score > deduped[*entry].score {
+                        deduped[*entry] = r;
+                    }
+                }
+                deduped.into_iter().enumerate().collect()
+            } else {
+                fts.iter().enumerate().collect()
+            };
+            for (i, r) in display_fts {
+                let body = if include_content {
+                    r.content.as_deref().unwrap_or(r.excerpt.as_str()).to_string()
+                } else {
+                    format!("...{}...", r.excerpt.replace('\n', " "))
+                };
+                let chunk_info = match (r.chunk_id, r.line_start, r.line_end) {
+                    (Some(cid), Some(ls), Some(le)) => format!(" [chunk:{} L{}-{}]", cid, ls, le),
+                    _ => String::new(),
+                };
                 out.push_str(&format!(
-                    "{}. [{:.4}] {}\n   ...{}...\n\n",
+                    "{}. [{:.4}] {}{}\n   {}\n\n",
                     i + 1,
                     r.score,
                     r.path,
-                    r.excerpt.replace('\n', " ")
+                    chunk_info,
+                    body,
                 ));
             }
         }
