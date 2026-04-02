@@ -8,6 +8,18 @@ use crate::config::Config;
 use crate::db;
 use crate::embed::Embedder;
 use zerocopy::IntoBytes;
+
+/// Sanitize a query string for FTS5 MATCH syntax.
+/// Removes special characters that FTS5 interprets as operators.
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .chars()
+        .filter(|c| !matches!(c, '?' | '*' | '(' | ')' | '"' | '+' | '-' | '^' | '{' | '}' | '~'))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 use crate::fuzzy;
 use crate::local_search::{run_local_search, LocalSearchResult};
 
@@ -89,7 +101,7 @@ async fn extract_queries(config: &Config, raw_text: &str) -> Result<Vec<String>>
         .context("No API key for extraction provider")?;
 
     let prompt = format!(
-        "Extract 2-5 concise search queries from this text. Return ONLY a JSON array of strings, nothing else.\n\nText: {}",
+        "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Extract key concepts, entities, and topics\n- Do NOT return the original text as a query\n\nText: {}\n\nJSON array:",
         raw_text
     );
 
@@ -123,7 +135,12 @@ async fn extract_queries(config: &Config, raw_text: &str) -> Result<Vec<String>>
             let resp = client.post(url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .json(&body).send().await?;
+            let status = resp.status();
             let json: serde_json::Value = resp.json().await?;
+            if !status.is_success() {
+                let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+                anyhow::bail!("Smart search: OpenAI API error ({}): {}", status, err_msg);
+            }
             json["choices"][0]["message"]["content"]
                 .as_str()
                 .unwrap_or("[]")
@@ -625,6 +642,10 @@ fn dedup_vector_results(mut results: Vec<VectorResult>) -> Vec<VectorResult> {
 
 /// FTS5 BM25 search — queries `chunks_fts` if available, falls back to `documents_fts`.
 pub fn search_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
+    let query = &sanitize_fts_query(query);
+    if query.is_empty() {
+        return Ok(vec![]);
+    }
     // Check if chunks_fts exists
     let has_chunks_fts: bool = conn
         .query_row(

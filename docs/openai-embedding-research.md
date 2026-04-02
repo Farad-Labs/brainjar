@@ -9,7 +9,7 @@
 
 **Embedding model:** `text-embedding-3-large` at **1024 dimensions** for best quality/cost balance. Use `text-embedding-3-small` at 512 dims for cost-sensitive deployments.
 
-**Smart search extraction:** `gpt-4.1-nano` — $0.10/M input, $0.40/M output, supports Structured Outputs. Cheapest capable model.
+**Smart search extraction:** `gpt-5.4-nano` — $0.20/M input, $1.25/M output, supports Structured Outputs. Best quality/cost for small prompts.
 
 **Task differentiation:** OpenAI has NO native task type support. The `embed_openai()` path currently ignores `task_type` — this is fine for now, but document it. No prefix tricks are established/documented for text-embedding-3 models.
 
@@ -18,7 +18,7 @@
 **Estimated costs at 1M tokens/month:**
 - `text-embedding-3-small`: $0.02 vs Gemini embedding-2 at $0.20 → **10x cheaper**
 - `text-embedding-3-large`: $0.13 vs Gemini embedding-2 at $0.20 → **1.5x cheaper**
-- Smart search with `gpt-4.1-nano`: ~$0.50/10K queries (tiny prompts)
+- Smart search with `gpt-5.4-nano`: ~$1.00/10K queries (tiny prompts, better quality than 4.1-nano)
 
 ---
 
