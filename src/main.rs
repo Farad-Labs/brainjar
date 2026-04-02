@@ -70,6 +70,12 @@ enum Commands {
         /// Use exact (case-insensitive substring) matching for local search
         #[arg(long)]
         exact: bool,
+        /// Return full chunk content instead of preview
+        #[arg(long)]
+        chunks: bool,
+        /// Aggregate chunk scores per document (one result per doc)
+        #[arg(long)]
+        doc_score: bool,
     },
     /// Show knowledge base status
     Status {
@@ -228,6 +234,8 @@ async fn main() -> Result<()> {
             fuzzy,
             vector,
             exact,
+            chunks,
+            doc_score,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             let mode = if local {
@@ -243,7 +251,7 @@ async fn main() -> Result<()> {
             } else {
                 brainjar::search::SearchMode::All
             };
-            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact)
+            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score)
                 .await?;
         }
         Commands::Status { kb_name, json } => {
