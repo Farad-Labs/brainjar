@@ -182,7 +182,7 @@ fn test_vector_beats_fts_on_semantic_queries() {
 #[ignore]
 fn test_fuzzy_corrects_typos() {
     // "kubernetes" should match "kuberentes" (typo) in typo-corpus.md
-    let results = run_search("kubernetes", "--fuzzy");
+    let results = run_search("kubernetes", "");
     assert!(
         results_contain_file(&results, "typo-corpus"),
         "Fuzzy search should correct 'kuberentes' typo to match 'kubernetes' query.\nResults: {}",
@@ -194,7 +194,7 @@ fn test_fuzzy_corrects_typos() {
 #[ignore]
 fn test_fuzzy_handles_postgres_variations() {
     // "PostgreSQL" should match "postgress" in typo-corpus.md
-    let results = run_search("PostgreSQL", "--fuzzy");
+    let results = run_search("PostgreSQL", "");
     assert!(
         results_contain_file(&results, "typo-corpus"),
         "Fuzzy should match PostgreSQL to postgress variations.\nResults: {}",
@@ -206,7 +206,7 @@ fn test_fuzzy_handles_postgres_variations() {
 #[ignore]
 fn test_fuzzy_bidirectional() {
     // Corpus has typo "archetecture", query has correct "architecture"
-    let results = run_search("architecture", "--fuzzy");
+    let results = run_search("architecture", "");
     assert!(
         results_contain_file(&results, "typo-corpus"),
         "Fuzzy should match 'architecture' to corpus typo 'archetecture'.\nResults: {}",
