@@ -391,6 +391,14 @@ cargo clippy
 cargo install --path .
 ```
 
+### Golden Corpus QA
+
+PRs to `main` run the full golden corpus test suite with **both Gemini and OpenAI** providers. Results are uploaded as a GitHub Actions artifact (`golden-corpus-summary.md`).
+
+- **Gemini:** `gemini-embedding-2-preview` (3072 dims)
+- **OpenAI:** `text-embedding-3-large` (1024 dims)
+- **Pass threshold:** 16/16 tests for both providers
+
 ### Roadmap
 
 - [ ] `brainjar retrieve` — fetch full chunk content with line/chunk context (v0.2)
