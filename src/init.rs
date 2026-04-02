@@ -43,20 +43,91 @@ impl Highlighter for PathHelper {}
 impl Validator for PathHelper {}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Knowledge base config gathered from the wizard
+// Internal config structures gathered from the wizard
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct KbConfig {
     name: String,
     watch_paths: Vec<String>,
+    description: Option<String>,
     auto_sync: bool,
 }
 
-/// Provider credentials gathered from the wizard.
-struct ProviderCreds {
-    gemini_api_key: String,
-    openai_api_key: String,
-    ollama_base_url: String,
+struct ProviderEntry {
+    name: String,   // "gemini" | "openai" | "ollama"
+    api_key: String,
+    base_url: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ASCII art mascot
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn print_mascot() {
+    // Jar (cyan)
+    let jar_top   = "      .~~~~~~~~~~.";
+    let jar_1     = "     /  *  brain  \\";
+    let jar_2     = "    | .  in a jar. |";
+    let jar_3     = "    |  `-.___.-'   |";
+    let jar_bot   = "     \\____________/";
+    let jar_neck  = "          ||";
+    // Robot body (white/bold)
+    let bod_top   = "     .----||----.";
+    let bod_eye   = "     | (o)  (o) |";
+    let bod_mouth = "     |   \\___/  |";
+    let bod_bot   = "     `----+--+--'";
+    let arms      = "    /     |  |     \\";
+    let legs_top  = "          |  |";
+    let legs_bot  = "         /    \\";
+    let feet      = "        [_]  [_]";
+
+    println!();
+    println!("{}", jar_top.cyan().bold());
+    println!("{}", jar_1.cyan());
+    println!("{}", jar_2.cyan());
+    println!("{}", jar_3.cyan());
+    println!("{}", jar_bot.cyan().bold());
+    println!("{}", jar_neck.white().bold());
+    println!("{}", bod_top.white().bold());
+    println!("{}", bod_eye.white().bold());
+    println!("{}", bod_mouth.white().bold());
+    println!("{}", bod_bot.white().bold());
+    println!("{}", arms.white());
+    println!("{}", legs_top.white());
+    println!("{}", legs_bot.white());
+    println!("{}", feet.white());
+    println!();
+    println!("  {}",
+        "B  R  A  I  N  J  A  R"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "  {}",
+        "Your local AI memory system".dimmed()
+    );
+    println!();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Colored info box helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn info_box(lines: &[&str]) {
+    let width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 4;
+    let border = "\u{2550}".repeat(width - 2);
+    println!("  {}{}{}", "\u{2554}".cyan(), border.cyan(), "\u{2557}".cyan());
+    for line in lines {
+        let pad = width - 4 - line.len();
+        println!(
+            "  {}   {}{} {}",
+            "\u{2551}".cyan(),
+            line,
+            " ".repeat(pad),
+            "\u{2551}".cyan()
+        );
+    }
+    println!("  {}{}{}", "\u{255a}".cyan(), border.cyan(), "\u{255d}".cyan());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,74 +135,272 @@ struct ProviderCreds {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn run_init() -> Result<()> {
-    println!("\n{}", "🧠 brainjar init".cyan().bold());
+    print_mascot();
+
     println!(
-        "{}\n",
-        "Interactive wizard — generates brainjar.toml and creates .brainjar/ directory".dimmed()
+        "  {}",
+        "Welcome to Brainjar! Let's get your memory system set up.".bold().white()
     );
+    println!();
 
     let theme = ColorfulTheme::default();
 
     // Guard against overwriting existing config
-    let config_path = PathBuf::from("brainjar.toml");
+    let brainjar_home = dirs::home_dir()
+        .map(|h| h.join(".brainjar"))
+        .unwrap_or_else(|| PathBuf::from(".brainjar"));
+    std::fs::create_dir_all(&brainjar_home).ok();
+    let config_path = brainjar_home.join("brainjar.toml");
     if config_path.exists() {
         let overwrite = Confirm::with_theme(&theme)
             .with_prompt("brainjar.toml already exists. Overwrite?")
             .default(false)
             .interact()?;
         if !overwrite {
-            println!("{}", "Aborted.".yellow());
+            println!("{}", "  Aborted.".yellow());
             return Ok(());
         }
     }
 
-    // ── Provider credentials ──────────────────────────────────────────────────
-    println!("{}", "── Provider credentials ───────────────────────────".dimmed());
-    println!(
-        "  {}",
-        "Set API keys/URLs here once; embeddings and extraction will reference them.".dimmed()
-    );
+    // ── Step 1 — Storage location ─────────────────────────────────────────────
+    println!("\n  {}", "Step 1 of 4 — Storage".bold().white());
+    println!("  {}", "─".repeat(40).dimmed());
+    println!("  {}", "Where should Brainjar store its databases?".dimmed());
+    println!();
 
-    let gemini_key: String = Input::with_theme(&theme)
-        .with_prompt("  Gemini API key or env var (e.g. GEMINI_API_KEY, or leave blank)")
-        .default(String::new())
-        .allow_empty(true)
-        .interact_text()?;
+    let storage_choices = &[
+        "~/.brainjar  (recommended — survives project moves)",
+        ".brainjar    (current directory — project-local)",
+        "Custom path",
+    ];
+    let storage_idx = Select::with_theme(&theme)
+        .with_prompt("  Storage location")
+        .items(storage_choices)
+        .default(0)
+        .interact()?;
 
-    let openai_key: String = Input::with_theme(&theme)
-        .with_prompt("  OpenAI API key or env var (e.g. OPENAI_API_KEY, or leave blank)")
-        .default(String::new())
-        .allow_empty(true)
-        .interact_text()?;
-
-    let ollama_url: String = Input::with_theme(&theme)
-        .with_prompt("  Ollama base URL (leave blank for default http://localhost:11434)")
-        .default(String::new())
-        .allow_empty(true)
-        .interact_text()?;
-
-    let providers = ProviderCreds {
-        gemini_api_key: gemini_key,
-        openai_api_key: openai_key,
-        ollama_base_url: ollama_url,
+    let data_dir: String = match storage_idx {
+        0 => "~/.brainjar".to_string(),
+        1 => ".brainjar".to_string(),
+        _ => {
+            let custom: String = Input::with_theme(&theme)
+                .with_prompt("  Custom path (~ is expanded)")
+                .interact_text()?;
+            custom.trim().to_string()
+        }
     };
 
-    // ── Knowledge bases ───────────────────────────────────────────────────────
-    println!("\n{}", "── Knowledge bases ────────────────────────────────".dimmed());
+    println!(
+        "  {} Data dir: {}",
+        "\u{2713}".green(),
+        data_dir.cyan()
+    );
 
-    let kb_count: usize = Input::with_theme(&theme)
-        .with_prompt("How many knowledge bases?")
-        .default(1usize)
-        .interact_text()?;
+    // ── Step 2 — AI Providers ─────────────────────────────────────────────────
+    println!("\n  {}", "Step 2 of 4 — AI Providers".bold().white());
+    println!("  {}", "─".repeat(40).dimmed());
 
-    let mut knowledge_bases: Vec<KbConfig> = Vec::with_capacity(kb_count);
+    info_box(&[
+        "Brainjar uses AI models for two things:",
+        "",
+        "  1. Embeddings   — converting notes into searchable vectors",
+        "  2. Extraction   — finding people, projects, concepts in docs",
+        "",
+        "You can use any OpenAI-compatible API, or choose from the",
+        "defaults below that balance cost and quality.",
+        "",
+        "Skip any provider you don't plan to use.",
+    ]);
+    println!();
 
-    for i in 0..kb_count {
-        println!("\n  {}", format!("Knowledge base {} of {}", i + 1, kb_count).bold());
+    let provider_choices = &["gemini", "openai", "ollama", "other (OpenAI-compatible)"];
+
+    let mut providers: Vec<ProviderEntry> = Vec::new();
+    loop {
+        let idx = Select::with_theme(&theme)
+            .with_prompt("  Provider to configure")
+            .items(provider_choices)
+            .default(0)
+            .interact()?;
+
+        let provider_name = match idx {
+            0 => "gemini".to_string(),
+            1 => "openai".to_string(),
+            2 => "ollama".to_string(),
+            _ => {
+                let name: String = Input::with_theme(&theme)
+                    .with_prompt("  Provider name (used as key in config)")
+                    .interact_text()?;
+                name.trim().to_string()
+            }
+        };
+
+        let api_key: String = if provider_name == "ollama" {
+            // Ollama uses base_url, not an API key
+            String::new()
+        } else {
+            Input::with_theme(&theme)
+                .with_prompt(format!(
+                    "  {} API key or env var (e.g. GEMINI_API_KEY, blank to skip)",
+                    provider_name.to_uppercase()
+                ))
+                .default(String::new())
+                .allow_empty(true)
+                .interact_text()?
+        };
+
+        let base_url: String = if provider_name == "ollama" {
+            Input::with_theme(&theme)
+                .with_prompt("  Ollama base URL")
+                .default("http://localhost:11434".to_string())
+                .interact_text()?
+        } else if idx == 3 {
+            // "other" provider always needs a URL
+            Input::with_theme(&theme)
+                .with_prompt("  Base URL for this provider")
+                .interact_text()?
+        } else {
+            String::new()
+        };
+
+        providers.push(ProviderEntry {
+            name: provider_name.clone(),
+            api_key,
+            base_url,
+        });
+
+        println!(
+            "  {} Added provider: {}",
+            "\u{2713}".green(),
+            provider_name.cyan()
+        );
+
+        let add_more = Confirm::with_theme(&theme)
+            .with_prompt("  Add another provider?")
+            .default(false)
+            .interact()?;
+        if !add_more {
+            break;
+        }
+        println!();
+    }
+
+    // ── Step 3 — Model defaults ───────────────────────────────────────────────
+    println!("\n  {}", "Step 3 of 4 — Model Defaults".bold().white());
+    println!("  {}", "─".repeat(40).dimmed());
+    println!("  {}", "Choose which provider handles embeddings and entity extraction.".dimmed());
+    println!();
+
+    // Embedding provider
+    let embed_provider_name: Option<String>;
+    let embed_model: Option<String>;
+
+    if providers.is_empty() {
+        println!("  {} Skipping embeddings (no providers configured)", "\u{2013}".dimmed());
+        embed_provider_name = None;
+        embed_model = None;
+    } else {
+        let mut embed_opts: Vec<String> = vec!["none (FTS + fuzzy only)".to_string()];
+        embed_opts.extend(providers.iter().map(|p| p.name.clone()));
+        let eidx = Select::with_theme(&theme)
+            .with_prompt("  Embedding provider")
+            .items(&embed_opts)
+            .default(if providers.is_empty() { 0 } else { 1 })
+            .interact()?;
+
+        if eidx == 0 {
+            embed_provider_name = None;
+            embed_model = None;
+            println!("  {} Embeddings: none", "\u{2013}".dimmed());
+        } else {
+            let pname = providers[eidx - 1].name.clone();
+            let default_model = default_embed_model(&pname);
+            let model: String = Input::with_theme(&theme)
+                .with_prompt(format!("  Embedding model ({})", &pname))
+                .default(default_model.to_string())
+                .interact_text()?;
+            println!(
+                "  {} Embeddings: {} / {}",
+                "\u{2713}".green(),
+                pname.cyan(),
+                model.dimmed()
+            );
+            embed_provider_name = Some(pname);
+            embed_model = Some(model);
+        }
+    }
+
+    // Extraction provider
+    let extract_provider_name: Option<String>;
+    let extract_model: Option<String>;
+
+    if providers.is_empty() {
+        println!("  {} Skipping extraction (no providers configured)", "\u{2013}".dimmed());
+        extract_provider_name = None;
+        extract_model = None;
+    } else {
+        let mut ext_opts: Vec<String> = vec!["none (graph search disabled)".to_string()];
+        ext_opts.extend(providers.iter().map(|p| p.name.clone()));
+        let xidx = Select::with_theme(&theme)
+            .with_prompt("  Extraction provider")
+            .items(&ext_opts)
+            .default(if providers.is_empty() { 0 } else { 1 })
+            .interact()?;
+
+        if xidx == 0 {
+            extract_provider_name = None;
+            extract_model = None;
+            println!("  {} Extraction: none", "\u{2013}".dimmed());
+        } else {
+            let pname = providers[xidx - 1].name.clone();
+            let default_model = default_extract_model(&pname);
+            let model: String = Input::with_theme(&theme)
+                .with_prompt(format!("  Extraction model ({})", &pname))
+                .default(default_model.to_string())
+                .interact_text()?;
+            println!(
+                "  {} Extraction: {} / {}",
+                "\u{2713}".green(),
+                pname.cyan(),
+                model.dimmed()
+            );
+            extract_provider_name = Some(pname);
+            extract_model = Some(model);
+        }
+    }
+
+    // ── Step 4 — Knowledge bases ──────────────────────────────────────────────
+    println!("\n  {}", "Step 4 of 4 — Knowledge Bases".bold().white());
+    println!("  {}", "─".repeat(40).dimmed());
+    println!(
+        "  {}",
+        "A knowledge base is a collection of directories/files you want indexed.".dimmed()
+    );
+    println!();
+
+    let mut knowledge_bases: Vec<KbConfig> = Vec::new();
+
+    loop {
+        let kb_num = knowledge_bases.len() + 1;
+        println!(
+            "  {}",
+            format!("Knowledge base #{}", kb_num).bold()
+        );
 
         let name: String = Input::with_theme(&theme)
             .with_prompt("  Name (e.g. memory, project-docs)")
             .interact_text()?;
+
+        let desc_str: String = Input::with_theme(&theme)
+            .with_prompt("  Description (optional, press Enter to skip)")
+            .default(String::new())
+            .allow_empty(true)
+            .interact_text()?;
+        let description = if desc_str.trim().is_empty() {
+            None
+        } else {
+            Some(desc_str.trim().to_string())
+        };
 
         println!("  {}", "Watch paths — tab-complete enabled, empty line to finish:".dimmed());
         let watch_paths = prompt_watch_paths()?;
@@ -145,83 +414,112 @@ pub async fn run_init() -> Result<()> {
 
         let auto_sync = Confirm::with_theme(&theme)
             .with_prompt(format!(
-                "  Enable auto_sync for '{}'? (included in `brainjar sync` without --kb flag)",
+                "  Enable auto_sync for '{}'?",
                 name
             ))
             .default(true)
             .interact()?;
 
         knowledge_bases.push(KbConfig {
-            name,
+            name: name.clone(),
             watch_paths,
+            description,
             auto_sync,
         });
+
+        println!(
+            "  {} KB '{}' added",
+            "\u{2713}".green(),
+            name.cyan()
+        );
+
+        let add_more = Confirm::with_theme(&theme)
+            .with_prompt("  Add another knowledge base?")
+            .default(false)
+            .interact()?;
+        if !add_more {
+            break;
+        }
+        println!();
     }
 
-    // ── Embedding provider (optional) ─────────────────────────────────────────
-    println!("\n{}", "── Embedding provider (optional) ──────────────────".dimmed());
+    // ── Step 5 — Summary + confirm + write ───────────────────────────────────
+    println!("\n  {}", "Summary".bold().white());
+    println!("  {}", "─".repeat(40).dimmed());
+    println!("  {} Data dir:   {}", "\u{2022}".cyan(), data_dir.cyan());
     println!(
-        "  {}",
-        "Used for vector/semantic search. Skip for FTS + fuzzy only.".dimmed()
+        "  {} Providers:  {}",
+        "\u{2022}".cyan(),
+        if providers.is_empty() {
+            "none".dimmed().to_string()
+        } else {
+            providers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ").cyan().to_string()
+        }
     );
-
-    let embed_providers = &["none", "gemini", "openai", "ollama"];
-    let embed_idx = Select::with_theme(&theme)
-        .with_prompt("  Embedding provider")
-        .items(embed_providers)
-        .default(0)
-        .interact()?;
-    let embed_provider = embed_providers[embed_idx];
-
-    let embedding_config = if embed_provider != "none" {
-        let model: String = Input::with_theme(&theme)
-            .with_prompt("  Embedding model")
-            .default(default_embed_model(embed_provider).to_string())
-            .interact_text()?;
-        Some((embed_provider.to_string(), model))
-    } else {
-        None
-    };
-
-    // ── Extraction provider (optional) ────────────────────────────────────────
-    println!("\n{}", "── Extraction provider (optional) ─────────────────".dimmed());
+    let embed_summary = embed_provider_name
+        .as_deref()
+        .map(|p| format!("{} / {}", p, embed_model.as_deref().unwrap_or("")))
+        .unwrap_or_else(|| "none".to_string());
     println!(
-        "  {}",
-        "Used for GraphRAG entity/relationship extraction. Skip for FTS + fuzzy only.".dimmed()
+        "  {} Embeddings: {}",
+        "\u{2022}".cyan(),
+        embed_summary.dimmed()
     );
+    let extract_summary = extract_provider_name
+        .as_deref()
+        .map(|p| format!("{} / {}", p, extract_model.as_deref().unwrap_or("")))
+        .unwrap_or_else(|| "none".to_string());
+    println!(
+        "  {} Extraction: {}",
+        "\u{2022}".cyan(),
+        extract_summary.dimmed()
+    );
+    println!(
+        "  {} KBs:        {}",
+        "\u{2022}".cyan(),
+        knowledge_bases
+            .iter()
+            .map(|kb| kb.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .cyan()
+    );
+    println!();
 
-    let extract_providers = &["none", "gemini", "openai", "ollama"];
-    let extract_idx = Select::with_theme(&theme)
-        .with_prompt("  Extraction provider")
-        .items(extract_providers)
-        .default(0)
+    let confirm = Confirm::with_theme(&theme)
+        .with_prompt("  Write brainjar.toml?")
+        .default(true)
         .interact()?;
-    let extract_provider = extract_providers[extract_idx];
 
-    let extraction_config = if extract_provider != "none" {
-        let model: String = Input::with_theme(&theme)
-            .with_prompt("  Extraction model")
-            .default(default_extract_model(extract_provider).to_string())
-            .interact_text()?;
-        Some((extract_provider.to_string(), model))
-    } else {
-        None
-    };
+    if !confirm {
+        println!("{}", "  Aborted — no files written.".yellow());
+        return Ok(());
+    }
 
     // ── Generate brainjar.toml ────────────────────────────────────────────────
-    println!();
     generate_brainjar_toml(
-        &knowledge_bases,
+        &data_dir,
         &providers,
-        embedding_config.as_ref(),
-        extraction_config.as_ref(),
+        embed_provider_name.as_deref(),
+        embed_model.as_deref(),
+        extract_provider_name.as_deref(),
+        extract_model.as_deref(),
+        &knowledge_bases,
     )?;
 
-    // ── Create .brainjar directory ────────────────────────────────────────────
-    std::fs::create_dir_all(".brainjar").context("Failed to create .brainjar directory")?;
-
-    // Add .brainjar to .gitignore if it doesn't already contain it
-    maybe_update_gitignore()?;
+    // ── Create data_dir ───────────────────────────────────────────────────────
+    let expanded_data_dir = crate::config::expand_tilde(&data_dir);
+    if data_dir == ".brainjar" || data_dir.starts_with("./") || data_dir.starts_with('/') {
+        // project-local — create relative to cwd
+        std::fs::create_dir_all(&expanded_data_dir)
+            .with_context(|| format!("Failed to create data directory: {}", expanded_data_dir.display()))?;
+        // Add to .gitignore if project-local
+        maybe_update_gitignore(&data_dir)?;
+    } else {
+        // global — create but don't touch .gitignore
+        std::fs::create_dir_all(&expanded_data_dir)
+            .with_context(|| format!("Failed to create data directory: {}", expanded_data_dir.display()))?;
+    }
 
     print_next_steps();
 
@@ -281,10 +579,6 @@ fn is_env_var_name(s: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// brainjar.toml generation
-// ─────────────────────────────────────────────────────────────────────────────
-
 fn format_api_key_value(key: &str) -> String {
     if key.is_empty() {
         String::from("\"\"")
@@ -295,52 +589,58 @@ fn format_api_key_value(key: &str) -> String {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// brainjar.toml generation
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
 fn generate_brainjar_toml(
+    data_dir: &str,
+    providers: &[ProviderEntry],
+    embed_provider: Option<&str>,
+    embed_model: Option<&str>,
+    extract_provider: Option<&str>,
+    extract_model: Option<&str>,
     kbs: &[KbConfig],
-    providers: &ProviderCreds,
-    embedding: Option<&(String, String)>,
-    extraction: Option<&(String, String)>,
 ) -> Result<()> {
     let mut toml = String::from(
         "# brainjar.toml — Knowledge base configuration\n\
          # Generated by `brainjar init`\n\n",
     );
 
-    // [providers] section — always emitted so keys are in one place
-    toml.push_str("[providers]\n");
+    // data_dir
+    toml.push_str(&format!("data_dir = \"{}\"\n\n", data_dir));
 
-    let has_gemini = !providers.gemini_api_key.is_empty();
-    let has_openai = !providers.openai_api_key.is_empty();
-    let has_ollama = !providers.ollama_base_url.is_empty();
-
-    if has_gemini {
-        toml.push_str(&format!(
-            "gemini.api_key = {}\n",
-            format_api_key_value(&providers.gemini_api_key)
-        ));
+    // [providers] section
+    if !providers.is_empty() {
+        toml.push_str("[providers]\n");
+        for p in providers {
+            if !p.api_key.is_empty() {
+                toml.push_str(&format!(
+                    "{}.api_key = {}\n",
+                    p.name,
+                    format_api_key_value(&p.api_key)
+                ));
+            }
+            if !p.base_url.is_empty() {
+                toml.push_str(&format!(
+                    "{}.base_url = \"{}\"\n",
+                    p.name, p.base_url
+                ));
+            }
+        }
+        toml.push('\n');
     } else {
-        toml.push_str("# gemini.api_key = \"${GEMINI_API_KEY}\"\n");
+        toml.push_str(
+            "# [providers]\n\
+             # gemini.api_key = \"${GEMINI_API_KEY}\"\n\
+             # openai.api_key = \"${OPENAI_API_KEY}\"\n\
+             # ollama.base_url = \"http://localhost:11434\"\n\n",
+        );
     }
-
-    if has_openai {
-        toml.push_str(&format!(
-            "openai.api_key = {}\n",
-            format_api_key_value(&providers.openai_api_key)
-        ));
-    } else {
-        toml.push_str("# openai.api_key = \"${OPENAI_API_KEY}\"\n");
-    }
-
-    if has_ollama {
-        toml.push_str(&format!("ollama.base_url = \"{}\"\n", providers.ollama_base_url));
-    } else {
-        toml.push_str("# ollama.base_url = \"http://localhost:11434\"\n");
-    }
-
-    toml.push('\n');
 
     // [embeddings] section
-    if let Some((provider, model)) = embedding {
+    if let (Some(provider), Some(model)) = (embed_provider, embed_model) {
         toml.push_str("[embeddings]\n");
         toml.push_str(&format!("provider   = \"{}\"\n", provider));
         toml.push_str(&format!("model      = \"{}\"\n", model));
@@ -348,7 +648,7 @@ fn generate_brainjar_toml(
     }
 
     // [extraction] section
-    if let Some((provider, model)) = extraction {
+    if let (Some(provider), Some(model)) = (extract_provider, extract_model) {
         toml.push_str("[extraction]\n");
         toml.push_str(&format!("provider = \"{}\"\n", provider));
         toml.push_str(&format!("model    = \"{}\"\n", model));
@@ -369,47 +669,72 @@ fn generate_brainjar_toml(
         };
 
         toml.push_str(&format!(
-            "[knowledge_bases.{}]\n\
-             watch_paths = {}\n\
+            "[knowledge_bases.{}]\n",
+            kb.name
+        ));
+        if let Some(desc) = &kb.description {
+            toml.push_str(&format!("description = \"{}\"\n", desc.replace('"', "\\\"")));
+        }
+        toml.push_str(&format!(
+            "watch_paths = {}\n\
              auto_sync   = {}\n\n",
-            kb.name, watch_paths_toml, kb.auto_sync,
+            watch_paths_toml, kb.auto_sync,
         ));
     }
 
-    std::fs::write("brainjar.toml", &toml).context("Failed to write brainjar.toml")?;
-    println!("{} Generated {}", "✓".green(), "brainjar.toml".cyan());
+    let brainjar_home = dirs::home_dir()
+        .map(|h| h.join(".brainjar"))
+        .unwrap_or_else(|| PathBuf::from(".brainjar"));
+    std::fs::create_dir_all(&brainjar_home).ok();
+    let config_path = brainjar_home.join("brainjar.toml");
+    std::fs::write(&config_path, &toml)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+    println!("  {} Generated {}", "\u{2713}".green(), config_path.display().to_string().cyan());
 
     Ok(())
 }
 
-fn maybe_update_gitignore() -> Result<()> {
+fn maybe_update_gitignore(data_dir: &str) -> Result<()> {
     let gitignore_path = PathBuf::from(".gitignore");
-    let entry = ".brainjar/";
+    // Normalize: strip leading ./
+    let entry = data_dir.trim_start_matches("./");
+    let entry_slash = format!("{}/", entry.trim_end_matches('/'));
 
     if gitignore_path.exists() {
         let content = std::fs::read_to_string(&gitignore_path)?;
-        if !content.contains(".brainjar") {
-            let updated = format!("{}\n# brainjar local DB\n{}\n", content.trim_end(), entry);
+        if !content.contains(entry) {
+            let updated = format!(
+                "{}\n# brainjar local DBs\n{}\n",
+                content.trim_end(),
+                entry_slash
+            );
             std::fs::write(&gitignore_path, updated)?;
-            println!("{} Added .brainjar/ to {}", "✓".green(), ".gitignore".cyan());
+            println!("  {} Added {} to {}", "\u{2713}".green(), entry_slash.cyan(), ".gitignore".dimmed());
         }
     } else {
-        std::fs::write(&gitignore_path, format!("# brainjar local DB\n{}\n", entry))?;
-        println!("{} Created {}", "✓".green(), ".gitignore".cyan());
+        std::fs::write(
+            &gitignore_path,
+            format!("# brainjar local DBs\n{}\n", entry_slash),
+        )?;
+        println!("  {} Created {}", "\u{2713}".green(), ".gitignore".cyan());
     }
 
     Ok(())
 }
 
 fn print_next_steps() {
-    println!("\n{}", "──────────────────────────────────────────────────".dimmed());
-    println!("{}", "  Next steps".bold().white());
-    println!("{}", "──────────────────────────────────────────────────".dimmed());
-    println!("\n  {}  Sync your files to the local index\n", "1.".bold());
+    println!();
+    println!("  {}", "\u{2500}".repeat(46).dimmed());
+    println!("  {}", "You're all set!".bold().green());
+    println!("  {}", "\u{2500}".repeat(46).dimmed());
+    println!();
+    println!("  {}  Sync your files to the local index", "1.".bold());
     println!("     {}", "brainjar sync".cyan());
-    println!("\n  {}  Search your knowledge base\n", "2.".bold());
+    println!();
+    println!("  {}  Search your knowledge base", "2.".bold());
     println!("     {}", "brainjar search \"your query\"".cyan());
-    println!("\n  {}  Use as an MCP server\n", "3.".bold());
+    println!();
+    println!("  {}  Use as an MCP server (Claude, Cursor, etc.)", "3.".bold());
     println!("     {}", "brainjar mcp".cyan());
     println!();
 }

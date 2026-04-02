@@ -1,0 +1,28 @@
+name: Golden Corpus QA
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  golden-corpus:
+    name: golden-corpus-qa
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Sync test corpus
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          cd test-corpus
+          brainjar sync
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      - name: Run golden corpus integration tests
+        run: cargo test --test search_integration -- --ignored
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

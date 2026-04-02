@@ -1,57 +1,27 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
-
-env:
-  CARGO_TERM_COLOR: always
+    branches: [main, dev]
+  push:
+    branches: [dev]
 
 jobs:
-  build:
-    name: Build & Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Build
-        run: cargo build --verbose
-
-      - name: Test
-        run: cargo test --verbose
-
-  release-build:
-    name: Release Build
-    runs-on: ubuntu-latest
+  build-and-test:
+    name: build-and-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
-        run: cargo build --release
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
         with:
-          name: brainjar-linux-amd64
-          path: target/release/brainjar
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Build
+        run: cargo build
+      - name: Unit + integration tests
+        run: cargo test

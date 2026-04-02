@@ -19,8 +19,8 @@ name = "brainjar"
 path = "src/lib.rs"
 
 [dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rusqlite = { version = "0.39", features = ["bundled"] }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
@@ -38,7 +38,7 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 dirs = "5"
 dialoguer = "0.11"
-rustyline = { version = "14", features = ["derive"] }
+rustyline = { version = "18", features = ["derive"] }
 graphqlite = "0.4.3"
 sqlite-vec = "=0.1.9"
 zerocopy = { version = "0.8", features = ["derive"] }

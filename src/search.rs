@@ -61,6 +61,7 @@ pub async fn run_search(
     mode: SearchMode,
     exact: bool,
 ) -> Result<()> {
+    let db_dir = config.effective_db_dir();
     let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
     let run_local = matches!(mode, SearchMode::Local);
     let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
@@ -84,7 +85,7 @@ pub async fn run_search(
         };
 
         if let Some((first_kb_name, _)) = kbs.first() {
-            let conn = db::open_db(first_kb_name, &config.config_dir)?;
+            let conn = db::open_db(first_kb_name, &db_dir)?;
             match fuzzy::correct_query(&conn, query) {
                 Ok((corrected, corrections)) => (corrected, corrections),
                 Err(_) => (query.to_string(), Vec::new()),
@@ -116,7 +117,7 @@ pub async fn run_search(
 
         let mut all: Vec<FtsResult> = Vec::new();
         for (name, _kb) in &kbs {
-            let conn = db::open_db(name, &config.config_dir)?;
+            let conn = db::open_db(name, &db_dir)?;
             let results = search_fts(&conn, search_query, limit)?;
             all.extend(results);
         }
@@ -168,10 +169,10 @@ pub async fn run_search(
 
         let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
         for (name, _kb) in &kbs {
-            if !crate::graph::KnowledgeGraph::exists(&config.config_dir, name) {
+            if !crate::graph::KnowledgeGraph::exists(&db_dir, name) {
                 continue;
             }
-            match crate::graph::KnowledgeGraph::open(&config.config_dir, name) {
+            match crate::graph::KnowledgeGraph::open(&db_dir, name) {
                 Ok(kg) => match kg.search(&graph_query, limit) {
                     Ok(results) => all_graph.extend(results),
                     Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
@@ -190,7 +191,15 @@ pub async fn run_search(
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
             let embedder = Embedder::new(embed_cfg, api_key, base_url);
-            match embedder.embed_batch(&[search_query]).await {
+            // Determine task type based on KB file contents
+            let all_paths: Vec<String> = if let Some(name) = kb_name {
+                let conn = crate::db::open_db(name, &config.effective_db_dir()).ok();
+                conn.and_then(|c| crate::db::get_all_paths(&c).ok()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let query_task = crate::embed::task_type_for_query(&all_paths);
+            match embedder.embed_batch_with_task(&[search_query], query_task).await {
                 Ok(vecs) if !vecs.is_empty() => {
                     let query_vec = &vecs[0];
                     let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
@@ -202,7 +211,7 @@ pub async fn run_search(
                     };
                     let mut all_vec: Vec<VectorResult> = Vec::new();
                     for (name, _kb) in &kbs {
-                        let conn = db::open_db(name, &config.config_dir)?;
+                        let conn = db::open_db(name, &db_dir)?;
                         match search_vector(&conn, query_vec, limit) {
                             Ok(results) => all_vec.extend(results),
                             Err(e) => eprintln!("Vector search error in KB {}: {}", name, e),
@@ -540,7 +549,8 @@ pub fn search_fts_for_kb(
     query: &str,
     limit: usize,
 ) -> Result<Vec<FtsResult>> {
-    let conn = db::open_db(kb_name, &config.config_dir)?;
+    let db_dir = config.effective_db_dir();
+    let conn = db::open_db(kb_name, &db_dir)?;
     search_fts(&conn, query, limit)
 }
 
@@ -557,6 +567,7 @@ mod tests {
                 path         TEXT UNIQUE NOT NULL,
                 content      TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                extracted    INTEGER NOT NULL DEFAULT 0,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(

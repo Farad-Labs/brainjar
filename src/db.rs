@@ -16,21 +16,21 @@ pub fn init_vec_extension() {
 }
 
 /// Open (or create) the SQLite database for a knowledge base.
-/// The DB is stored at `<config_dir>/.brainjar/<kb_name>.db`.
+/// `db_dir` is the directory that will contain `<kb_name>.db`.
+/// (This is typically `config.effective_db_dir()`.)
 /// Tables and FTS triggers are created on first open.
 ///
 /// `vec_dimensions` — if > 0 **and** the `documents_vec` virtual table does
 /// not yet exist, it will be created with that many float dimensions.
-pub fn open_db(kb_name: &str, config_dir: &Path) -> Result<Connection> {
-    open_db_with_dims(kb_name, config_dir, 0)
+pub fn open_db(kb_name: &str, db_dir: &Path) -> Result<Connection> {
+    open_db_with_dims(kb_name, db_dir, 0)
 }
 
 /// Like `open_db` but creates the `documents_vec` virtual table when
 /// `vec_dimensions > 0` and the table is not present yet.
-pub fn open_db_with_dims(kb_name: &str, config_dir: &Path, vec_dimensions: usize) -> Result<Connection> {
-    let db_dir = config_dir.join(".brainjar");
-    std::fs::create_dir_all(&db_dir)
-        .with_context(|| format!("Failed to create .brainjar directory: {}", db_dir.display()))?;
+pub fn open_db_with_dims(kb_name: &str, db_dir: &Path, vec_dimensions: usize) -> Result<Connection> {
+    std::fs::create_dir_all(db_dir)
+        .with_context(|| format!("Failed to create db directory: {}", db_dir.display()))?;
 
     let db_path = db_dir.join(format!("{}.db", kb_name));
     let conn = Connection::open(&db_path)
@@ -40,6 +40,7 @@ pub fn open_db_with_dims(kb_name: &str, config_dir: &Path, vec_dimensions: usize
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
     create_schema(&conn)?;
+    run_migrations(&conn)?;
 
     if vec_dimensions > 0 {
         ensure_vec_table(&conn, vec_dimensions)?;
@@ -83,6 +84,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             path         TEXT UNIQUE NOT NULL,
             content      TEXT NOT NULL,
             content_hash TEXT NOT NULL,
+            extracted    INTEGER NOT NULL DEFAULT 0,
             updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -127,6 +129,39 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Version-based schema migrations. Safe to call on every open — each migration
+/// is guarded by the stored `schema_version` and is idempotent.
+fn run_migrations(conn: &Connection) -> Result<()> {
+    // Get current schema version (0 if never set)
+    let version: i64 = conn
+        .query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'), 0)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    if version < 1 {
+        // v0 → v1: track entity extraction completion per-document
+        let has_extracted: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name='extracted'")
+            .and_then(|mut s| s.query_row([], |r| r.get::<_, i64>(0)))
+            .map(|count| count > 0)
+            .unwrap_or(false);
+        if !has_extracted {
+            conn.execute_batch("ALTER TABLE documents ADD COLUMN extracted INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        // Mark all existing docs as extracted — they were synced in v0.1.0
+        conn.execute_batch("UPDATE documents SET extracted = 1;")?;
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1')", [])?;
+    }
+
+    // Future migrations go here:
+    // if version < 2 { ... }
+
+    Ok(())
+}
+
 /// Query the current content hashes for all documents in the DB.
 /// Returns a map of path → content_hash.
 pub fn get_all_hashes(conn: &Connection) -> Result<std::collections::HashMap<String, String>> {
@@ -144,18 +179,41 @@ pub fn get_all_hashes(conn: &Connection) -> Result<std::collections::HashMap<Str
 }
 
 /// Upsert a document into the documents table (triggers keep FTS in sync).
+/// Always resets `extracted = 0` on update so that re-synced docs are re-extracted.
 pub fn upsert_document(conn: &Connection, path: &str, content: &str, hash: &str) -> Result<()> {
     conn.execute(
-        r#"INSERT INTO documents (path, content, content_hash, updated_at)
-           VALUES (?1, ?2, ?3, datetime('now'))
+        r#"INSERT INTO documents (path, content, content_hash, extracted, updated_at)
+           VALUES (?1, ?2, ?3, 0, datetime('now'))
            ON CONFLICT(path) DO UPDATE SET
                content      = excluded.content,
                content_hash = excluded.content_hash,
+               extracted    = 0,
                updated_at   = excluded.updated_at"#,
         rusqlite::params![path, content, hash],
     )
     .with_context(|| format!("Failed to upsert document: {}", path))?;
     Ok(())
+}
+
+/// Mark a document as successfully extracted.
+pub fn mark_extracted(conn: &Connection, path: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE documents SET extracted = 1 WHERE path = ?1",
+        rusqlite::params![path],
+    )
+    .with_context(|| format!("Failed to mark extracted: {}", path))?;
+    Ok(())
+}
+
+/// Return paths of all documents where `extracted = 0` (synced but not yet extracted).
+pub fn get_unextracted_paths(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM documents WHERE extracted = 0")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut paths = Vec::new();
+    for row in rows {
+        paths.push(row?);
+    }
+    Ok(paths)
 }
 
 /// Delete a document by path (triggers keep FTS in sync).
@@ -198,6 +256,17 @@ pub fn upsert_document_vec(conn: &Connection, doc_id: i64, embedding_bytes: &[u8
     )
     .context("Failed to upsert document vector")?;
     Ok(())
+}
+
+/// Return all document paths in the database.
+pub fn get_all_paths(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM documents")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    let mut paths = Vec::new();
+    for row in rows {
+        paths.push(row?);
+    }
+    Ok(paths)
 }
 
 /// Look up the document id for a given path.
@@ -266,6 +335,7 @@ mod tests {
                 path         TEXT UNIQUE NOT NULL,
                 content      TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                extracted    INTEGER NOT NULL DEFAULT 0,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -418,6 +488,84 @@ mod tests {
         let conn = make_conn();
         let id = get_document_id(&conn, "not/here.md").unwrap();
         assert!(id.is_none());
+    }
+
+    // ─── Migration tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_fresh_db_has_schema_version_1_and_extracted_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_db("test", dir.path()).unwrap();
+
+        // schema_version should be 1
+        let version = get_meta(&conn, "schema_version").unwrap();
+        assert_eq!(version.as_deref(), Some("1"));
+
+        // extracted column should exist and default to 0
+        upsert_document(&conn, "a.md", "content", "h1").unwrap();
+        let unextracted = get_unextracted_paths(&conn).unwrap();
+        assert_eq!(unextracted.len(), 1);
+    }
+
+    #[test]
+    fn test_existing_v0_db_migrated_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a v0 DB: full schema WITHOUT the extracted column and no schema_version
+        {
+            let db_path = dir.path().join("legacy.db");
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(r#"
+                CREATE TABLE documents (
+                    id           INTEGER PRIMARY KEY,
+                    path         TEXT UNIQUE NOT NULL,
+                    content      TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE VIRTUAL TABLE documents_fts USING fts5(
+                    path, content, content='documents', content_rowid='id'
+                );
+                CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
+                    INSERT INTO documents_fts(rowid, path, content)
+                    VALUES (new.id, new.path, new.content);
+                END;
+                CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                    VALUES ('delete', old.id, old.path, old.content);
+                END;
+                CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                    VALUES ('delete', old.id, old.path, old.content);
+                    INSERT INTO documents_fts(rowid, path, content)
+                    VALUES (new.id, new.path, new.content);
+                END;
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE vocabulary (word TEXT PRIMARY KEY, frequency INTEGER DEFAULT 1);
+                INSERT INTO documents (path, content, content_hash)
+                    VALUES ('old.md', 'old content', 'oldhash');
+            "#).unwrap();
+        }
+        // Re-open via open_db — migration should fire
+        let conn = open_db("legacy", dir.path()).unwrap();
+
+        // schema_version bumped to 1
+        let version = get_meta(&conn, "schema_version").unwrap();
+        assert_eq!(version.as_deref(), Some("1"));
+
+        // existing rows get extracted=1 (migration marks all pre-existing docs as extracted)
+        let unextracted = get_unextracted_paths(&conn).unwrap();
+        assert_eq!(unextracted.len(), 0);
+    }
+
+    #[test]
+    fn test_already_migrated_db_reopens_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // First open migrates and sets schema_version = 1
+        open_db("test", dir.path()).unwrap();
+        // Second open should not error (migration is a no-op at v1)
+        let conn = open_db("test", dir.path()).unwrap();
+        let version = get_meta(&conn, "schema_version").unwrap();
+        assert_eq!(version.as_deref(), Some("1"));
     }
 
     #[test]

@@ -1,0 +1,41 @@
+[workspace]
+# Tag format: v0.1.0, v1.0.0, etc.
+git_tag_name = "v{{ version }}"
+
+# Auto-update changelog on release
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+
+# Don't publish to crates.io yet — we'll enable this for v1.0
+publish = false
+
+[[package]]
+name = "brainjar"
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to brainjar are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/).
+
+"""
+
+# Version bump rules (conventional commits):
+#   fix: / perf:  → patch  (0.1.0 → 0.1.1)
+#   feat:         → minor  (0.1.0 → 0.2.0)
+#   feat!: / fix!: / BREAKING CHANGE:  → major  (0.2.0 → 1.0.0)
+
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Testing" },
+  { message = "^chore", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^style", skip = true },
+]
+
+protect_breaking_commits = true

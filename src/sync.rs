@@ -66,22 +66,50 @@ async fn sync_kb_human(
 ) -> Result<()> {
     println!("\n{} {}", "⟳ Syncing".cyan().bold(), kb_name.bold());
 
+    let db_dir = config.effective_db_dir();
     let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
-    let conn = db::open_db_with_dims(kb_name, &config.config_dir, vec_dims)?;
+    let conn = db::open_db_with_dims(kb_name, &db_dir, vec_dims)?;
     let watch_paths = config.expand_watch_paths(kb);
     let local_files = collect_files(config, &watch_paths);
     let changes = compute_changes(&conn, &local_files, force)?;
 
-    if changes.to_upsert.is_empty() && changes.to_delete.is_empty() {
+    let total_upsert = changes.to_upsert.len();
+    let total_delete = changes.to_delete.len();
+
+    // Docs that were synced before but whose extraction was interrupted.
+    // We need their absolute paths too — build from local_files map.
+    let unextracted_paths = if !force {
+        db::get_unextracted_paths(&conn)?
+    } else {
+        Vec::new() // force re-extracts everything via to_upsert
+    };
+    let unextracted: HashMap<String, std::path::PathBuf> = unextracted_paths
+        .into_iter()
+        .filter(|p| !changes.to_upsert.contains_key(p)) // avoid double-counting
+        .filter_map(|p| {
+            local_files.get(&p).cloned().map(|abs| (p, abs))
+        })
+        .collect();
+
+    if total_upsert == 0 && total_delete == 0 && unextracted.is_empty() {
         println!("  {} Nothing to sync", "✓".green());
         return Ok(());
     }
 
-    println!(
-        "  {} files to update, {} to delete",
-        changes.to_upsert.len().to_string().cyan(),
-        changes.to_delete.len().to_string().yellow()
-    );
+    if !unextracted.is_empty() && total_upsert == 0 && total_delete == 0 {
+        println!(
+            "  {} {} document(s) pending extraction (interrupted previously)",
+            "⚠".yellow(),
+            unextracted.len().to_string().yellow()
+        );
+    } else {
+
+        println!(
+            "  {} files to update, {} to delete",
+            total_upsert.to_string().cyan(),
+            total_delete.to_string().yellow()
+        );
+    }
 
     if dry_run {
         println!("  {} (dry run, no changes made)", "DRY RUN".yellow().bold());
@@ -94,26 +122,43 @@ async fn sync_kb_human(
         return Ok(());
     }
 
+    let sync_start = std::time::Instant::now();
+    let mut new_count = 0usize;
+    let mut updated_count = 0usize;
+
+    // Pre-compute which paths are new vs updated
+    let db_hashes_before = db::get_all_hashes(&conn)?;
+
     // Upsert files
     if !changes.to_upsert.is_empty() {
-        let pb = ProgressBar::new(changes.to_upsert.len() as u64);
+        let pb = ProgressBar::new(total_upsert as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("  [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                .template("  Syncing: {pos}/{len} docs [{bar:38.cyan/blue}] {percent}%\n  {msg}")
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("\u{2588}\u{2588}\u{2591}"),
         );
 
         for (rel_path, abs_path) in &changes.to_upsert {
-            pb.set_message(rel_path.clone());
+            // Truncate long filenames for display
+            let display_name = if rel_path.len() > 60 {
+                format!("...{}", &rel_path[rel_path.len() - 57..])
+            } else {
+                rel_path.clone()
+            };
+            pb.set_message(display_name);
             let content = std::fs::read_to_string(abs_path)
                 .with_context(|| format!("Failed to read file: {}", abs_path.display()))?;
             let hash = hash_content(content.as_bytes());
+            if db_hashes_before.contains_key(rel_path) {
+                updated_count += 1;
+            } else {
+                new_count += 1;
+            }
             db::upsert_document(&conn, rel_path, &content, &hash)?;
             pb.inc(1);
         }
         pb.finish_and_clear();
-        println!("  {} Synced {} files", "✓".green(), changes.to_upsert.len());
     }
 
     // Delete removed files
@@ -122,7 +167,7 @@ async fn sync_kb_human(
     }
 
     if !changes.to_delete.is_empty() {
-        println!("  {} Removed {} files from index", "✓".green(), changes.to_delete.len());
+        println!("  {} Removed {} files from index", "✓".green(), total_delete);
     }
 
     // Record last sync time
@@ -139,22 +184,43 @@ async fn sync_kb_human(
     }
 
     // ── Optional: entity extraction via configured LLM ──────────────────────
+    // Extract: newly upserted docs + previously-interrupted docs
+    let docs_to_extract: HashMap<&String, &std::path::PathBuf> = changes
+        .to_upsert
+        .iter()
+        .chain(unextracted.iter())
+        .collect();
+
     if let Some(extraction_cfg) = &config.extraction
-        && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+        && extraction_cfg.enabled && !docs_to_extract.is_empty() {
             let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
             let extractor = Extractor::new(extraction_cfg, api_key, base_url);
-            // Open graph DB (or create it)
-            match KnowledgeGraph::open(&config.config_dir, kb_name) {
+            match KnowledgeGraph::open(&db_dir, kb_name) {
                 Ok(kg) => {
+                    let extract_total = docs_to_extract.len() as u64;
+                    let epb = ProgressBar::new(extract_total);
+                    epb.set_style(
+                        ProgressStyle::default_bar()
+                            .template("  Entities: {pos}/{len} docs [{bar:38.green/white}] {percent}%\n  {msg}")
+                            .unwrap()
+                            .progress_chars("\u{2588}\u{2588}\u{2591}"),
+                    );
+
                     let mut total_entities = 0usize;
                     let mut total_rels = 0usize;
                     let mut extraction_errors = 0usize;
 
-                    for (rel_path, abs_path) in &changes.to_upsert {
+                    for (rel_path, abs_path) in &docs_to_extract {
+                        let display_name = if rel_path.len() > 60 {
+                            format!("...{}", &rel_path[rel_path.len() - 57..])
+                        } else {
+                            rel_path.to_string()
+                        };
+                        epb.set_message(display_name);
                         let content = match std::fs::read_to_string(abs_path) {
                             Ok(c) => c,
-                            Err(_) => continue,
+                            Err(_) => { epb.inc(1); continue; }
                         };
 
                         // Remove stale graph data for this document
@@ -167,13 +233,19 @@ async fn sync_kb_human(
                             Ok(result) => {
                                 total_entities += result.entities.len();
                                 total_rels += result.relationships.len();
-                                if let Err(e) = kg.ingest_entities(
+                                let ingest_ok = kg.ingest_entities(
                                     rel_path,
                                     &result.entities,
                                     &result.relationships,
-                                ) {
+                                );
+                                if let Err(e) = ingest_ok {
                                     eprintln!("  ⚠ Graph ingest failed for {}: {}", rel_path, e);
                                     extraction_errors += 1;
+                                } else {
+                                    // Mark as extracted only on full success
+                                    if let Err(e) = db::mark_extracted(&conn, rel_path) {
+                                        eprintln!("  ⚠ mark_extracted failed for {}: {}", rel_path, e);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -181,7 +253,9 @@ async fn sync_kb_human(
                                 extraction_errors += 1;
                             }
                         }
+                        epb.inc(1);
                     }
+                    epb.finish_and_clear();
 
                     if extraction_errors == 0 {
                         println!(
@@ -193,7 +267,7 @@ async fn sync_kb_human(
                     } else {
                         println!(
                             "  {} Extracted entities ({} entities, {} relationships, {} errors)",
-                            "⚠".yellow(),
+                            "\u{26a0}".yellow(),
                             total_entities,
                             total_rels,
                             extraction_errors
@@ -227,8 +301,13 @@ async fn sync_kb_human(
 
             // Batch 20 documents at a time
             for chunk in paths_and_contents.chunks(20) {
-                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
-                match embedder.embed_batch(&texts).await {
+                let docs: Vec<(&str, Option<&str>)> = chunk.iter().map(|(rel_path, c)| {
+                    let title = std::path::Path::new(rel_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str());
+                    (c.as_str(), title)
+                }).collect();
+                match embedder.embed_documents(&docs).await {
                     Ok(embeddings) => {
                         for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
                             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
@@ -258,14 +337,52 @@ async fn sync_kb_human(
             } else {
                 println!(
                     "  {} Generated embeddings ({} documents, {} errors)",
-                    "⚠".yellow(),
+                    "\u{26a0}".yellow(),
                     embedded_count,
                     embed_errors
                 );
             }
         }
 
-    println!("  {} Done", "✓".green().bold());
+    // ── Final summary ────────────────────────────────────────────────────────
+    let elapsed = sync_start.elapsed();
+    let elapsed_str = if elapsed.as_secs() >= 60 {
+        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    };
+    let extracted_resumed = unextracted.len();
+    if total_upsert > 0 || extracted_resumed > 0 {
+        let mut parts = Vec::new();
+        if new_count > 0 {
+            parts.push(format!("{} new", new_count.to_string().green()));
+        }
+        if updated_count > 0 {
+            parts.push(format!("{} updated", updated_count.to_string().yellow()));
+        }
+        if extracted_resumed > 0 && total_upsert == 0 {
+            parts.push(format!("{} extracted", extracted_resumed.to_string().cyan()));
+        }
+        let summary = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        };
+        let total = if total_upsert > 0 { total_upsert } else { extracted_resumed };
+        println!(
+            "\n  {} Synced {} docs{} in {}",
+            "✓".green().bold(),
+            total.to_string().cyan(),
+            summary,
+            elapsed_str.bold()
+        );
+    } else {
+        println!(
+            "\n  {} Done in {}",
+            "✓".green().bold(),
+            elapsed_str.bold()
+        );
+    }
 
     Ok(())
 }
@@ -277,8 +394,9 @@ async fn sync_kb_json(
     force: bool,
     dry_run: bool,
 ) -> Result<()> {
+    let db_dir = config.effective_db_dir();
     let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
-    let conn = db::open_db_with_dims(kb_name, &config.config_dir, vec_dims)?;
+    let conn = db::open_db_with_dims(kb_name, &db_dir, vec_dims)?;
     let watch_paths = config.expand_watch_paths(kb);
     let local_files = collect_files(config, &watch_paths);
     let changes = compute_changes(&conn, &local_files, force)?;
@@ -307,16 +425,33 @@ async fn sync_kb_json(
         let vocab_count = fuzzy::build_vocabulary(&conn).unwrap_or(0);
         result["vocabulary_words"] = serde_json::Value::Number(vocab_count.into());
 
+        // Docs needing extraction: newly upserted + previously interrupted
+        let unextracted_paths = if !force {
+            db::get_unextracted_paths(&conn)?
+        } else {
+            Vec::new()
+        };
+        let unextracted_json: HashMap<String, std::path::PathBuf> = unextracted_paths
+            .into_iter()
+            .filter(|p| !changes.to_upsert.contains_key(p))
+            .filter_map(|p| local_files.get(&p).cloned().map(|abs| (p, abs)))
+            .collect();
+        let docs_to_extract_json: HashMap<&String, &std::path::PathBuf> = changes
+            .to_upsert
+            .iter()
+            .chain(unextracted_json.iter())
+            .collect();
+
         // Optional entity extraction
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
         if let Some(extraction_cfg) = &config.extraction
-            && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+            && extraction_cfg.enabled && !docs_to_extract_json.is_empty() {
                 let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
                 let extractor = Extractor::new(extraction_cfg, api_key, base_url);
-                if let Ok(kg) = KnowledgeGraph::open(&config.config_dir, kb_name) {
-                    for (rel_path, abs_path) in &changes.to_upsert {
+                if let Ok(kg) = KnowledgeGraph::open(&db_dir, kb_name) {
+                    for (rel_path, abs_path) in &docs_to_extract_json {
                         let content = match std::fs::read_to_string(abs_path) {
                             Ok(c) => c,
                             Err(_) => continue,
@@ -325,7 +460,9 @@ async fn sync_kb_json(
                         if let Ok(res) = extractor.extract(&content, rel_path).await {
                             entities_extracted += res.entities.len();
                             rels_extracted += res.relationships.len();
-                            let _ = kg.ingest_entities(rel_path, &res.entities, &res.relationships);
+                            if kg.ingest_entities(rel_path, &res.entities, &res.relationships).is_ok() {
+                                let _ = db::mark_extracted(&conn, rel_path);
+                            }
                         }
                     }
                 }
@@ -349,8 +486,13 @@ async fn sync_kb_json(
                     .collect();
 
                 for chunk in paths_and_contents.chunks(20) {
-                    let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
-                    if let Ok(embeddings) = embedder.embed_batch(&texts).await {
+                    let docs: Vec<(&str, Option<&str>)> = chunk.iter().map(|(rel_path, c)| {
+                        let title = std::path::Path::new(rel_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str());
+                        (c.as_str(), title)
+                    }).collect();
+                    if let Ok(embeddings) = embedder.embed_documents(&docs).await {
                         for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
                             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                                 use zerocopy::IntoBytes;
@@ -542,6 +684,7 @@ mod tests {
             KnowledgeBaseConfig {
                 watch_paths: vec![watch_path.to_string_lossy().to_string()],
                 auto_sync: true,
+                description: None,
             },
         );
         Config {
@@ -549,6 +692,7 @@ mod tests {
             knowledge_bases: kbs,
             embeddings: None,
             extraction: None,
+            data_dir: Some(config_dir.to_string_lossy().to_string()),
             config_dir: config_dir.to_path_buf(),
         }
     }

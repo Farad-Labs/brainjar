@@ -19,6 +19,9 @@ pub struct Config {
     pub knowledge_bases: HashMap<String, KnowledgeBaseConfig>,
     pub embeddings: Option<EmbeddingConfig>,
     pub extraction: Option<ExtractionConfig>,
+    /// Where brainjar stores its databases.
+    /// Defaults to `~/.brainjar` when not set.
+    pub data_dir: Option<String>,
     /// Path to the config file (not serialized)
     #[serde(skip)]
     pub config_dir: PathBuf,
@@ -29,6 +32,8 @@ pub struct KnowledgeBaseConfig {
     pub watch_paths: Vec<String>,
     #[serde(default)]
     pub auto_sync: bool,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,16 +93,16 @@ fn find_config() -> Result<PathBuf> {
         }
     }
 
-    // Check global config
-    if let Some(config_dir) = dirs::config_dir() {
-        let global = config_dir.join("brainjar").join("config.toml");
-        if global.exists() {
-            return Ok(global);
+    // Check ~/.brainjar/brainjar.toml
+    if let Some(home) = dirs::home_dir() {
+        let home_config = home.join(".brainjar").join("brainjar.toml");
+        if home_config.exists() {
+            return Ok(home_config);
         }
     }
 
     anyhow::bail!(
-        "No brainjar.toml found in current directory or ancestors, and no global config at ~/.config/brainjar/config.toml.\n\nRun `brainjar init` to create a new config."
+        "No brainjar.toml found. Checked: current directory (and ancestors), ~/.brainjar/.\n\nRun `brainjar init` to create a new config."
     )
 }
 
@@ -132,6 +137,16 @@ impl Config {
             .collect()
     }
 
+    /// Return the directory where KB databases are stored.
+    /// Uses `data_dir` from config (with `~` expansion), defaulting to `~/.brainjar`.
+    pub fn effective_db_dir(&self) -> PathBuf {
+        let raw = self
+            .data_dir
+            .as_deref()
+            .unwrap_or("~/.brainjar");
+        expand_tilde(raw)
+    }
+
     pub fn expand_path(&self, p: &str) -> PathBuf {
         if p.starts_with('~')
             && let Some(home) = dirs::home_dir() {
@@ -143,6 +158,18 @@ impl Config {
             self.config_dir.join(p)
         }
     }
+}
+
+/// Expand a leading `~` to the user's home directory.
+pub fn expand_tilde(p: &str) -> PathBuf {
+    if p.starts_with('~')
+        && let Some(home) = dirs::home_dir()
+    {
+        // Handle `~/...` and bare `~`
+        let rest = p.trim_start_matches('~').trim_start_matches('/');
+        return if rest.is_empty() { home } else { home.join(rest) };
+    }
+    PathBuf::from(p)
 }
 
 /// Expand `${VAR_NAME}` env-var references in an API key value.

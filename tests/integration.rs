@@ -20,6 +20,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         KnowledgeBaseConfig {
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
             auto_sync: true,
+            description: None,
         },
     );
     Config {
@@ -27,6 +28,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         knowledge_bases: kbs,
         embeddings: None,
         extraction: None,
+        data_dir: Some(config_dir.join(".brainjar").to_string_lossy().to_string()),
         config_dir: config_dir.to_path_buf(),
     }
 }
@@ -214,8 +216,8 @@ fn test_open_db_creates_separate_files_per_kb() {
     let dir = tempfile::tempdir().unwrap();
     let _conn_a = db::open_db("kb_a", dir.path()).unwrap();
     let _conn_b = db::open_db("kb_b", dir.path()).unwrap();
-    assert!(dir.path().join(".brainjar").join("kb_a.db").exists());
-    assert!(dir.path().join(".brainjar").join("kb_b.db").exists());
+    assert!(dir.path().join("kb_a.db").exists());
+    assert!(dir.path().join("kb_b.db").exists());
 }
 
 // ─── 3. Full sync cycle ───────────────────────────────────────────────────────
@@ -233,7 +235,7 @@ async fn test_full_sync_documents_indexed() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     assert_eq!(db::count_documents(&conn).unwrap(), 2);
 }
 
@@ -253,7 +255,7 @@ async fn test_full_sync_content_is_searchable() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     let results = search::search_fts(&conn, "systems", 10).unwrap();
     assert!(!results.is_empty(), "FTS should return results after sync");
     assert!(results.iter().any(|r| r.path.contains("rust")));
@@ -272,7 +274,7 @@ async fn test_full_sync_non_text_files_excluded() {
         .await
         .unwrap();
 
-    let conn = db::open_db("test", dir.path()).unwrap();
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
     // Only doc.md should be indexed; image.png ignored
     assert_eq!(db::count_documents(&conn).unwrap(), 1);
 }
@@ -359,7 +361,7 @@ async fn test_incremental_sync_changed_file_is_re_indexed() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn1 = db::open_db("test", dir.path()).unwrap();
+    let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let hashes_before = db::get_all_hashes(&conn1).unwrap();
 
     // Modify only a.md
@@ -369,7 +371,7 @@ async fn test_incremental_sync_changed_file_is_re_indexed() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn2 = db::open_db("test", dir.path()).unwrap();
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let hashes_after = db::get_all_hashes(&conn2).unwrap();
 
     assert_eq!(hashes_after.len(), 2, "should still have 2 documents");
@@ -400,7 +402,7 @@ async fn test_incremental_sync_new_file_is_added() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn1 = db::open_db("test", dir.path()).unwrap();
+    let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
     assert_eq!(db::count_documents(&conn1).unwrap(), 1);
 
     // Add a new file
@@ -410,7 +412,7 @@ async fn test_incremental_sync_new_file_is_added() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn2 = db::open_db("test", dir.path()).unwrap();
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
     assert_eq!(db::count_documents(&conn2).unwrap(), 2);
 }
 
@@ -426,13 +428,13 @@ async fn test_incremental_sync_unchanged_file_hash_stable() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn1 = db::open_db("test", dir.path()).unwrap();
+    let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let h1 = db::get_all_hashes(&conn1).unwrap();
 
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn2 = db::open_db("test", dir.path()).unwrap();
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let h2 = db::get_all_hashes(&conn2).unwrap();
 
     assert_eq!(h1, h2, "unchanged files should have stable hashes across syncs");
@@ -454,7 +456,7 @@ async fn test_delete_detection_removes_from_db() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn1 = db::open_db("test", dir.path()).unwrap();
+    let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
     assert_eq!(db::count_documents(&conn1).unwrap(), 2);
 
     // Delete one file
@@ -464,7 +466,7 @@ async fn test_delete_detection_removes_from_db() {
     sync::run_sync(&config, Some("test"), false, false, false, true)
         .await
         .unwrap();
-    let conn2 = db::open_db("test", dir.path()).unwrap();
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
     assert_eq!(db::count_documents(&conn2).unwrap(), 1);
 
     let hashes = db::get_all_hashes(&conn2).unwrap();
@@ -490,7 +492,7 @@ async fn test_delete_detection_removes_from_fts() {
         .unwrap();
 
     // Verify the term is searchable
-    let conn1 = db::open_db("test", dir.path()).unwrap();
+    let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let before = search::search_fts(&conn1, "unique_xyzzy_term_for_testing", 5).unwrap();
     assert!(!before.is_empty(), "should find the unique term before deletion");
 
@@ -499,7 +501,7 @@ async fn test_delete_detection_removes_from_fts() {
         .await
         .unwrap();
 
-    let conn2 = db::open_db("test", dir.path()).unwrap();
+    let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let after = search::search_fts(&conn2, "unique_xyzzy_term_for_testing", 5).unwrap();
     assert!(after.is_empty(), "deleted document should not be in FTS");
 }
