@@ -101,16 +101,8 @@ fn find_config() -> Result<PathBuf> {
         }
     }
 
-    // Check global config (legacy)
-    if let Some(config_dir) = dirs::config_dir() {
-        let global = config_dir.join("brainjar").join("config.toml");
-        if global.exists() {
-            return Ok(global);
-        }
-    }
-
     anyhow::bail!(
-        "No brainjar.toml found. Checked: current directory (and ancestors), ~/.brainjar/, ~/.config/brainjar/.\n\nRun `brainjar init` to create a new config."
+        "No brainjar.toml found. Checked: current directory (and ancestors), ~/.brainjar/.\n\nRun `brainjar init` to create a new config."
     )
 }
 

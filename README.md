@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="300" />
+  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="525" />
 </p>
 
 <p align="center">
