@@ -72,8 +72,16 @@ impl Embedder {
                 .await
                 .context("Gemini embedContent request failed")?;
 
+            let status = resp.status();
             let json: serde_json::Value =
                 resp.json().await.context("Failed to parse Gemini embed response")?;
+
+            if !status.is_success() {
+                let err_msg = json["error"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown error");
+                anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
+            }
 
             let values = json["embedding"]["values"]
                 .as_array()
