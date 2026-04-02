@@ -11,5 +11,6 @@ pub mod mcp;
 pub mod search;
 pub mod status;
 pub mod sync;
+pub mod watch;
 
 pub use config::Config;

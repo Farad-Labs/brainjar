@@ -182,6 +182,29 @@ watch_paths = [
 auto_sync = true    # included in `brainjar sync` without --kb flag
 ```
 
+## Watch Mode
+
+Monitor knowledge bases for changes and auto-sync:
+
+```bash
+brainjar watch                    # poll every 5 minutes (default)
+brainjar watch --interval 60      # poll every 60 seconds
+brainjar watch --kb my-notes      # watch specific KB only
+brainjar watch --daemon           # run in background
+brainjar watch --stop             # stop background watcher
+```
+
+Configure default interval in `brainjar.toml`:
+
+```toml
+[watch]
+interval = 300    # seconds
+```
+
+> ⚠️ **Active development warning:** Each sync cycle with changes triggers embedding API calls. For codebases under active development, consider a longer interval or watching specific KBs to manage costs.
+
+Lock files prevent concurrent syncs. If `brainjar sync` is run manually while the watcher is active, one will wait for the other to finish.
+
 ## MCP Server
 
 Run brainjar as an MCP server for use with Claude Code, Cursor, or any MCP client:

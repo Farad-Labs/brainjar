@@ -19,6 +19,7 @@ name = "brainjar"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 rusqlite = { version = "0.39", features = ["bundled"] }
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
