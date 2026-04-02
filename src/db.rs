@@ -151,6 +151,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         if !has_extracted {
             conn.execute_batch("ALTER TABLE documents ADD COLUMN extracted INTEGER NOT NULL DEFAULT 0;")?;
         }
+        // Mark all existing docs as extracted — they were synced in v0.1.0
+        conn.execute_batch("UPDATE documents SET extracted = 1;")?;
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1')", [])?;
     }
 
@@ -497,7 +499,7 @@ mod tests {
     #[test]
     fn test_existing_v0_db_migrated_on_open() {
         let dir = tempfile::tempdir().unwrap();
-        // Create a v0 DB: schema without extracted column, no schema_version in meta
+        // Create a v0 DB: full schema WITHOUT the extracted column and no schema_version
         {
             let db_path = dir.path().join("legacy.db");
             let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -509,7 +511,25 @@ mod tests {
                     content_hash TEXT NOT NULL,
                     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
                 );
+                CREATE VIRTUAL TABLE documents_fts USING fts5(
+                    path, content, content='documents', content_rowid='id'
+                );
+                CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
+                    INSERT INTO documents_fts(rowid, path, content)
+                    VALUES (new.id, new.path, new.content);
+                END;
+                CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                    VALUES ('delete', old.id, old.path, old.content);
+                END;
+                CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                    VALUES ('delete', old.id, old.path, old.content);
+                    INSERT INTO documents_fts(rowid, path, content)
+                    VALUES (new.id, new.path, new.content);
+                END;
                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE vocabulary (word TEXT PRIMARY KEY, frequency INTEGER DEFAULT 1);
                 INSERT INTO documents (path, content, content_hash)
                     VALUES ('old.md', 'old content', 'oldhash');
             "#).unwrap();
@@ -521,10 +541,9 @@ mod tests {
         let version = get_meta(&conn, "schema_version").unwrap();
         assert_eq!(version.as_deref(), Some("1"));
 
-        // existing row gets extracted=0 (the column default)
+        // existing rows get extracted=1 (migration marks all pre-existing docs as extracted)
         let unextracted = get_unextracted_paths(&conn).unwrap();
-        assert_eq!(unextracted.len(), 1);
-        assert!(unextracted.contains(&"old.md".to_string()));
+        assert_eq!(unextracted.len(), 0);
     }
 
     #[test]

@@ -401,7 +401,7 @@ async fn test_force_resets_extracted_flag() {
 #[test]
 fn test_migration_adds_extracted_column() {
     let dir = tempfile::tempdir().unwrap();
-    // Create a v0 DB without the extracted column and without schema_version
+    // Create a v0 DB: full schema WITHOUT extracted column and no schema_version
     {
         let db_path = dir.path().join("legacy.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -413,7 +413,25 @@ fn test_migration_adds_extracted_column() {
                 content_hash TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+            CREATE VIRTUAL TABLE documents_fts USING fts5(
+                path, content, content='documents', content_rowid='id'
+            );
+            CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
+                INSERT INTO documents_fts(rowid, path, content)
+                VALUES (new.id, new.path, new.content);
+            END;
+            CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
+                INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                VALUES ('delete', old.id, old.path, old.content);
+            END;
+            CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
+                INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                VALUES ('delete', old.id, old.path, old.content);
+                INSERT INTO documents_fts(rowid, path, content)
+                VALUES (new.id, new.path, new.content);
+            END;
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE vocabulary (word TEXT PRIMARY KEY, frequency INTEGER DEFAULT 1);
             INSERT INTO documents (path, content, content_hash) VALUES ('old.md', 'old content', 'oldhash');
         "#).unwrap();
     }
@@ -422,10 +440,9 @@ fn test_migration_adds_extracted_column() {
     // schema_version bumped
     let version = db::get_meta(&conn, "schema_version").unwrap();
     assert_eq!(version.as_deref(), Some("1"));
-    // Existing row defaults to extracted=0
+    // Existing rows marked as extracted (migration assumes pre-existing docs were fully synced)
     let unextracted = db::get_unextracted_paths(&conn).unwrap();
-    assert_eq!(unextracted.len(), 1);
-    assert!(unextracted.contains(&"old.md".to_string()));
+    assert_eq!(unextracted.len(), 0);
 }
 
 #[test]
