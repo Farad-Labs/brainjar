@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mascot.png" alt="Brainjar Mascot" width="525" />
+  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="525" />
 </p>
 
 <p align="center">
@@ -132,8 +132,8 @@ Graph search traverses entity relationships to find documents connected to your 
 
 brainjar looks for config at:
 1. `--config path/to/brainjar.toml` (explicit)
-2. `./brainjar.toml` (current directory)
-3. `~/.config/brainjar/config.toml` (global)
+2. `./brainjar.toml` (current directory and parent directories)
+3. `~/.brainjar/brainjar.toml` (default home)
 
 ```toml
 # brainjar.toml

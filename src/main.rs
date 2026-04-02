@@ -15,7 +15,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Path to config file (default: brainjar.toml or ~/.config/brainjar/config.toml)
+    /// Path to config file (default: ./brainjar.toml or ~/.brainjar/brainjar.toml)
     #[arg(long, global = true)]
     config: Option<String>,
 }
