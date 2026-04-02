@@ -8,7 +8,8 @@
 
 | Use Case | Recommended Model | Why |
 |---|---|---|
-| **Best quality (cloud)** | `gemini-embedding-001` | MTEB 68.3, highest English benchmark, generous free tier |
+| **Best quality (cloud)** | `gemini-embedding-2-preview` | MTEB 84.0, massive improvement over v1, text prefix format, $0.20/MTok |
+| **Previous best (cloud)** | `gemini-embedding-001` | MTEB 68.3, $0.15/MTok, still good but v2 is significantly better |
 | **Best value (cloud)** | `text-embedding-3-small` | MTEB 62.3, $0.02/MTok, great for general retrieval |
 | **Best local/offline** | `mxbai-embed-large` | MTEB 64.7 (beats OpenAI large!), 1024 dims, 670MB |
 | **Lightweight local** | `nomic-embed-text` | 768 dims, 274MB, very fast, good quality for size |
@@ -23,7 +24,8 @@
 
 | Provider | Method | Query Syntax | Document Syntax |
 |---|---|---|---|
-| **Google Gemini** | API parameter | `task_type="RETRIEVAL_QUERY"` | `task_type="RETRIEVAL_DOCUMENT"` |
+| **Google Gemini v1** | API parameter | `task_type="RETRIEVAL_QUERY"` | `task_type="RETRIEVAL_DOCUMENT"` |
+| **Google Gemini v2** | Text prefix | `"task: search result \| query: {text}"` | `"title: {title} \| text: {content}"` |
 | **Cohere** | API parameter | `input_type="search_query"` | `input_type="search_document"` |
 | **Voyage AI** | API parameter | `input_type="query"` | `input_type="document"` |
 | **Nomic (via Ollama)** | Text prefix | `"search_query: {text}"` | `"search_document: {text}"` |
@@ -114,15 +116,25 @@ Some models support task types beyond retrieval:
 
 ## 1. Google Gemini
 
-> **⚠️ API Name Change:** `text-embedding-004` is **GONE** (404 on both v1 and v1beta as of March 2026). Use `gemini-embedding-001` instead.
+> **⚠️ API Name Change:** `text-embedding-004` is **GONE** (404 on both v1 and v1beta as of March 2026). Use `gemini-embedding-001` or `gemini-embedding-2-preview` instead.
 
 | Model | Dims | Price (per 1M tokens) | Max Tokens | MTEB | Status |
 |---|---|---|---|---|---|
-| `gemini-embedding-001` | 3,072 | Free tier (1,500 RPD) / ~$0.004/1K via Vertex | 8,192 | **68.3** | ✅ Active — use this |
-| `gemini-embedding-2-preview` | 3,072 | $0.20/MTok | 8,192 | N/A | ✅ Active — multimodal (text + images + video) |
+| `gemini-embedding-2-preview` | 3,072 | **$0.20/MTok** | 8,192 | **84.0** | ✅ **Recommended** — text prefix format, multimodal |
+| `gemini-embedding-001` | 3,072 | Free tier (1,500 RPD) / ~$0.15/MTok via Vertex | 8,192 | 68.3 | ✅ Active — taskType parameter |
 | ~~`text-embedding-004`~~ | ~~768~~ | — | — | — | ❌ **Deprecated / 404** |
 
-> **Note:** `gemini-embedding-2-preview` is multimodal and likely does not support task_type. Use `gemini-embedding-001` for pure text RAG with task types.
+### gemini-embedding-2-preview Details
+
+- **MTEB score:** 84.0 (vs 68.3 for v1 — a massive leap)
+- **Price:** $0.20/M tokens (vs ~$0.15 for v1)
+- **Dimensions:** 3,072 (same as v1)
+- **Task type mechanism:** Text prefix format — does **NOT** use the `taskType` API parameter
+  - Documents: `title: {title} | text: {content}`
+  - Queries: `task: search result | query: {content}`
+  - Code queries: `task: code retrieval | query: {content}`
+- **Multimodal:** Supports images, video, audio, and PDF natively — but Brainjar only uses the text path
+- **When to use:** Default cloud recommendation. Use v1 only if you need the free tier.
 
 ---
 
@@ -220,8 +232,8 @@ These require serious GPU infrastructure but beat every commercial API:
 
 | Provider | Model | Dims | Price /1M | MTEB | Context | Task Types | Matryoshka |
 |---|---|---|---|---|---|---|---|
-| Google | `gemini-embedding-001` | 3,072 | Free / ~$4 via Vertex | 68.3 | 8K | ✅ 7 types | ❌ |
-| Google | `gemini-embedding-2-preview` | 3,072 | $0.20 | N/A | 8K | ❓ | ❌ |
+| Google | `gemini-embedding-2-preview` | 3,072 | $0.20 | **84.0** | 8K | ✅ Text prefix | ❌ |
+| Google | `gemini-embedding-001` | 3,072 | Free / ~$0.15 via Vertex | 68.3 | 8K | ✅ 7 types | ❌ |
 | OpenAI | `text-embedding-3-small` | 1,536 | $0.02 | 62.3 | 8K | ❌ | ✅ |
 | OpenAI | `text-embedding-3-large` | 3,072 | $0.13 | 64.6 | 8K | ❌ | ✅ |
 | OpenAI | `text-embedding-ada-002` | 1,536 | $0.10 | 61.0 | 8K | ❌ | ❌ |
@@ -247,11 +259,9 @@ These require serious GPU infrastructure but beat every commercial API:
 # brainjar.toml recommended defaults
 
 [embeddings.gemini]
-model = "gemini-embedding-001"
+model = "gemini-embedding-2-preview"   # recommended: MTEB 84.0, text prefix format
+# model = "gemini-embedding-001"       # fallback: free tier, taskType parameter
 # NOT text-embedding-004 (deprecated/404)
-# NOT gemini-embedding-2-preview (multimodal, no task types)
-task_type_query = "RETRIEVAL_QUERY"
-task_type_document = "RETRIEVAL_DOCUMENT"
 
 [embeddings.openai]
 model = "text-embedding-3-small"
@@ -297,7 +307,8 @@ At 1M documents: 384 dims → ~1.5GB | 3,072 dims → ~12GB
 
 | Priority | Model | Why |
 |---|---|---|
-| **Quality** | `gemini-embedding-001` | MTEB 68.3, free tier, task types, 3072 dims |
+| **Quality** | `gemini-embedding-2-preview` | MTEB 84.0, text prefix format, 3072 dims, $0.20/MTok |
+| **Free tier** | `gemini-embedding-001` | MTEB 68.3, free tier (1,500 RPD), taskType parameter |
 | **Value** | `text-embedding-3-small` | $0.02/MTok, MTEB 62.3, good enough for most use cases |
 | **Retrieval-optimized** | `voyage-4` | MTEB ~67, 32K context, task types, $0.06/MTok |
 | **Budget** | `mistral-embed` | $0.01/MTok, MTEB ~63, no task types |
@@ -314,11 +325,14 @@ At 1M documents: 384 dims → ~1.5GB | 3,072 dims → ~12GB
 ### Recommendation
 
 **For Brainjar:**
-1. **Default cloud:** `gemini-embedding-001` (free tier + best quality + task types)
-2. **Default local:** `nomic-embed-text` (proper query/document prefixes + 8K context)
-3. **High-quality local:** `mxbai-embed-large` (but remember the query prefix!)
+1. **Default cloud:** `gemini-embedding-2-preview` (MTEB 84.0 + text prefix format + 3072 dims)
+2. **Free tier cloud:** `gemini-embedding-001` (free tier + MTEB 68.3 + taskType parameter)
+3. **Default local:** `nomic-embed-text` (proper query/document prefixes + 8K context)
+4. **High-quality local:** `mxbai-embed-large` (but remember the query prefix!)
 
 **Key implementation requirement:** Brainjar MUST handle task types/prefixes differently at index time vs query time for each provider.
+
+**v2 vs v1 implementation difference:** gemini-embedding-2-preview uses text prefix format (prepended strings) NOT the `taskType` API parameter. The `embed_documents()` method handles this automatically.
 
 ---
 

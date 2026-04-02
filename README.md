@@ -53,8 +53,8 @@ brainjar search --fuzzy "deploymnt workflw"
 | `--fuzzy` | Vocabulary-corrected FTS + graph | ~100ms | Typos, partial words, abbreviations |
 | `--text` | FTS5 BM25 only | ~10ms | Pure text relevance, no graph |
 | `--graph` | Entity graph traversal only | ~20ms | Concept/relationship queries |
+| `--vector` | Semantic vector (ANN) | ~50ms | Semantic similarity, paraphrase queries |
 | `--local` | Nucleo file scanner | ~50ms | Files not yet synced, raw file:line results |
-| `--exact` | Case-insensitive substring | fast | Literal string matching |
 
 ```bash
 # Default: FTS + graph merged via RRF
@@ -83,6 +83,12 @@ brainjar search --kb personal "morning routine"
 
 # JSON output (for piping / agent use)
 brainjar search --json "deployment"
+
+# Return full chunk content instead of previews
+brainjar search --chunks "deployment workflow"
+
+# Aggregate chunk scores to document level
+brainjar search --doc-score "deployment workflow"
 ```
 
 ### How Fuzzy Search Works
@@ -157,11 +163,11 @@ provider = "gemini"
 model = "gemini-3.1-flash-lite-preview"
 enabled = true
 
-# Optional: vector embeddings (coming soon)
+# Optional: vector embeddings
 [embeddings]
 provider = "gemini"
-model = "text-embedding-004"
-dimensions = 768
+model = "gemini-embedding-2-preview"
+dimensions = 3072
 ```
 
 ### Knowledge Base Options
@@ -290,10 +296,23 @@ Graph data lives in `~/.brainjar/<kb_name>_graph.db` (GraphQLite).
 
 ```bash
 brainjar sync [kb_name] [--force] [--dry-run] [--json]
-brainjar search <query> [--kb <name>] [--limit N] [--fuzzy|--text|--graph|--local|--exact] [--json]
+brainjar search <query> [--kb <name>] [--limit N] [--fuzzy|--text|--graph|--vector|--local] [--chunks] [--doc-score] [--json]
 brainjar status [kb_name] [--json]
 brainjar init
 brainjar mcp
+```
+
+### Retrieve (coming in v0.2)
+
+```bash
+# Fetch full content of a chunk by ID
+brainjar retrieve <chunk_id>
+
+# Chunk content + surrounding raw lines from source file
+brainjar retrieve <chunk_id> --lines-before 10 --lines-after 20
+
+# Chunk content + neighboring chunks
+brainjar retrieve <chunk_id> --chunks-before 1 --chunks-after 1
 ```
 
 ## Why brainjar?
@@ -333,7 +352,10 @@ cargo install --path .
 
 ### Roadmap
 
-- [ ] Vector embeddings (sqlite-vec, Phase 3)
+- [ ] `brainjar retrieve` — fetch full chunk content with line/chunk context (v0.2)
+- [ ] Chunking — split documents into overlapping chunks for better recall (v0.2)
+- [ ] `--chunks` flag on search — return full chunk content instead of previews (v0.2)
+- [ ] `--doc-score` flag on search — aggregate chunk scores to document level (v0.2)
 - [ ] MCP tool: `correct_query` (expose fuzzy correction to agents)
 - [ ] Watch mode: `brainjar sync --watch` (inotify/FSEvents)
 - [ ] Web UI for browsing the knowledge graph
