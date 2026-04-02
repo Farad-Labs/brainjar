@@ -1,9 +1,9 @@
-/// Chunking module — splits files into semantic chunks for indexing.
-///
-/// Strategies:
-/// - Markdown (.md): headings, code blocks, frontmatter
-/// - Code (.rs, .py, .ts, …): function/class boundaries, fallback fixed-size
-/// - Text (everything else): paragraph-based, fallback fixed-size
+//! Chunking module — splits files into semantic chunks for indexing.
+//!
+//! Strategies:
+//! - Markdown (.md): headings, code blocks, frontmatter
+//! - Code (.rs, .py, .ts, …): function/class boundaries, fallback fixed-size
+//! - Text (everything else): paragraph-based, fallback fixed-size
 
 use std::path::Path;
 
@@ -139,7 +139,7 @@ pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
 
 /// Extract YAML frontmatter.
 /// Returns (line_index_after_frontmatter, Option<Chunk>).
-fn extract_frontmatter<'a>(lines: &[&'a str]) -> (usize, Option<Chunk>) {
+fn extract_frontmatter(lines: &[&str]) -> (usize, Option<Chunk>) {
     if lines.is_empty() || lines[0].trim() != "---" {
         return (0, None);
     }
@@ -172,8 +172,8 @@ fn find_paragraph_split(lines: &[&str]) -> usize {
         }
     }
     // Search forwards
-    for i in mid..lines.len() {
-        if lines[i].trim().is_empty() {
+    for (i, line) in lines.iter().enumerate().skip(mid) {
+        if line.trim().is_empty() {
             return i + 1;
         }
     }
