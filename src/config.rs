@@ -25,6 +25,8 @@ pub struct Config {
     /// Path to the config file (not serialized)
     #[serde(skip)]
     pub config_dir: PathBuf,
+    /// Watch mode configuration
+    pub watch: Option<WatchConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +59,12 @@ pub struct ExtractionConfig {
     /// Backward-compat: base_url directly on extraction section.
     pub base_url: Option<String>,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WatchConfig {
+    /// Polling interval in seconds (default: 300)
+    pub interval: Option<u64>,
 }
 
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {

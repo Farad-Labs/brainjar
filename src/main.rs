@@ -91,6 +91,24 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Watch for file changes and auto-sync
+    Watch {
+        /// Polling interval in seconds (default: 300 = 5 minutes)
+        #[arg(long, default_value = "300")]
+        interval: u64,
+        /// Watch specific knowledge base only
+        #[arg(long)]
+        kb: Option<String>,
+        /// Run as background daemon
+        #[arg(long)]
+        daemon: bool,
+        /// Stop running daemon
+        #[arg(long)]
+        stop: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Initialize a new brainjar project
     Init,
     /// Run as an MCP server (stdio transport)
@@ -281,6 +299,28 @@ async fn main() -> Result<()> {
         Commands::List { json } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             run_list(&config, json).await?;
+        }
+        Commands::Watch {
+            interval,
+            kb,
+            daemon,
+            stop,
+            json,
+        } => {
+            let config = brainjar::config::load_config(cli.config.as_deref())?;
+            let effective_interval = config
+                .watch
+                .as_ref()
+                .and_then(|w| w.interval)
+                .unwrap_or(interval);
+            if stop {
+                brainjar::watch::stop_daemon(&config)?;
+            } else if daemon {
+                brainjar::watch::start_daemon(&config, effective_interval, kb.as_deref(), json)?;
+            } else {
+                brainjar::watch::run_watch(&config, kb.as_deref(), effective_interval, json)
+                    .await?;
+            }
         }
         Commands::Init => {
             brainjar::init::run_init().await?;
