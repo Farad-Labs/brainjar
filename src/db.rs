@@ -258,6 +258,17 @@ pub fn upsert_document_vec(conn: &Connection, doc_id: i64, embedding_bytes: &[u8
     Ok(())
 }
 
+/// Return all document paths in the database.
+pub fn get_all_paths(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM documents")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    let mut paths = Vec::new();
+    for row in rows {
+        paths.push(row?);
+    }
+    Ok(paths)
+}
+
 /// Look up the document id for a given path.
 pub fn get_document_id(conn: &Connection, path: &str) -> Result<Option<i64>> {
     let mut stmt = conn.prepare("SELECT id FROM documents WHERE path = ?1")?;

@@ -191,7 +191,15 @@ pub async fn run_search(
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
             let embedder = Embedder::new(embed_cfg, api_key, base_url);
-            match embedder.embed_batch(&[search_query]).await {
+            // Determine task type based on KB file contents
+            let all_paths: Vec<String> = if let Some(name) = kb_name {
+                let conn = crate::db::open_db(name, &config.effective_db_dir()).ok();
+                conn.and_then(|c| crate::db::get_all_paths(&c).ok()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let query_task = crate::embed::task_type_for_query(&all_paths);
+            match embedder.embed_batch_with_task(&[search_query], query_task).await {
                 Ok(vecs) if !vecs.is_empty() => {
                     let query_vec = &vecs[0];
                     let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {

@@ -1,6 +1,60 @@
 use anyhow::{Context, Result};
+use std::path::Path;
 
 use crate::config::EmbeddingConfig;
+
+/// Gemini embedding task types for optimized retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskType {
+    /// Embedding stored documents for retrieval
+    RetrievalDocument,
+    /// Embedding a search query
+    RetrievalQuery,
+    /// Embedding a code-related search query
+    CodeRetrievalQuery,
+}
+
+impl TaskType {
+    /// Returns the Gemini API task type string.
+    pub fn as_gemini_str(self) -> &'static str {
+        match self {
+            Self::RetrievalDocument => "RETRIEVAL_DOCUMENT",
+            Self::RetrievalQuery => "RETRIEVAL_QUERY",
+            Self::CodeRetrievalQuery => "CODE_RETRIEVAL_QUERY",
+        }
+    }
+}
+
+/// Code file extensions that indicate source code content.
+const CODE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "kt", "c", "cpp", "h",
+    "cs", "rb", "swift", "zig", "lua", "sh", "bash", "zsh", "ps1",
+    "sql", "toml", "yaml", "yml", "json", "xml", "html", "css", "scss",
+];
+
+/// Determine the embedding task type for a document based on file extension.
+/// Code files are embedded as RETRIEVAL_DOCUMENT (same as other docs — the
+/// distinction matters at query time, not index time).
+pub fn task_type_for_document(_path: &str) -> TaskType {
+    TaskType::RetrievalDocument
+}
+
+/// Determine the embedding task type for a search query.
+/// If the KB contains code files, uses CODE_RETRIEVAL_QUERY for better
+/// code-aware semantic matching.
+pub fn task_type_for_query(paths: &[String]) -> TaskType {
+    let has_code = paths.iter().any(|p| {
+        Path::new(p)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| CODE_EXTENSIONS.contains(&ext))
+    });
+    if has_code {
+        TaskType::CodeRetrievalQuery
+    } else {
+        TaskType::RetrievalQuery
+    }
+}
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -29,9 +83,15 @@ impl Embedder {
     }
 
     /// Embed a batch of texts and return one vector per input.
+    /// Uses RETRIEVAL_DOCUMENT task type (for indexing).
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch_with_task(texts, TaskType::RetrievalDocument).await
+    }
+
+    /// Embed a batch of texts with a specific task type.
+    pub async fn embed_batch_with_task(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
         match self.config.provider.as_str() {
-            "gemini" => self.embed_gemini(texts).await,
+            "gemini" => self.embed_gemini(texts, task_type).await,
             "openai" => self.embed_openai(texts).await,
             "ollama" => self.embed_ollama(texts).await,
             p => anyhow::bail!("Unknown embedding provider: {}", p),
@@ -47,7 +107,7 @@ impl Embedder {
 // ─── Provider implementations ────────────────────────────────────────────────
 
 impl Embedder {
-    async fn embed_gemini(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_gemini(&self, texts: &[&str], task_type: TaskType) -> Result<Vec<Vec<f32>>> {
         let api_key = self.require_api_key()?;
 
         let mut all_embeddings = Vec::with_capacity(texts.len());
@@ -61,7 +121,8 @@ impl Embedder {
             );
             let body = serde_json::json!({
                 "model": format!("models/{}", self.config.model),
-                "content": {"parts": [{"text": text}]}
+                "content": {"parts": [{"text": text}]},
+                "taskType": task_type.as_gemini_str()
             });
 
             let resp = self
@@ -210,9 +271,9 @@ mod tests {
 
     #[test]
     fn test_embedder_creation_gemini() {
-        let cfg = make_config("gemini", "text-embedding-004", 768);
+        let cfg = make_config("gemini", "gemini-embedding-001", 3072);
         let embedder = Embedder::new(&cfg, Some("fake-key".to_string()), None);
-        assert_eq!(embedder.dimensions(), 768);
+        assert_eq!(embedder.dimensions(), 3072);
     }
 
     #[test]
@@ -231,9 +292,8 @@ mod tests {
 
     #[test]
     fn test_embedder_requires_api_key_when_missing() {
-        let cfg = make_config("gemini", "text-embedding-004", 768);
+        let cfg = make_config("gemini", "gemini-embedding-001", 3072);
         let embedder = Embedder::new(&cfg, None, None);
-        // require_api_key should fail
         let result = embedder.require_api_key();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -270,5 +330,24 @@ mod tests {
         let result = embedder.embed_batch(&["hello"]).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown embedding provider"));
+    }
+
+    #[test]
+    fn test_task_type_for_query_with_code() {
+        let paths = vec!["main.rs".to_string(), "README.md".to_string()];
+        assert_eq!(task_type_for_query(&paths), TaskType::CodeRetrievalQuery);
+    }
+
+    #[test]
+    fn test_task_type_for_query_without_code() {
+        let paths = vec!["notes.md".to_string(), "plan.txt".to_string()];
+        assert_eq!(task_type_for_query(&paths), TaskType::RetrievalQuery);
+    }
+
+    #[test]
+    fn test_task_type_gemini_strings() {
+        assert_eq!(TaskType::RetrievalDocument.as_gemini_str(), "RETRIEVAL_DOCUMENT");
+        assert_eq!(TaskType::RetrievalQuery.as_gemini_str(), "RETRIEVAL_QUERY");
+        assert_eq!(TaskType::CodeRetrievalQuery.as_gemini_str(), "CODE_RETRIEVAL_QUERY");
     }
 }
