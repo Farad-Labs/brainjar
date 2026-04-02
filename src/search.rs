@@ -59,21 +59,79 @@ pub struct UnifiedResult {
     pub content: Option<String>,
 }
 
-/// Search mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchMode {
-    /// Run FTS + graph + vector (if configured), merge with RRF (fast)
-    All,
-    /// Run FTS + graph + fuzzy + vector, merge with RRF (slower, more comprehensive)
+/// Individual search engines that can be combined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchEngine {
+    /// Fuzzy-corrected FTS5 BM25
     Fuzzy,
-    /// Local fuzzy only (nucleo)
-    Local,
-    /// FTS5 BM25 only
+    /// Raw FTS5 BM25 (no fuzzy correction)
     Text,
-    /// Graph traversal from matching entities
+    /// Graph entity traversal
     Graph,
-    /// Vector KNN similarity search only
+    /// Vector KNN similarity
     Vector,
+    /// Local nucleo file scanner
+    Local,
+}
+
+/// Set of search engines to run. Default: Fuzzy + Graph + Vector.
+#[derive(Debug, Clone)]
+pub struct SearchMode {
+    pub engines: std::collections::HashSet<SearchEngine>,
+}
+
+impl SearchMode {
+    /// Default: fuzzy + graph + vector
+    pub fn default_mode() -> Self {
+        Self {
+            engines: [SearchEngine::Fuzzy, SearchEngine::Graph, SearchEngine::Vector]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Build from explicit flags. If none set, use default.
+    pub fn from_flags(text: bool, graph: bool, vector: bool, local: bool) -> Self {
+        if local {
+            return Self {
+                engines: [SearchEngine::Local].into_iter().collect(),
+            };
+        }
+        let mut engines = std::collections::HashSet::new();
+        if text { engines.insert(SearchEngine::Text); }
+        if graph { engines.insert(SearchEngine::Graph); }
+        if vector { engines.insert(SearchEngine::Vector); }
+        if engines.is_empty() {
+            return Self::default_mode();
+        }
+        Self { engines }
+    }
+
+    pub fn has(&self, engine: SearchEngine) -> bool {
+        self.engines.contains(&engine)
+    }
+
+    /// Whether to run fuzzy vocabulary correction before FTS
+    pub fn run_fuzzy(&self) -> bool {
+        self.has(SearchEngine::Fuzzy)
+    }
+
+    /// Whether to run any FTS (fuzzy or raw text)
+    pub fn run_fts(&self) -> bool {
+        self.has(SearchEngine::Fuzzy) || self.has(SearchEngine::Text)
+    }
+
+    pub fn run_graph(&self) -> bool {
+        self.has(SearchEngine::Graph)
+    }
+
+    pub fn run_vector(&self) -> bool {
+        self.has(SearchEngine::Vector)
+    }
+
+    pub fn run_local(&self) -> bool {
+        self.has(SearchEngine::Local)
+    }
 }
 
 /// A vector KNN search result.
@@ -218,7 +276,7 @@ pub async fn run_search(
 
         for sub_query in &queries {
             let (fts, local, graph, vector) =
-                collect_search_results(config, sub_query, kb_name, limit, mode, exact).await?;
+                collect_search_results(config, sub_query, kb_name, limit, &mode, exact).await?;
             all_fts.extend(fts);
             all_local.extend(local);
             all_graph.extend(graph);
@@ -244,7 +302,7 @@ pub async fn run_search(
                 &all_local,
                 &all_graph,
                 &all_vector,
-                mode,
+                &mode,
                 limit,
                 chunks,
                 doc_score,
@@ -253,13 +311,13 @@ pub async fn run_search(
         return Ok(());
     }
     let db_dir = config.effective_db_dir();
-    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
-    let run_local = matches!(mode, SearchMode::Local);
-    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
-    let run_vector = matches!(mode, SearchMode::All | SearchMode::Vector | SearchMode::Fuzzy);
+    let run_fts = mode.run_fts();
+    let run_local = mode.run_local();
+    let run_graph = mode.run_graph();
+    let run_vector = mode.run_vector();
 
-    // For fuzzy mode: correct the query via vocabulary before FTS/graph search
-    let (effective_query, query_corrections) = if mode == SearchMode::Fuzzy {
+    // Fuzzy mode: correct the query via vocabulary before FTS/graph search
+    let (effective_query, query_corrections) = if mode.run_fuzzy() {
         // Use the first available KB's connection for vocabulary lookup
         let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
             let kb = config
@@ -343,8 +401,8 @@ pub async fn run_search(
                 .collect()
         };
 
-        // For fuzzy mode: search graph with both original and corrected query terms
-        let graph_query = if mode == SearchMode::Fuzzy && !query_corrections.is_empty() {
+        // When fuzzy is active: search graph with both original and corrected query terms
+        let graph_query = if mode.run_fuzzy() && !query_corrections.is_empty() {
             // Combine original + corrected unique terms
             let combined: Vec<String> = query
                 .split_whitespace()
@@ -443,7 +501,7 @@ pub async fn run_search(
             &local_results,
             &graph_results,
             &vector_results,
-            mode,
+            &mode,
             limit,
             chunks,
             doc_score,
@@ -461,7 +519,7 @@ async fn collect_search_results(
     query: &str,
     kb_name: Option<&str>,
     limit: usize,
-    mode: SearchMode,
+    mode: &SearchMode,
     exact: bool,
 ) -> Result<(
     Vec<FtsResult>,
@@ -470,10 +528,10 @@ async fn collect_search_results(
     Vec<VectorResult>,
 )> {
     let db_dir = config.effective_db_dir();
-    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
-    let run_local = matches!(mode, SearchMode::Local);
-    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
-    let run_vector = matches!(mode, SearchMode::All | SearchMode::Vector | SearchMode::Fuzzy);
+    let run_fts = mode.run_fts();
+    let run_local = mode.run_local();
+    let run_graph = mode.run_graph();
+    let run_vector = mode.run_vector();
 
     let search_query = query;
 
@@ -1034,7 +1092,7 @@ fn print_results(
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
-    mode: SearchMode,
+    mode: &SearchMode,
     limit: usize,
     include_content: bool,
     doc_score: bool,
@@ -1075,8 +1133,10 @@ fn print_results(
         }
     }
 
-    if matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy) {
-        // Show merged RRF results (or pure graph results)
+    let single_text = mode.has(SearchEngine::Text) && mode.engines.len() == 1;
+    let single_local = mode.run_local();
+    if !single_text && !single_local {
+        // Merged RRF view (default for any engine combination)
         let unified = build_unified_results(fts, local, graph, vector, limit, include_content, doc_score);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
@@ -1106,7 +1166,7 @@ fn print_results(
         return;
     }
 
-    if matches!(mode, SearchMode::Text) {
+    if single_text {
         println!(
             "{}",
             "── FTS5 (text search) ─────────────────────────────".dimmed()
@@ -1128,7 +1188,7 @@ fn print_results(
         }
     }
 
-    if matches!(mode, SearchMode::Local) {
+    if mode.run_local() {
         println!(
             "{}",
             "── Local (fuzzy) ─────────────────────────────────".dimmed()
@@ -1199,11 +1259,38 @@ mod tests {
     // ─── SearchMode enum ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_search_mode_equality() {
-        assert_eq!(SearchMode::All, SearchMode::All);
-        assert_ne!(SearchMode::Text, SearchMode::Fuzzy);
-        assert_ne!(SearchMode::Vector, SearchMode::Graph);
-        assert_ne!(SearchMode::Local, SearchMode::All);
+    fn test_search_mode_defaults() {
+        let mode = SearchMode::default_mode();
+        assert!(mode.run_fuzzy());
+        assert!(mode.run_fts());
+        assert!(mode.run_graph());
+        assert!(mode.run_vector());
+        assert!(!mode.run_local());
+    }
+
+    #[test]
+    fn test_search_mode_from_flags() {
+        // No flags → default
+        let mode = SearchMode::from_flags(false, false, false, false);
+        assert!(mode.run_fuzzy());
+        assert!(mode.run_graph());
+        assert!(mode.run_vector());
+
+        // Single flag
+        let mode = SearchMode::from_flags(true, false, false, false);
+        assert!(mode.has(SearchEngine::Text));
+        assert!(!mode.run_graph());
+
+        // Combination
+        let mode = SearchMode::from_flags(false, true, true, false);
+        assert!(mode.run_graph());
+        assert!(mode.run_vector());
+        assert!(!mode.run_fts());
+
+        // Local is exclusive
+        let mode = SearchMode::from_flags(false, false, false, true);
+        assert!(mode.run_local());
+        assert!(!mode.run_fts());
     }
 
     // ─── FTS query ───────────────────────────────────────────────────────────
