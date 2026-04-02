@@ -346,14 +346,38 @@ async fn sync_kb_human(
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
     };
-    println!(
-        "\n  {} Synced {} docs ({} new, {} updated) in {}",
-        "✓".green().bold(),
-        total_upsert.to_string().cyan(),
-        new_count.to_string().green(),
-        updated_count.to_string().yellow(),
-        elapsed_str.bold()
-    );
+    let extracted_resumed = unextracted.len();
+    if total_upsert > 0 || extracted_resumed > 0 {
+        let mut parts = Vec::new();
+        if new_count > 0 {
+            parts.push(format!("{} new", new_count.to_string().green()));
+        }
+        if updated_count > 0 {
+            parts.push(format!("{} updated", updated_count.to_string().yellow()));
+        }
+        if extracted_resumed > 0 && total_upsert == 0 {
+            parts.push(format!("{} extracted", extracted_resumed.to_string().cyan()));
+        }
+        let summary = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        };
+        let total = if total_upsert > 0 { total_upsert } else { extracted_resumed };
+        println!(
+            "\n  {} Synced {} docs{} in {}",
+            "✓".green().bold(),
+            total.to_string().cyan(),
+            summary,
+            elapsed_str.bold()
+        );
+    } else {
+        println!(
+            "\n  {} Done in {}",
+            "✓".green().bold(),
+            elapsed_str.bold()
+        );
+    }
 
     Ok(())
 }
