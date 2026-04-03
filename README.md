@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="525" />
+  <img src="assets/mascot-full-res.png" alt="Brainjar" width="525" />
 </p>
 
 <p align="center">
@@ -388,7 +388,8 @@ brainjar's FTS5 + graph + fuzzy approach gives you:
 git clone https://github.com/Farad-Labs/brainjar
 cd brainjar
 cargo build
-cargo test
+cargo test                              # unit + integration tests
+cargo test --features golden-corpus     # includes golden corpus (needs API keys)
 cargo clippy
 cargo install --path .
 ```

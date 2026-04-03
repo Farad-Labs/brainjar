@@ -29,7 +29,7 @@ jobs:
       - name: Run golden corpus tests (Gemini)
         id: test-gemini
         run: |
-          cargo test --test search_integration -- --ignored --nocapture 2>&1 | tee gemini-results.txt
+          cargo test --features golden-corpus --test search_integration -- --ignored --nocapture 2>&1 | tee gemini-results.txt
           echo "gemini_pass=$(grep -o '[0-9]* passed' gemini-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "gemini_time=$(grep 'finished in' gemini-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
         continue-on-error: true
@@ -50,7 +50,7 @@ jobs:
         run: |
           BRAINJAR_TEST_CONFIG=test-corpus/brainjar-openai-large.toml \
           BRAINJAR_TEST_KB=test-corpus-openai \
-            cargo test --test search_integration -- --ignored --nocapture 2>&1 | tee openai-results.txt
+            cargo test --features golden-corpus --test search_integration -- --ignored --nocapture 2>&1 | tee openai-results.txt
           echo "openai_pass=$(grep -o '[0-9]* passed' openai-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "openai_time=$(grep 'finished in' openai-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
         continue-on-error: true

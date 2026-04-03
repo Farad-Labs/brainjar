@@ -1,11 +1,8 @@
-name: Sync dev after release
+name: Sync main → dev
 
 on:
   push:
     branches: [main]
-
-permissions:
-  contents: write
 
 jobs:
   sync-dev:
@@ -14,12 +11,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_PAT }}
 
-      - name: Merge main → dev
+      - name: Merge main into dev and force push
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "LukeL99"
+          git config user.email "lukel99@users.noreply.github.com"
           git checkout dev
           git merge main --no-edit
-          git push origin dev
+          git push --force origin dev

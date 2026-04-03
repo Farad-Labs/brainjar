@@ -44,6 +44,9 @@ graphqlite = "0.4.3"
 sqlite-vec = "=0.1.9"
 zerocopy = { version = "0.8", features = ["derive"] }
 
+[features]
+golden-corpus = []
+
 [dev-dependencies]
 tempfile = "3"
 
