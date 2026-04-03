@@ -44,7 +44,6 @@ pub struct UnifiedResult {
     pub score: f64,
     pub sources: Vec<String>,
     pub excerpt: String,
-    pub line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -953,7 +952,6 @@ fn build_unified_results(
         .map(|(key, score)| {
             let mut sources = Vec::new();
             let mut excerpt = String::new();
-            let mut line: Option<u32> = None;
             let mut chunk_id_out: Option<i64> = None;
             let mut line_start: Option<u32> = None;
             let mut line_end: Option<u32> = None;
@@ -1023,7 +1021,6 @@ fn build_unified_results(
                 if excerpt.is_empty() {
                     excerpt = l.matched_text.clone();
                 }
-                line = Some(l.line);
             }
             if graph_map.contains_key(file.as_str()) && !sources.contains(&"graph".to_string()) {
                 sources.push("graph".to_string());
@@ -1045,7 +1042,6 @@ fn build_unified_results(
                 score,
                 sources,
                 excerpt: excerpt.clone(),
-                line,
                 chunk_id: chunk_id_out,
                 line_start,
                 line_end,
@@ -1158,16 +1154,7 @@ fn print_results(
             );
             if !result.excerpt.is_empty() {
                 let excerpt = result.excerpt.replace('\n', " ");
-                if let Some(ln) = result.line {
-                    println!(
-                        "     {}:{} {}",
-                        result.file.dimmed(),
-                        ln,
-                        format!("...{}...", excerpt).dimmed()
-                    );
-                } else {
-                    println!("     {}", format!("...{}...", excerpt).dimmed());
-                }
+                println!("     {}", format!("...{}...", excerpt).dimmed());
             }
             println!();
         }
