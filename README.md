@@ -187,12 +187,21 @@ provider = "gemini"
 model = "gemini-3.1-flash-lite-preview"
 enabled = true
 
-# Optional: vector embeddings (recommended: OpenAI for cost, Gemini for quality)
+# Optional: vector embeddings
+# Option A: Local (fast, no API key, requires local-embed feature)
 [embeddings]
-provider = "openai"                                # 10x cheaper than Gemini
-model = "text-embedding-3-small"                   # 62.3% MTEB, 1536 dims (or 1024 with Matryoshka)
-# dimensions = 1024                               # Matryoshka reduction: 67% storage savings
+provider = "local"                                 # ~30ms, runs on CPU
+model = "bge-small-en-v1.5"                        # 62.2% MTEB, 384 dims
+
+# Option B: API-based (higher quality, requires API key)
+# [embeddings]
+# provider = "openai"                              # or "gemini"
+# model = "text-embedding-3-small"                 # 62.3% MTEB, 1536 dims
+# dimensions = 1024                               # Matryoshka reduction (OpenAI/Gemini only)
 ```
+
+> **Local embedding** requires building with `cargo install brainjar --features local-embed`.
+> Model weights (~80MB) are downloaded on first use.
 
 > **Changing models or dimensions?** Run `brainjar sync --reembed` to regenerate all embeddings.
 > Brainjar also auto-detects dimension mismatches and re-embeds when needed.
