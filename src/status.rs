@@ -27,16 +27,22 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
         let db_path = db_dir.join(format!("{}.db", name));
         let db_exists = db_path.exists();
 
-        let (doc_count, extracted_count, last_sync) = if db_exists {
+        let (doc_count, extracted_count, chunk_count, embedding_count, last_sync) = if db_exists {
             let conn = db::open_db(name, &db_dir)?;
             let count = db::count_documents(&conn)?;
             let extracted: i64 = conn
                 .query_row("SELECT COUNT(*) FROM documents WHERE extracted = 1", [], |r| r.get(0))
                 .unwrap_or(0);
+            let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
+            let embeddings: i64 = if db::chunks_vec_table_exists(&conn) {
+                conn.query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0)).unwrap_or(0)
+            } else {
+                -1 // sentinel: vec table not configured
+            };
             let sync_time = db::get_meta(&conn, "last_sync")?.unwrap_or_else(|| "Never".to_string());
-            (count, extracted, sync_time)
+            (count, extracted, chunks, embeddings, sync_time)
         } else {
-            (0, 0, "Never (DB not initialized — run brainjar sync)".to_string())
+            (0, 0, 0, -1, "Never (DB not initialized — run brainjar sync)".to_string())
         };
 
         // Graph stats (optional — only if graph DB exists)
@@ -58,6 +64,8 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
                 "db_exists": db_exists,
                 "document_count": doc_count,
                 "extracted_count": extracted_count,
+                "chunk_count": chunk_count,
+                "embedding_count": if embedding_count >= 0 { serde_json::Value::Number(embedding_count.into()) } else { serde_json::Value::Null },
                 "last_sync": last_sync,
                 "auto_sync": kb.auto_sync,
                 "watch_paths": kb.watch_paths,
@@ -68,7 +76,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
             }
             all_statuses.push(entry);
         } else {
-            print_kb_status(name, kb, db_exists, doc_count, extracted_count, &last_sync, graph_stats.as_ref());
+            print_kb_status(name, kb, db_exists, doc_count, extracted_count, chunk_count, embedding_count, &last_sync, graph_stats.as_ref());
         }
     }
 
@@ -79,12 +87,15 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_kb_status(
     name: &str,
     kb: &KnowledgeBaseConfig,
     db_exists: bool,
     doc_count: i64,
     extracted_count: i64,
+    chunk_count: i64,
+    embedding_count: i64, // -1 = vec table not configured
     last_sync: &str,
     graph_stats: Option<&crate::graph::GraphStats>,
 ) {
@@ -127,6 +138,32 @@ fn print_kb_status(
                 format!("{} (all done)", extracted_count).green(),
             );
         }
+    }
+    println!(
+        "  {:<20} {}",
+        "Chunks:".dimmed(),
+        chunk_count.to_string().cyan()
+    );
+    if embedding_count < 0 {
+        println!(
+            "  {:<20} {}",
+            "Embeddings:".dimmed(),
+            "not configured".dimmed()
+        );
+    } else if chunk_count > 0 && embedding_count < chunk_count {
+        let pending = chunk_count - embedding_count;
+        println!(
+            "  {:<20} {} ({} pending)",
+            "Embeddings:".dimmed(),
+            embedding_count.to_string().cyan(),
+            pending.to_string().yellow(),
+        );
+    } else {
+        println!(
+            "  {:<20} {}",
+            "Embeddings:".dimmed(),
+            format!("{} (all done)", embedding_count).green(),
+        );
     }
     println!(
         "  {:<20} {}",
