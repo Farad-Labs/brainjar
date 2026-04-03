@@ -1,0 +1,7 @@
+target/
+.git/
+benchmarks/
+.fastembed_cache/
+*.md
+!README.md
+docs/
