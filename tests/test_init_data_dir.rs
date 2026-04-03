@@ -92,6 +92,7 @@ fn test_generated_toml_contains_resolved_data_dir() {
         None,
         None,
         None,
+        None,
         &[],
     )
     .expect("Failed to generate toml");
@@ -121,6 +122,7 @@ fn test_effective_db_dir_respects_resolved_data_dir() {
         &config_path,
         &smart_dir,
         &[],
+        None,
         None,
         None,
         None,
