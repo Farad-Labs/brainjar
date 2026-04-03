@@ -1,0 +1,19 @@
+name: PR Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-source:
+    name: Only dev → main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Block non-dev PRs to main
+        if: github.head_ref != 'dev'
+        run: |
+          echo "::error::PRs to main must come from the dev branch. Please target dev instead."
+          exit 1
+      - name: OK
+        if: github.head_ref == 'dev'
+        run: echo "✅ dev → main"
