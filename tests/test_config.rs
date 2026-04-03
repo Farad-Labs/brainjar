@@ -109,5 +109,6 @@ fn test_config_dir_is_parent_of_config_file() {
     std::fs::write(&config_path, "[knowledge_bases.kb]\nwatch_paths=[\".\"] \nauto_sync=true\n").unwrap();
 
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
-    assert_eq!(config.config_dir, sub);
+    let expected_sub = sub.canonicalize().unwrap_or(sub.clone());
+    assert_eq!(config.config_dir, expected_sub);
 }

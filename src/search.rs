@@ -2,11 +2,24 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::db;
 use crate::embed::Embedder;
 use zerocopy::IntoBytes;
+
+/// Sanitize a query string for FTS5 MATCH syntax.
+/// Removes special characters that FTS5 interprets as operators.
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .chars()
+        .filter(|c| !matches!(c, '?' | '*' | '(' | ')' | '"' | '+' | '-' | '^' | '{' | '}' | '~'))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 use crate::fuzzy;
 use crate::local_search::{run_local_search, LocalSearchResult};
 
@@ -16,6 +29,12 @@ pub struct FtsResult {
     pub path: String,
     pub excerpt: String,
     pub score: f64,
+    /// Chunk id (from chunks_fts), if available
+    pub chunk_id: Option<i64>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
+    pub chunk_type: Option<String>,
+    pub content: Option<String>,
 }
 
 /// A unified search result (for JSON output).
@@ -26,23 +45,93 @@ pub struct UnifiedResult {
     pub sources: Vec<String>,
     pub excerpt: String,
     pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
-/// Search mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchMode {
-    /// Run FTS + graph + vector (if configured), merge with RRF (fast)
-    All,
-    /// Run FTS + graph + fuzzy + vector, merge with RRF (slower, more comprehensive)
+/// Individual search engines that can be combined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchEngine {
+    /// Fuzzy-corrected FTS5 BM25
     Fuzzy,
-    /// Local fuzzy only (nucleo)
-    Local,
-    /// FTS5 BM25 only
+    /// Raw FTS5 BM25 (no fuzzy correction)
     Text,
-    /// Graph traversal from matching entities
+    /// Graph entity traversal
     Graph,
-    /// Vector KNN similarity search only
+    /// Vector KNN similarity
     Vector,
+    /// Local nucleo file scanner
+    Local,
+}
+
+/// Set of search engines to run. Default: Fuzzy + Graph + Vector.
+#[derive(Debug, Clone)]
+pub struct SearchMode {
+    pub engines: std::collections::HashSet<SearchEngine>,
+}
+
+impl SearchMode {
+    /// Default: fuzzy + graph + vector
+    pub fn default_mode() -> Self {
+        Self {
+            engines: [SearchEngine::Fuzzy, SearchEngine::Graph, SearchEngine::Vector]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Build from explicit flags. If none set, use default.
+    pub fn from_flags(text: bool, graph: bool, vector: bool, local: bool) -> Self {
+        if local {
+            return Self {
+                engines: [SearchEngine::Local].into_iter().collect(),
+            };
+        }
+        let mut engines = std::collections::HashSet::new();
+        if text { engines.insert(SearchEngine::Text); }
+        if graph { engines.insert(SearchEngine::Graph); }
+        if vector { engines.insert(SearchEngine::Vector); }
+        if engines.is_empty() {
+            return Self::default_mode();
+        }
+        Self { engines }
+    }
+
+    pub fn has(&self, engine: SearchEngine) -> bool {
+        self.engines.contains(&engine)
+    }
+
+    /// Whether to run fuzzy vocabulary correction before FTS
+    pub fn run_fuzzy(&self) -> bool {
+        self.has(SearchEngine::Fuzzy)
+    }
+
+    /// Whether to run any FTS (fuzzy or raw text)
+    pub fn run_fts(&self) -> bool {
+        self.has(SearchEngine::Fuzzy) || self.has(SearchEngine::Text)
+    }
+
+    pub fn run_graph(&self) -> bool {
+        self.has(SearchEngine::Graph)
+    }
+
+    pub fn run_vector(&self) -> bool {
+        self.has(SearchEngine::Vector)
+    }
+
+    pub fn run_local(&self) -> bool {
+        self.has(SearchEngine::Local)
+    }
 }
 
 /// A vector KNN search result.
@@ -50,8 +139,110 @@ pub enum SearchMode {
 pub struct VectorResult {
     pub path: String,
     pub score: f64,
+    pub chunk_id: Option<i64>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
+    pub chunk_type: Option<String>,
 }
 
+/// Use a cheap LLM to extract targeted search queries from conversational text.
+/// Public alias for use by mcp.rs.
+pub async fn extract_queries_pub(config: &Config, raw_text: &str) -> Result<Vec<String>> {
+    extract_queries(config, raw_text).await
+}
+
+async fn extract_queries(config: &Config, raw_text: &str) -> Result<Vec<String>> {
+    let ext_config = config.extraction.as_ref()
+        .context("Smart search requires [extraction] config for LLM query extraction")?;
+
+    let api_key = config.resolve_api_key(&ext_config.provider, ext_config.api_key.as_deref())
+        .context("No API key for extraction provider")?;
+
+    let prompt = format!(
+        "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Extract key concepts, entities, and topics\n- Do NOT return the original text as a query\n\nText: {}\n\nJSON array:",
+        raw_text
+    );
+
+    let client = reqwest::Client::new();
+
+    let result = match ext_config.provider.as_str() {
+        "gemini" => {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+                ext_config.model, api_key
+            );
+            let body = serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            });
+            let resp = client.post(&url).json(&body).send().await
+                .context("Smart search: LLM request failed")?;
+            let json: serde_json::Value = resp.json().await?;
+            json["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or("[]")
+                .to_string()
+        }
+        "openai" => {
+            let url = "https://api.openai.com/v1/chat/completions";
+            let body = serde_json::json!({
+                "model": ext_config.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            });
+            let resp = client.post(url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body).send().await?;
+            let status = resp.status();
+            let json: serde_json::Value = resp.json().await?;
+            if !status.is_success() {
+                let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+                anyhow::bail!("Smart search: OpenAI API error ({}): {}", status, err_msg);
+            }
+            json["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("[]")
+                .to_string()
+        }
+        "ollama" => {
+            let base_url = config.resolve_base_url(&ext_config.provider, ext_config.base_url.as_deref())
+                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            let url = format!("{}/api/generate", base_url);
+            let body = serde_json::json!({
+                "model": ext_config.model,
+                "prompt": prompt,
+                "stream": false,
+                "format": "json"
+            });
+            let resp = client.post(&url).json(&body).send().await?;
+            let json: serde_json::Value = resp.json().await?;
+            json["response"].as_str().unwrap_or("[]").to_string()
+        }
+        p => anyhow::bail!("Unknown extraction provider for smart search: {}", p),
+    };
+
+    // Parse the JSON array of queries
+    let queries: Vec<String> = match serde_json::from_str::<Vec<String>>(&result) {
+        Ok(q) => q,
+        Err(_) => {
+            // Try to extract array from wrapper object (LLMs sometimes return {"queries": [...]})
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&result) {
+                if let Some(arr) = obj.as_object().and_then(|o| o.values().next()).and_then(|v| v.as_array()) {
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                } else {
+                    vec![raw_text.to_string()] // fallback: use raw text
+                }
+            } else {
+                vec![raw_text.to_string()]
+            }
+        }
+    };
+
+    // Limit to 5 queries max
+    Ok(queries.into_iter().take(5).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_search(
     config: &Config,
     query: &str,
@@ -60,15 +251,73 @@ pub async fn run_search(
     json: bool,
     mode: SearchMode,
     exact: bool,
+    chunks: bool,
+    doc_score: bool,
+    smart: bool,
 ) -> Result<()> {
-    let db_dir = config.effective_db_dir();
-    let run_fts = matches!(mode, SearchMode::All | SearchMode::Text | SearchMode::Fuzzy);
-    let run_local = matches!(mode, SearchMode::Local);
-    let run_graph = matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy);
-    let run_vector = matches!(mode, SearchMode::All | SearchMode::Vector | SearchMode::Fuzzy);
+    // Smart mode: use LLM to extract targeted search queries from conversational text
+    if smart {
+        let queries = extract_queries(config, query).await?;
+        if !json {
+            eprintln!(
+                "{} Extracted {} quer{}: {}",
+                "🧠".dimmed(),
+                queries.len(),
+                if queries.len() == 1 { "y" } else { "ies" },
+                queries.iter().map(|q| format!("\"{}\"", q)).collect::<Vec<_>>().join(", ")
+            );
+        }
 
-    // For fuzzy mode: correct the query via vocabulary before FTS/graph search
-    let (effective_query, query_corrections) = if mode == SearchMode::Fuzzy {
+        // Fan-out: run search for each extracted query, collect and merge results
+        let mut all_fts: Vec<FtsResult> = Vec::new();
+        let mut all_local: Vec<crate::local_search::LocalSearchResult> = Vec::new();
+        let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
+        let mut all_vector: Vec<VectorResult> = Vec::new();
+
+        for sub_query in &queries {
+            let (fts, local, graph, vector) =
+                collect_search_results(config, sub_query, kb_name, limit, &mode, exact).await?;
+            all_fts.extend(fts);
+            all_local.extend(local);
+            all_graph.extend(graph);
+            all_vector.extend(vector);
+        }
+
+        // Deduplicate by chunk_id (keeping highest score) or by path for path-keyed results
+        all_fts = dedup_fts_results(all_fts);
+        all_local = dedup_local_results(all_local);
+        all_graph = dedup_graph_results(all_graph);
+        all_vector = dedup_vector_results(all_vector);
+
+        if json {
+            let unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            let output = serde_json::json!({ "results": unified, "smart_queries": queries });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            print_results(
+                query,
+                query,
+                &[],
+                &all_fts,
+                &all_local,
+                &all_graph,
+                &all_vector,
+                &mode,
+                limit,
+                chunks,
+                doc_score,
+            );
+        }
+        return Ok(());
+    }
+    let db_dir = config.effective_db_dir();
+    let run_fts = mode.run_fts();
+    let run_local = mode.run_local();
+    let run_graph = mode.run_graph();
+    let run_vector = mode.run_vector();
+
+    // Fuzzy mode: correct the query via vocabulary before FTS/graph search
+    let (effective_query, query_corrections) = if mode.run_fuzzy() {
         // Use the first available KB's connection for vocabulary lookup
         let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
             let kb = config
@@ -152,8 +401,8 @@ pub async fn run_search(
                 .collect()
         };
 
-        // For fuzzy mode: search graph with both original and corrected query terms
-        let graph_query = if mode == SearchMode::Fuzzy && !query_corrections.is_empty() {
+        // When fuzzy is active: search graph with both original and corrected query terms
+        let graph_query = if mode.run_fuzzy() && !query_corrections.is_empty() {
             // Combine original + corrected unique terms
             let combined: Vec<String> = query
                 .split_whitespace()
@@ -191,7 +440,15 @@ pub async fn run_search(
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
             let embedder = Embedder::new(embed_cfg, api_key, base_url);
-            match embedder.embed_batch(&[search_query]).await {
+            // Determine task type based on KB file contents
+            let all_paths: Vec<String> = if let Some(name) = kb_name {
+                let conn = crate::db::open_db(name, &config.effective_db_dir()).ok();
+                conn.and_then(|c| crate::db::get_all_paths(&c).ok()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let query_task = crate::embed::task_type_for_query(&all_paths);
+            match embedder.embed_batch_with_task(&[search_query], query_task).await {
                 Ok(vecs) if !vecs.is_empty() => {
                     let query_vec = &vecs[0];
                     let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
@@ -225,7 +482,7 @@ pub async fn run_search(
     };
 
     if json {
-        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit);
+        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
             let corrections_json: Vec<serde_json::Value> = query_corrections
@@ -244,80 +501,379 @@ pub async fn run_search(
             &local_results,
             &graph_results,
             &vector_results,
-            mode,
+            &mode,
             limit,
+            chunks,
+            doc_score,
         );
     }
 
     Ok(())
 }
 
-/// FTS5 BM25 search using the documents_fts virtual table.
-pub fn search_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
-    let mut stmt = conn.prepare(
-        r#"SELECT d.path,
-                  snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
-                  rank AS score
-           FROM documents_fts
-           JOIN documents d ON d.id = documents_fts.rowid
-           WHERE documents_fts MATCH ?1
-           ORDER BY rank
-           LIMIT ?2"#,
-    )?;
+/// Core search logic — collects raw results without printing or merging.
+/// Used by both normal mode and smart fan-out mode.
+#[allow(clippy::too_many_arguments)]
+async fn collect_search_results(
+    config: &Config,
+    query: &str,
+    kb_name: Option<&str>,
+    limit: usize,
+    mode: &SearchMode,
+    exact: bool,
+) -> Result<(
+    Vec<FtsResult>,
+    Vec<crate::local_search::LocalSearchResult>,
+    Vec<crate::graph::GraphSearchResult>,
+    Vec<VectorResult>,
+)> {
+    let db_dir = config.effective_db_dir();
+    let run_fts = mode.run_fts();
+    let run_local = mode.run_local();
+    let run_graph = mode.run_graph();
+    let run_vector = mode.run_vector();
 
-    let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
-        Ok(FtsResult {
-            path: row.get(0)?,
-            excerpt: row.get(1)?,
-            // FTS5 rank is negative (lower = better match). Negate to get a
-            // positive score where higher is better.
-            score: -row.get::<_, f64>(2)?,
-        })
-    })?;
+    let search_query = query;
 
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
+    // FTS results
+    let fts_results: Vec<FtsResult> = if run_fts {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
+                .collect()
+        };
+        let mut all: Vec<FtsResult> = Vec::new();
+        for (name, _kb) in &kbs {
+            let conn = db::open_db(name, &db_dir)?;
+            let results = search_fts(&conn, search_query, limit)?;
+            all.extend(results);
+        }
+        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all.truncate(limit);
+        all
+    } else {
+        Vec::new()
+    };
+
+    // Local fuzzy results
+    let local_results: Vec<crate::local_search::LocalSearchResult> = if run_local {
+        crate::local_search::run_local_search(config, query, limit, exact)?
+    } else {
+        Vec::new()
+    };
+
+    // Graph results
+    let graph_results: Vec<crate::graph::GraphSearchResult> = if run_graph {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
+                .collect()
+        };
+        let mut all_graph: Vec<crate::graph::GraphSearchResult> = Vec::new();
+        for (name, _kb) in &kbs {
+            if !crate::graph::KnowledgeGraph::exists(&db_dir, name) {
+                continue;
+            }
+            match crate::graph::KnowledgeGraph::open(&db_dir, name) {
+                Ok(kg) => match kg.search(search_query, limit) {
+                    Ok(results) => all_graph.extend(results),
+                    Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
+                },
+                Err(e) => eprintln!("Could not open graph DB for KB {}: {}", name, e),
+            }
+        }
+        all_graph
+    } else {
+        Vec::new()
+    };
+
+    // Vector KNN search
+    let vector_results: Vec<VectorResult> = if run_vector {
+        if let Some(embed_cfg) = &config.embeddings {
+            let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+            let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+            let embedder = crate::embed::Embedder::new(embed_cfg, api_key, base_url);
+            let all_paths: Vec<String> = if let Some(name) = kb_name {
+                let conn = crate::db::open_db(name, &config.effective_db_dir()).ok();
+                conn.and_then(|c| crate::db::get_all_paths(&c).ok()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let query_task = crate::embed::task_type_for_query(&all_paths);
+            match embedder.embed_batch_with_task(&[search_query], query_task).await {
+                Ok(vecs) if !vecs.is_empty() => {
+                    let query_vec = &vecs[0];
+                    let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+                        let kb = config.knowledge_bases.get(name)
+                            .with_context(|| format!("KB '{}' not found", name))?;
+                        vec![(name, kb)]
+                    } else {
+                        config.knowledge_bases.iter().map(|(n, kb): (&String, _)| (n.as_str(), kb)).collect()
+                    };
+                    let mut all_vec: Vec<VectorResult> = Vec::new();
+                    for (name, _kb) in &kbs {
+                        let conn = db::open_db(name, &db_dir)?;
+                        match search_vector(&conn, query_vec, limit) {
+                            Ok(results) => all_vec.extend(results),
+                            Err(e) => eprintln!("Vector search error in KB {}: {}", name, e),
+                        }
+                    }
+                    all_vec
+                }
+                Ok(_) => Vec::new(),
+                Err(e) => {
+                    eprintln!("Embedding query failed: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok((fts_results, local_results, graph_results, vector_results))
 }
 
-/// Vector KNN search using sqlite-vec documents_vec table.
+/// Deduplicate FTS results by chunk_id (or path if no chunk_id), keeping highest score.
+fn dedup_fts_results(mut results: Vec<FtsResult>) -> Vec<FtsResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen_chunks: HashSet<i64> = HashSet::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    results.retain(|r| {
+        if let Some(id) = r.chunk_id {
+            seen_chunks.insert(id)
+        } else {
+            seen_paths.insert(r.path.clone())
+        }
+    });
+    results
+}
+
+/// Deduplicate local search results by file path, keeping highest score.
+fn dedup_local_results(mut results: Vec<crate::local_search::LocalSearchResult>) -> Vec<crate::local_search::LocalSearchResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen: HashSet<String> = HashSet::new();
+    results.retain(|r| seen.insert(r.file.clone()));
+    results
+}
+
+/// Deduplicate graph results by file path, keeping highest score.
+fn dedup_graph_results(mut results: Vec<crate::graph::GraphSearchResult>) -> Vec<crate::graph::GraphSearchResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen: HashSet<String> = HashSet::new();
+    results.retain(|r| seen.insert(r.file.clone()));
+    results
+}
+
+/// Deduplicate vector results by chunk_id (or path if no chunk_id), keeping highest score.
+fn dedup_vector_results(mut results: Vec<VectorResult>) -> Vec<VectorResult> {
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen_chunks: HashSet<i64> = HashSet::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    results.retain(|r| {
+        if let Some(id) = r.chunk_id {
+            seen_chunks.insert(id)
+        } else {
+            seen_paths.insert(r.path.clone())
+        }
+    });
+    results
+}
+
+/// FTS5 BM25 search — queries `chunks_fts` if available, falls back to `documents_fts`.
+pub fn search_fts(conn: &Connection, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
+    let query = &sanitize_fts_query(query);
+    if query.is_empty() {
+        return Ok(vec![]);
+    }
+    // Check if chunks_fts exists
+    let has_chunks_fts: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+
+    if has_chunks_fts {
+        // Query chunks_fts, join with chunks + documents
+        let mut stmt = conn.prepare(
+            "SELECT d.path,
+                    snippet(chunks_fts, 0, '', '', '...', 32) AS excerpt,
+                    -bm25(chunks_fts) AS score,
+                    c.id AS chunk_id,
+                    c.line_start,
+                    c.line_end,
+                    COALESCE(c.chunk_type, '') AS chunk_type,
+                    c.content
+             FROM chunks_fts
+             JOIN chunks c ON c.id = chunks_fts.rowid
+             JOIN documents d ON d.id = c.doc_id
+             WHERE chunks_fts MATCH ?1
+             ORDER BY score DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+            Ok(FtsResult {
+                path: row.get(0)?,
+                excerpt: row.get(1)?,
+                score: row.get(2)?,
+                chunk_id: Some(row.get(3)?),
+                line_start: Some(row.get::<_, i64>(4)? as u32),
+                line_end: Some(row.get::<_, i64>(5)? as u32),
+                chunk_type: Some(row.get(6)?),
+                content: Some(row.get(7)?),
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        // If chunks_fts is empty, fall back to documents_fts (legacy compatibility)
+        if results.is_empty() {
+            let mut fallback_stmt = conn.prepare(
+                "SELECT d.path,
+                        snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
+                        rank AS score
+                 FROM documents_fts
+                 JOIN documents d ON d.id = documents_fts.rowid
+                 WHERE documents_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let fallback_rows = fallback_stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+                Ok(FtsResult {
+                    path: row.get(0)?,
+                    excerpt: row.get(1)?,
+                    score: -row.get::<_, f64>(2)?,
+                    chunk_id: None,
+                    line_start: None,
+                    line_end: None,
+                    chunk_type: None,
+                    content: None,
+                })
+            })?;
+            for row in fallback_rows {
+                results.push(row?);
+            }
+        }
+        Ok(results)
+    } else {
+        // Legacy fallback: documents_fts
+        let mut stmt = conn.prepare(
+            "SELECT d.path,
+                    snippet(documents_fts, 1, '', '', '...', 32) AS excerpt,
+                    rank AS score
+             FROM documents_fts
+             JOIN documents d ON d.id = documents_fts.rowid
+             WHERE documents_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
+            Ok(FtsResult {
+                path: row.get(0)?,
+                excerpt: row.get(1)?,
+                score: -row.get::<_, f64>(2)?,
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: None,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+}
+
+/// Vector KNN search — queries `chunks_vec` if available, falls back to `documents_vec`.
 pub fn search_vector(
     conn: &Connection,
     query_embedding: &[f32],
     limit: usize,
 ) -> Result<Vec<VectorResult>> {
-    if !db::vec_table_exists(conn) {
-        return Ok(Vec::new());
+    if db::chunks_vec_table_exists(conn) {
+        let mut stmt = conn.prepare(
+            "SELECT cv.chunk_id, cv.distance, d.path, c.line_start, c.line_end, COALESCE(c.chunk_type, '')
+             FROM chunks_vec cv
+             JOIN chunks c ON c.id = cv.chunk_id
+             JOIN documents d ON d.id = c.doc_id
+             WHERE cv.embedding MATCH ?1 AND k = ?2
+             ORDER BY cv.distance",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![query_embedding.as_bytes(), limit as i64],
+            |row| {
+                let distance: f64 = row.get(1)?;
+                Ok(VectorResult {
+                    path: row.get(2)?,
+                    score: 1.0 / (1.0 + distance),
+                    chunk_id: Some(row.get(0)?),
+                    line_start: Some(row.get::<_, i64>(3)? as u32),
+                    line_end: Some(row.get::<_, i64>(4)? as u32),
+                    chunk_type: Some(row.get(5)?),
+                })
+            },
+        )?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    } else if db::vec_table_exists(conn) {
+        // Legacy fallback: documents_vec
+        let mut stmt = conn.prepare(
+            "SELECT dv.document_id, dv.distance, d.path
+             FROM documents_vec dv
+             JOIN documents d ON d.id = dv.document_id
+             WHERE dv.embedding MATCH ?1 AND k = ?2
+             ORDER BY dv.distance",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![query_embedding.as_bytes(), limit as i64],
+            |row| {
+                let distance: f64 = row.get(1)?;
+                Ok(VectorResult {
+                    path: row.get(2)?,
+                    score: 1.0 / (1.0 + distance),
+                    chunk_id: None,
+                    line_start: None,
+                    line_end: None,
+                    chunk_type: None,
+                })
+            },
+        )?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    } else {
+        Ok(Vec::new())
     }
-
-    let mut stmt = conn.prepare(
-        r#"SELECT dv.document_id, dv.distance, d.path
-           FROM documents_vec dv
-           JOIN documents d ON d.id = dv.document_id
-           WHERE dv.embedding MATCH ?1
-           ORDER BY dv.distance
-           LIMIT ?2"#,
-    )?;
-
-    let rows = stmt.query_map(
-        rusqlite::params![query_embedding.as_bytes(), limit as i64],
-        |row| {
-            let distance: f64 = row.get(1)?;
-            Ok(VectorResult {
-                path: row.get(2)?,
-                // Convert distance to similarity score (lower distance = better)
-                score: 1.0 / (1.0 + distance),
-            })
-        },
-    )?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-    Ok(results)
 }
 
 /// Reciprocal Rank Fusion over multiple ranked result sets.
@@ -350,64 +906,181 @@ fn build_unified_results(
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
     limit: usize,
+    include_content: bool,
+    doc_score: bool,
 ) -> Vec<UnifiedResult> {
-    // Build ranked lists for RRF
-    let fts_ranked: Vec<(String, f64)> =
-        fts.iter().map(|r| (r.path.clone(), r.score)).collect();
+    // Key: use chunk-level identity (chunk_id or path) for dedup
+    // We use chunk-keyed ranking: each chunk is its own ranked item
+    // If doc_score: aggregate top-3 chunk scores per document
+
+    // Build ranked lists for RRF using chunk_id where available, else path
+    let fts_ranked: Vec<(String, f64)> = fts.iter().map(|r| {
+        let key = r.chunk_id.map(|id| format!("chunk:{}", id))
+            .unwrap_or_else(|| r.path.clone());
+        (key, r.score)
+    }).collect();
     let local_ranked: Vec<(String, f64)> =
         local.iter().map(|r| (r.file.clone(), r.score)).collect();
     let graph_ranked: Vec<(String, f64)> =
         graph.iter().map(|r| (r.file.clone(), r.score)).collect();
-    let vector_ranked: Vec<(String, f64)> =
-        vector.iter().map(|r| (r.path.clone(), r.score)).collect();
+    let vector_ranked: Vec<(String, f64)> = vector.iter().map(|r| {
+        let key = r.chunk_id.map(|id| format!("chunk:{}", id))
+            .unwrap_or_else(|| r.path.clone());
+        (key, r.score)
+    }).collect();
 
     let merged = reciprocal_rank_fusion(vec![fts_ranked, local_ranked, graph_ranked, vector_ranked], 60.0);
 
-    // Build lookup maps for excerpts/lines/graph info
-    let fts_map: HashMap<&str, &FtsResult> =
+    // Build lookup maps
+    let fts_by_chunk: HashMap<i64, &FtsResult> =
+        fts.iter().filter_map(|r| r.chunk_id.map(|id| (id, r))).collect();
+    let fts_by_path: HashMap<&str, &FtsResult> =
         fts.iter().map(|r| (r.path.as_str(), r)).collect();
     let local_map: HashMap<&str, &LocalSearchResult> =
         local.iter().map(|r| (r.file.as_str(), r)).collect();
     let graph_map: HashMap<&str, &crate::graph::GraphSearchResult> =
         graph.iter().map(|r| (r.file.as_str(), r)).collect();
-    let vector_set: std::collections::HashSet<&str> =
-        vector.iter().map(|r| r.path.as_str()).collect();
+    let vector_by_chunk: HashMap<i64, &VectorResult> =
+        vector.iter().filter_map(|r| r.chunk_id.map(|id| (id, r))).collect();
+    let vector_by_path: HashMap<&str, &VectorResult> =
+        vector.iter().map(|r| (r.path.as_str(), r)).collect();
 
-    merged
+    let mut results: Vec<UnifiedResult> = merged
         .into_iter()
-        .take(limit)
-        .map(|(file, score)| {
+        .map(|(key, score)| {
             let mut sources = Vec::new();
             let mut excerpt = String::new();
-            let mut line = None;
+            let mut line: Option<u32> = None;
+            let mut chunk_id_out: Option<i64> = None;
+            let mut line_start: Option<u32> = None;
+            let mut line_end: Option<u32> = None;
+            let mut chunk_type: Option<String> = None;
+            let mut content_out: Option<String> = None;
+            let file: String;
 
-            if let Some(f) = fts_map.get(file.as_str()) {
-                sources.push("fts".to_string());
-                excerpt = f.excerpt.clone();
+            if let Some(id_str) = key.strip_prefix("chunk:") {
+                let chunk_id: i64 = id_str.parse().unwrap_or(0);
+                chunk_id_out = Some(chunk_id);
+
+                if let Some(f) = fts_by_chunk.get(&chunk_id) {
+                    sources.push("fts".to_string());
+                    excerpt = f.excerpt.clone();
+                    file = f.path.clone();
+                    line_start = f.line_start;
+                    line_end = f.line_end;
+                    chunk_type = f.chunk_type.clone();
+                    if include_content {
+                        content_out = f.content.clone();
+                    }
+                } else if let Some(v) = vector_by_chunk.get(&chunk_id) {
+                    sources.push("vector".to_string());
+                    file = v.path.clone();
+                    line_start = v.line_start;
+                    line_end = v.line_end;
+                    chunk_type = v.chunk_type.clone();
+                } else {
+                    file = key.clone();
+                }
+
+                #[allow(clippy::collapsible_if)]
+                if fts_by_chunk.contains_key(&chunk_id) {
+                    if !sources.contains(&"fts".to_string()) {
+                        sources.push("fts".to_string());
+                    }
+                }
+                if vector_by_chunk.contains_key(&chunk_id) && !sources.contains(&"vector".to_string()) {
+                    sources.push("vector".to_string());
+                }
+            } else {
+                // Path-keyed result (local/graph or legacy)
+                file = key.clone();
+                if let Some(f) = fts_by_path.get(key.as_str()) {
+                    sources.push("fts".to_string());
+                    excerpt = f.excerpt.clone();
+                }
+                if let Some(v) = vector_by_path.get(key.as_str()) {
+                    if !sources.contains(&"vector".to_string()) {
+                        sources.push("vector".to_string());
+                    }
+                    if excerpt.is_empty() && include_content {
+                        let _ = v;
+                    }
+                }
             }
+
             if let Some(l) = local_map.get(file.as_str()) {
-                sources.push("fuzzy".to_string());
+                if !sources.contains(&"fuzzy".to_string()) {
+                    sources.push("fuzzy".to_string());
+                }
                 if excerpt.is_empty() {
                     excerpt = l.matched_text.clone();
                 }
                 line = Some(l.line);
             }
-            if graph_map.contains_key(file.as_str()) {
+            if graph_map.contains_key(file.as_str()) && !sources.contains(&"graph".to_string()) {
                 sources.push("graph".to_string());
             }
-            if vector_set.contains(file.as_str()) {
-                sources.push("vector".to_string());
-            }
+
+            // Build preview (first 200 chars of content)
+            let preview = if !include_content && content_out.is_none() {
+                if !excerpt.is_empty() {
+                    Some(excerpt.chars().take(200).collect::<String>())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             UnifiedResult {
                 file,
                 score,
                 sources,
-                excerpt,
+                excerpt: excerpt.clone(),
                 line,
+                chunk_id: chunk_id_out,
+                line_start,
+                line_end,
+                chunk_type,
+                preview,
+                content: content_out,
             }
         })
-        .collect()
+        .collect();
+
+    if doc_score {
+        // Aggregate: sum top-3 chunk scores per document, return one result per doc
+        let mut doc_scores: HashMap<String, (f64, UnifiedResult)> = HashMap::new();
+        let mut doc_chunk_counts: HashMap<String, usize> = HashMap::new();
+        for result in results {
+            let count = doc_chunk_counts.entry(result.file.clone()).or_insert(0);
+            if *count < 3 {
+                *count += 1;
+                doc_scores
+                    .entry(result.file.clone())
+                    .and_modify(|(s, _)| *s += result.score)
+                    .or_insert((result.score, result));
+            }
+        }
+        let mut doc_results: Vec<UnifiedResult> = doc_scores
+            .into_values()
+            .map(|(agg_score, mut r)| {
+                r.score = agg_score;
+                r.chunk_id = None;
+                r.line_start = None;
+                r.line_end = None;
+                r.chunk_type = None;
+                r
+            })
+            .collect();
+        doc_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        doc_results.truncate(limit);
+        results = doc_results;
+    } else {
+        results.truncate(limit);
+    }
+
+    results
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -419,8 +1092,10 @@ fn print_results(
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
-    mode: SearchMode,
+    mode: &SearchMode,
     limit: usize,
+    include_content: bool,
+    doc_score: bool,
 ) {
     let has_fts = !fts.is_empty();
     let has_local = !local.is_empty();
@@ -458,9 +1133,11 @@ fn print_results(
         }
     }
 
-    if matches!(mode, SearchMode::All | SearchMode::Graph | SearchMode::Fuzzy) {
-        // Show merged RRF results (or pure graph results)
-        let unified = build_unified_results(fts, local, graph, vector, limit);
+    let single_text = mode.has(SearchEngine::Text) && mode.engines.len() == 1;
+    let single_local = mode.run_local();
+    if !single_text && !single_local {
+        // Merged RRF view (default for any engine combination)
+        let unified = build_unified_results(fts, local, graph, vector, limit, include_content, doc_score);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");
@@ -489,7 +1166,7 @@ fn print_results(
         return;
     }
 
-    if matches!(mode, SearchMode::Text) {
+    if single_text {
         println!(
             "{}",
             "── FTS5 (text search) ─────────────────────────────".dimmed()
@@ -511,7 +1188,7 @@ fn print_results(
         }
     }
 
-    if matches!(mode, SearchMode::Local) {
+    if mode.run_local() {
         println!(
             "{}",
             "── Local (fuzzy) ─────────────────────────────────".dimmed()
@@ -559,6 +1236,7 @@ mod tests {
                 path         TEXT UNIQUE NOT NULL,
                 content      TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                extracted    INTEGER NOT NULL DEFAULT 0,
                 updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -581,11 +1259,38 @@ mod tests {
     // ─── SearchMode enum ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_search_mode_equality() {
-        assert_eq!(SearchMode::All, SearchMode::All);
-        assert_ne!(SearchMode::Text, SearchMode::Fuzzy);
-        assert_ne!(SearchMode::Vector, SearchMode::Graph);
-        assert_ne!(SearchMode::Local, SearchMode::All);
+    fn test_search_mode_defaults() {
+        let mode = SearchMode::default_mode();
+        assert!(mode.run_fuzzy());
+        assert!(mode.run_fts());
+        assert!(mode.run_graph());
+        assert!(mode.run_vector());
+        assert!(!mode.run_local());
+    }
+
+    #[test]
+    fn test_search_mode_from_flags() {
+        // No flags → default
+        let mode = SearchMode::from_flags(false, false, false, false);
+        assert!(mode.run_fuzzy());
+        assert!(mode.run_graph());
+        assert!(mode.run_vector());
+
+        // Single flag
+        let mode = SearchMode::from_flags(true, false, false, false);
+        assert!(mode.has(SearchEngine::Text));
+        assert!(!mode.run_graph());
+
+        // Combination
+        let mode = SearchMode::from_flags(false, true, true, false);
+        assert!(mode.run_graph());
+        assert!(mode.run_vector());
+        assert!(!mode.run_fts());
+
+        // Local is exclusive
+        let mode = SearchMode::from_flags(false, false, false, true);
+        assert!(mode.run_local());
+        assert!(!mode.run_fts());
     }
 
     // ─── FTS query ───────────────────────────────────────────────────────────

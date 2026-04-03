@@ -25,6 +25,8 @@ pub struct Config {
     /// Path to the config file (not serialized)
     #[serde(skip)]
     pub config_dir: PathBuf,
+    /// Watch mode configuration
+    pub watch: Option<WatchConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,9 +61,16 @@ pub struct ExtractionConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WatchConfig {
+    /// Polling interval in seconds (default: 300)
+    pub interval: Option<u64>,
+}
+
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     let path = if let Some(p) = config_path {
-        PathBuf::from(p)
+        let raw = PathBuf::from(p);
+        raw.canonicalize().unwrap_or(raw)
     } else {
         find_config()?
     };
@@ -93,16 +102,16 @@ fn find_config() -> Result<PathBuf> {
         }
     }
 
-    // Check global config
-    if let Some(config_dir) = dirs::config_dir() {
-        let global = config_dir.join("brainjar").join("config.toml");
-        if global.exists() {
-            return Ok(global);
+    // Check ~/.brainjar/brainjar.toml
+    if let Some(home) = dirs::home_dir() {
+        let home_config = home.join(".brainjar").join("brainjar.toml");
+        if home_config.exists() {
+            return Ok(home_config);
         }
     }
 
     anyhow::bail!(
-        "No brainjar.toml found in current directory or ancestors, and no global config at ~/.config/brainjar/config.toml.\n\nRun `brainjar init` to create a new config."
+        "No brainjar.toml found. Checked: current directory (and ancestors), ~/.brainjar/.\n\nRun `brainjar init` to create a new config."
     )
 }
 
@@ -144,7 +153,9 @@ impl Config {
             .data_dir
             .as_deref()
             .unwrap_or("~/.brainjar");
-        expand_tilde(raw)
+        // Expand environment variables (${HOME}, ${USER}, etc) then tilde
+        let expanded = expand_env_var(raw);
+        expand_tilde(&expanded)
     }
 
     pub fn expand_path(&self, p: &str) -> PathBuf {
@@ -382,7 +393,8 @@ auto_sync = true
         std::fs::write(&config_path, content).unwrap();
         let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
         assert!(config.knowledge_bases.contains_key("main"));
-        assert_eq!(config.config_dir, dir.path());
+        let expected = dir.path().canonicalize().unwrap_or(dir.path().to_path_buf());
+        assert_eq!(config.config_dir, expected);
     }
 
     #[test]

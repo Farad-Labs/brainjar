@@ -1,0 +1,98 @@
+name: Golden Corpus QA
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  golden-corpus:
+    name: golden-corpus-qa
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      # Test Gemini
+      - name: Sync test corpus (Gemini)
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          cd test-corpus
+          brainjar sync --force
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+      - name: Run golden corpus tests (Gemini)
+        id: test-gemini
+        run: |
+          cargo test --test search_integration -- --ignored --nocapture 2>&1 | tee gemini-results.txt
+          echo "gemini_pass=$(grep -o '[0-9]* passed' gemini-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "gemini_time=$(grep 'finished in' gemini-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
+        continue-on-error: true
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+      # Test OpenAI
+      - name: Sync test corpus (OpenAI)
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          cd test-corpus
+          pwd
+          ls -la *.toml
+          brainjar --config brainjar-openai-large.toml status
+          brainjar --config brainjar-openai-large.toml sync --force
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Run golden corpus tests (OpenAI)
+        id: test-openai
+        run: |
+          BRAINJAR_TEST_CONFIG=test-corpus/brainjar-openai-large.toml \
+          BRAINJAR_TEST_KB=test-corpus-openai \
+            cargo test --test search_integration -- --ignored --nocapture 2>&1 | tee openai-results.txt
+          echo "openai_pass=$(grep -o '[0-9]* passed' openai-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "openai_time=$(grep 'finished in' openai-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # Generate summary
+      - name: Generate summary
+        run: |
+          cat > golden-corpus-summary.md << 'EOF'
+          # Golden Corpus Test Results
+
+          | Provider | Model | Dims | Pass | Fail | Time |
+          |----------|-------|------|------|------|------|
+          | Gemini | gemini-embedding-2-preview | 3072 | ${{ steps.test-gemini.outputs.gemini_pass }}/16 | $(( 16 - ${{ steps.test-gemini.outputs.gemini_pass }} )) | ${{ steps.test-gemini.outputs.gemini_time }} |
+          | OpenAI | text-embedding-3-large | 1024 | ${{ steps.test-openai.outputs.openai_pass }}/16 | $(( 16 - ${{ steps.test-openai.outputs.openai_pass }} )) | ${{ steps.test-openai.outputs.openai_time }} |
+
+          ## Gemini Test Output
+          \`\`\`
+          $(cat gemini-results.txt)
+          \`\`\`
+
+          ## OpenAI Test Output
+          \`\`\`
+          $(cat openai-results.txt)
+          \`\`\`
+          EOF
+          cat golden-corpus-summary.md
+
+      - name: Upload summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-corpus-summary
+          path: golden-corpus-summary.md
+
+      # Fail if either provider failed
+      - name: Check results
+        run: |
+          if [ "${{ steps.test-gemini.outputs.gemini_pass }}" != "16" ] || [ "${{ steps.test-openai.outputs.openai_pass }}" != "16" ]; then
+            echo "Some tests failed — see summary artifact"
+            exit 1
+          fi

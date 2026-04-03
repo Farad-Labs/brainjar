@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="300" />
+  <img src="assets/mascot.jpg" alt="Brainjar Mascot" width="525" />
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@ brainjar gives AI agents persistent, searchable memory backed entirely by SQLite
 
 ## Features
 
-- **Hybrid search** — FTS5 full-text search + graph entity traversal merged via RRF (Reciprocal Rank Fusion)
+- **Hybrid search** — fuzzy-corrected FTS5 + graph traversal + vector KNN, merged via RRF (Reciprocal Rank Fusion)
 - **Vocabulary fuzzy** — typo correction via SQLite Levenshtein vocabulary table (no file scanning)
 - **GraphRAG** — entity/relationship extraction using configurable LLM backends (Gemini, OpenAI, Ollama)
 - **Zero cloud dependencies** — runs fully offline; all data lives in a single `.db` file
@@ -38,30 +38,32 @@ brainjar init
 # Then sync your files
 brainjar sync
 
-# Search (FTS + graph by default, ~33ms)
+# Search (fuzzy + graph + vector by default)
 brainjar search "deployment workflow"
 
-# Fuzzy search — tolerates typos (~100ms)
-brainjar search --fuzzy "deploymnt workflw"
+# Handles typos out of the box
+brainjar search "deploymnt workflw"
 ```
 
 ## Search Modes
 
 | Flag | Engine | Speed | Use when |
 |------|--------|-------|----------|
-| *(default)* | FTS5 BM25 + graph RRF | ~33ms | Fast, accurate searches |
-| `--fuzzy` | Vocabulary-corrected FTS + graph | ~100ms | Typos, partial words, abbreviations |
-| `--text` | FTS5 BM25 only | ~10ms | Pure text relevance, no graph |
-| `--graph` | Entity graph traversal only | ~20ms | Concept/relationship queries |
-| `--local` | Nucleo file scanner | ~50ms | Files not yet synced, raw file:line results |
-| `--exact` | Case-insensitive substring | fast | Literal string matching |
+| *(default)* | Fuzzy FTS5 + graph + vector | ~100ms | Best overall results, handles typos |
+| `--text` | FTS5 BM25 (no fuzzy) | ~10ms | Exact term matching |
+| `--graph` | Entity graph traversal | ~20ms | Concept/relationship queries |
+| `--vector` | Semantic vector (ANN) | ~50ms | Semantic similarity, paraphrases |
+| `--local` | Nucleo file scanner | ~50ms | Files not yet synced |
+| `--smart` | LLM query extraction + default | ~500ms | Conversational/natural language |
+
+Flags are **combinable**: `--graph --vector` runs graph + vector without text search. No flags = full default (fuzzy + graph + vector).
 
 ```bash
-# Default: FTS + graph merged via RRF
+# Default: fuzzy + graph + vector merged via RRF
 brainjar search "deployment workflow"
 
-# Fuzzy: corrects "knowlege grph" → "knowledge graph" before searching
-brainjar search --fuzzy "knowlege grph"
+# Typos corrected automatically
+brainjar search "knowlege grph"
 
 # Text only (BM25 relevance)
 brainjar search --text "entity extraction"
@@ -78,11 +80,22 @@ brainjar search --exact "brainjar.toml"
 # Limit results
 brainjar search --limit 10 "search"
 
+# Smart: LLM extracts 2-5 targeted queries from conversational text
+brainjar search --smart "should we use flash lite for auto-recall entity extraction?"
+# 🧠 Extracted 3 queries: "auto-recall", "flash lite", "entity extraction"
+# Results from all queries, deduplicated and ranked
+
 # Search a specific knowledge base
 brainjar search --kb personal "morning routine"
 
 # JSON output (for piping / agent use)
 brainjar search --json "deployment"
+
+# Return full chunk content instead of previews
+brainjar search --chunks "deployment workflow"
+
+# Aggregate chunk scores to document level
+brainjar search --doc-score "deployment workflow"
 ```
 
 ### How Fuzzy Search Works
@@ -93,13 +106,25 @@ During `brainjar sync`, the vocabulary table is rebuilt from all indexed documen
 2. Compound identifiers are split: `knowledge_graph` → `knowledge`, `graph`; `KnowledgeGraph` → `knowledge`, `graph`
 3. Word frequencies are counted and stored in SQLite
 
-At search time with `--fuzzy`:
+At search time (default mode):
 
 1. Each query word is matched against the vocabulary
 2. If the word exists exactly → kept as-is
 3. If not found → closest match by Levenshtein distance (max 2 for short words, 3 for long)
 4. Corrected query is run through FTS5 + graph
 5. Corrections are shown: `✎ corrected: deploymnt → deployment`
+
+### Smart Search
+
+For conversational or natural language queries, use `--smart` to let the LLM extract 2-5 targeted search terms before running the search:
+
+```bash
+brainjar search --smart "should we use flash lite for auto-recall entity extraction?"
+# 🧠 Extracted 3 queries: "auto-recall", "flash lite", "entity extraction"
+# Results from all queries, deduplicated and ranked by score
+```
+
+Smart search fans out across all extracted queries, deduplicates results by chunk ID, and returns a single ranked list. Requires `[extraction]` config (uses the same LLM provider as GraphRAG). Cost: ~$0.000025 per search with Flash Lite.
 
 ## Entity Extraction (GraphRAG)
 
@@ -122,18 +147,18 @@ Graph search traverses entity relationships to find documents connected to your 
 
 ### Supported Backends
 
-| Backend | Config | Notes |
-|---------|--------|-------|
-| Gemini | `provider = "gemini"` | Flash Lite recommended for cost |
-| OpenAI | `provider = "openai"` | GPT-4o-mini works well |
-| Ollama | `provider = "ollama"` | Local LLM, no API cost |
+| Backend | Status | Embeddings | Best For | Cost (1M tokens) |
+|---------|--------|------------|----------|------------------|
+| Gemini | ✅ Recommended | embedding-2 (3072 dims) | Highest quality (84.0% MTEB) | $0.20 |
+| OpenAI | ✅ Tested | text-embedding-3-small/large (1024 dims) | Cost-sensitive workloads | $0.02–$0.13 |
+| Ollama | ⚠️ Experimental | Local models | Local/offline use | Free (local) |
 
 ## Configuration
 
 brainjar looks for config at:
 1. `--config path/to/brainjar.toml` (explicit)
-2. `./brainjar.toml` (current directory)
-3. `~/.config/brainjar/config.toml` (global)
+2. `./brainjar.toml` (current directory and parent directories)
+3. `~/.brainjar/brainjar.toml` (default home)
 
 ```toml
 # brainjar.toml
@@ -157,11 +182,11 @@ provider = "gemini"
 model = "gemini-3.1-flash-lite-preview"
 enabled = true
 
-# Optional: vector embeddings (coming soon)
+# Optional: vector embeddings (recommended: OpenAI for cost, Gemini for quality)
 [embeddings]
-provider = "gemini"
-model = "text-embedding-004"
-dimensions = 768
+provider = "openai"                                # 10x cheaper than Gemini
+model = "text-embedding-3-small"                   # 62.3% MTEB, 1536 dims (or 1024 with Matryoshka)
+# dimensions = 1024                               # Matryoshka reduction: 67% storage savings
 ```
 
 ### Knowledge Base Options
@@ -175,6 +200,29 @@ watch_paths = [
 ]
 auto_sync = true    # included in `brainjar sync` without --kb flag
 ```
+
+## Watch Mode
+
+Monitor knowledge bases for changes and auto-sync:
+
+```bash
+brainjar watch                    # poll every 5 minutes (default)
+brainjar watch --interval 60      # poll every 60 seconds
+brainjar watch --kb my-notes      # watch specific KB only
+brainjar watch --daemon           # run in background
+brainjar watch --stop             # stop background watcher
+```
+
+Configure default interval in `brainjar.toml`:
+
+```toml
+[watch]
+interval = 300    # seconds
+```
+
+> ⚠️ **Active development warning:** Each sync cycle with changes triggers embedding API calls. For codebases under active development, consider a longer interval or watching specific KBs to manage costs.
+
+Lock files prevent concurrent syncs. If `brainjar sync` is run manually while the watcher is active, one will wait for the other to finish.
 
 ## MCP Server
 
@@ -265,7 +313,7 @@ brainjar search "query"
      ├─ Graph traversal from matching entities
      └─ RRF merge → top-N results
 
-brainjar search --fuzzy "qurey"
+brainjar search "qurey"
      │
      ├─ Correct query via vocabulary (Levenshtein)  ← new
      ├─ FTS5 with corrected terms
@@ -290,10 +338,23 @@ Graph data lives in `~/.brainjar/<kb_name>_graph.db` (GraphQLite).
 
 ```bash
 brainjar sync [kb_name] [--force] [--dry-run] [--json]
-brainjar search <query> [--kb <name>] [--limit N] [--fuzzy|--text|--graph|--local|--exact] [--json]
+brainjar search <query> [--kb <name>] [--limit N] [--text] [--graph] [--vector] [--local] [--smart] [--chunks] [--doc-score] [--json]
 brainjar status [kb_name] [--json]
 brainjar init
 brainjar mcp
+```
+
+### Retrieve (coming in v0.2)
+
+```bash
+# Fetch full content of a chunk by ID
+brainjar retrieve <chunk_id>
+
+# Chunk content + surrounding raw lines from source file
+brainjar retrieve <chunk_id> --lines-before 10 --lines-after 20
+
+# Chunk content + neighboring chunks
+brainjar retrieve <chunk_id> --chunks-before 1 --chunks-after 1
 ```
 
 ## Why brainjar?
@@ -331,9 +392,20 @@ cargo clippy
 cargo install --path .
 ```
 
+### Golden Corpus QA
+
+PRs to `main` run the full golden corpus test suite with **both Gemini and OpenAI** providers. Results are uploaded as a GitHub Actions artifact (`golden-corpus-summary.md`).
+
+- **Gemini:** `gemini-embedding-2-preview` (3072 dims)
+- **OpenAI:** `text-embedding-3-large` (1024 dims)
+- **Pass threshold:** 16/16 tests for both providers
+
 ### Roadmap
 
-- [ ] Vector embeddings (sqlite-vec, Phase 3)
+- [ ] `brainjar retrieve` — fetch full chunk content with line/chunk context (v0.2)
+- [ ] Chunking — split documents into overlapping chunks for better recall (v0.2)
+- [ ] `--chunks` flag on search — return full chunk content instead of previews (v0.2)
+- [ ] `--doc-score` flag on search — aggregate chunk scores to document level (v0.2)
 - [ ] MCP tool: `correct_query` (expose fuzzy correction to agents)
 - [ ] Watch mode: `brainjar sync --watch` (inotify/FSEvents)
 - [ ] Web UI for browsing the knowledge graph

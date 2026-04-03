@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use glob::Pattern;
 use walkdir::WalkDir;
 
+use crate::chunk;
 use crate::config::{Config, KnowledgeBaseConfig};
 use crate::db;
 use crate::embed::Embedder;
@@ -76,16 +77,40 @@ async fn sync_kb_human(
     let total_upsert = changes.to_upsert.len();
     let total_delete = changes.to_delete.len();
 
-    if total_upsert == 0 && total_delete == 0 {
+    // Docs that were synced before but whose extraction was interrupted.
+    // We need their absolute paths too — build from local_files map.
+    let unextracted_paths = if !force {
+        db::get_unextracted_paths(&conn)?
+    } else {
+        Vec::new() // force re-extracts everything via to_upsert
+    };
+    let unextracted: HashMap<String, std::path::PathBuf> = unextracted_paths
+        .into_iter()
+        .filter(|p| !changes.to_upsert.contains_key(p)) // avoid double-counting
+        .filter_map(|p| {
+            local_files.get(&p).cloned().map(|abs| (p, abs))
+        })
+        .collect();
+
+    if total_upsert == 0 && total_delete == 0 && unextracted.is_empty() {
         println!("  {} Nothing to sync", "✓".green());
         return Ok(());
     }
 
-    println!(
-        "  {} files to update, {} to delete",
-        total_upsert.to_string().cyan(),
-        total_delete.to_string().yellow()
-    );
+    if !unextracted.is_empty() && total_upsert == 0 && total_delete == 0 {
+        println!(
+            "  {} {} document(s) pending extraction (interrupted previously)",
+            "⚠".yellow(),
+            unextracted.len().to_string().yellow()
+        );
+    } else {
+
+        println!(
+            "  {} files to update, {} to delete",
+            total_upsert.to_string().cyan(),
+            total_delete.to_string().yellow()
+        );
+    }
 
     if dry_run {
         println!("  {} (dry run, no changes made)", "DRY RUN".yellow().bold());
@@ -132,6 +157,14 @@ async fn sync_kb_human(
                 new_count += 1;
             }
             db::upsert_document(&conn, rel_path, &content, &hash)?;
+            // Chunk the document and (re)insert chunks
+            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                let _ = db::delete_chunks_for_doc(&conn, doc_id);
+                let file_chunks = chunk::chunk_file(rel_path, &content);
+                for c in &file_chunks {
+                    let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
+                }
+            }
             pb.inc(1);
         }
         pb.finish_and_clear();
@@ -160,14 +193,21 @@ async fn sync_kb_human(
     }
 
     // ── Optional: entity extraction via configured LLM ──────────────────────
+    // Extract: newly upserted docs + previously-interrupted docs
+    let docs_to_extract: HashMap<&String, &std::path::PathBuf> = changes
+        .to_upsert
+        .iter()
+        .chain(unextracted.iter())
+        .collect();
+
     if let Some(extraction_cfg) = &config.extraction
-        && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+        && extraction_cfg.enabled && !docs_to_extract.is_empty() {
             let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
             let extractor = Extractor::new(extraction_cfg, api_key, base_url);
             match KnowledgeGraph::open(&db_dir, kb_name) {
                 Ok(kg) => {
-                    let extract_total = changes.to_upsert.len() as u64;
+                    let extract_total = docs_to_extract.len() as u64;
                     let epb = ProgressBar::new(extract_total);
                     epb.set_style(
                         ProgressStyle::default_bar()
@@ -180,11 +220,11 @@ async fn sync_kb_human(
                     let mut total_rels = 0usize;
                     let mut extraction_errors = 0usize;
 
-                    for (rel_path, abs_path) in &changes.to_upsert {
+                    for (rel_path, abs_path) in &docs_to_extract {
                         let display_name = if rel_path.len() > 60 {
                             format!("...{}", &rel_path[rel_path.len() - 57..])
                         } else {
-                            rel_path.clone()
+                            rel_path.to_string()
                         };
                         epb.set_message(display_name);
                         let content = match std::fs::read_to_string(abs_path) {
@@ -202,13 +242,19 @@ async fn sync_kb_human(
                             Ok(result) => {
                                 total_entities += result.entities.len();
                                 total_rels += result.relationships.len();
-                                if let Err(e) = kg.ingest_entities(
+                                let ingest_ok = kg.ingest_entities(
                                     rel_path,
                                     &result.entities,
                                     &result.relationships,
-                                ) {
+                                );
+                                if let Err(e) = ingest_ok {
                                     eprintln!("  ⚠ Graph ingest failed for {}: {}", rel_path, e);
                                     extraction_errors += 1;
+                                } else {
+                                    // Mark as extracted only on full success
+                                    if let Err(e) = db::mark_extracted(&conn, rel_path) {
+                                        eprintln!("  ⚠ mark_extracted failed for {}: {}", rel_path, e);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -243,58 +289,67 @@ async fn sync_kb_human(
             }
         }
 
-    // ── Optional: vector embeddings via sqlite-vec ───────────────────────────
+    // ── Optional: vector embeddings via sqlite-vec (per chunk) ────────────────
     if let Some(embed_cfg) = &config.embeddings
-        && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+        && !changes.to_upsert.is_empty() && db::chunks_vec_table_exists(&conn) {
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
             let embedder = Embedder::new(embed_cfg, api_key, base_url);
-            let paths_and_contents: Vec<(String, String)> = changes
-                .to_upsert
-                .iter()
-                .filter_map(|(rel_path, abs_path)| {
-                    std::fs::read_to_string(abs_path)
-                        .ok()
-                        .map(|c| (rel_path.clone(), c))
-                })
-                .collect();
+
+            // Collect all (chunk_id, content, title) for newly upserted docs
+            let mut chunk_items: Vec<(i64, String, String)> = Vec::new(); // (chunk_id, content, file_stem)
+            for rel_path in changes.to_upsert.keys() {
+                #[allow(clippy::collapsible_if)]
+                if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                    if let Ok(doc_chunks) = db::get_chunks_for_doc(&conn, doc_id) {
+                        let title = std::path::Path::new(rel_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        for (cid, content, _, _, _) in doc_chunks {
+                            chunk_items.push((cid, content, title.clone()));
+                        }
+                    }
+                }
+            }
 
             let mut embedded_count = 0usize;
             let mut embed_errors = 0usize;
 
-            // Batch 20 documents at a time
-            for chunk in paths_and_contents.chunks(20) {
-                let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
-                match embedder.embed_batch(&texts).await {
+            // Batch 100 chunks at a time — matches Gemini batchEmbedContents limit
+            for batch in chunk_items.chunks(100) {
+                let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
+                    (content.as_str(), Some(title.as_str()))
+                }).collect();
+                match embedder.embed_documents(&docs).await {
                     Ok(embeddings) => {
-                        for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
-                            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
-                                use zerocopy::IntoBytes;
-                                if let Err(e) = db::upsert_document_vec(&conn, doc_id, embedding.as_bytes()) {
-                                    eprintln!("  ⚠ Vec upsert failed for {}: {}", rel_path, e);
-                                    embed_errors += 1;
-                                } else {
-                                    embedded_count += 1;
-                                }
+                        for ((chunk_id, _, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                            use zerocopy::IntoBytes;
+                            if let Err(e) = db::upsert_chunk_vec(&conn, *chunk_id, embedding.as_bytes()) {
+                                eprintln!("  ⚠ Chunk vec upsert failed for chunk {}: {}", chunk_id, e);
+                                embed_errors += 1;
+                            } else {
+                                embedded_count += 1;
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("  ⚠ Embedding batch failed: {}", e);
-                        embed_errors += chunk.len();
+                        embed_errors += batch.len();
                     }
                 }
             }
 
             if embed_errors == 0 {
                 println!(
-                    "  {} Generated embeddings ({} documents)",
+                    "  {} Generated embeddings ({} chunks)",
                     "✓".green(),
                     embedded_count
                 );
             } else {
                 println!(
-                    "  {} Generated embeddings ({} documents, {} errors)",
+                    "  {} Generated embeddings ({} chunks, {} errors)",
                     "\u{26a0}".yellow(),
                     embedded_count,
                     embed_errors
@@ -309,14 +364,38 @@ async fn sync_kb_human(
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
     };
-    println!(
-        "\n  {} Synced {} docs ({} new, {} updated) in {}",
-        "✓".green().bold(),
-        total_upsert.to_string().cyan(),
-        new_count.to_string().green(),
-        updated_count.to_string().yellow(),
-        elapsed_str.bold()
-    );
+    let extracted_resumed = unextracted.len();
+    if total_upsert > 0 || extracted_resumed > 0 {
+        let mut parts = Vec::new();
+        if new_count > 0 {
+            parts.push(format!("{} new", new_count.to_string().green()));
+        }
+        if updated_count > 0 {
+            parts.push(format!("{} updated", updated_count.to_string().yellow()));
+        }
+        if extracted_resumed > 0 && total_upsert == 0 {
+            parts.push(format!("{} extracted", extracted_resumed.to_string().cyan()));
+        }
+        let summary = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        };
+        let total = if total_upsert > 0 { total_upsert } else { extracted_resumed };
+        println!(
+            "\n  {} Synced {} docs{} in {}",
+            "✓".green().bold(),
+            total.to_string().cyan(),
+            summary,
+            elapsed_str.bold()
+        );
+    } else {
+        println!(
+            "\n  {} Done in {}",
+            "✓".green().bold(),
+            elapsed_str.bold()
+        );
+    }
 
     Ok(())
 }
@@ -347,6 +426,14 @@ async fn sync_kb_json(
             let content = std::fs::read_to_string(abs_path)?;
             let hash = hash_content(content.as_bytes());
             db::upsert_document(&conn, rel_path, &content, &hash)?;
+            // Chunk the document
+            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                let _ = db::delete_chunks_for_doc(&conn, doc_id);
+                let file_chunks = chunk::chunk_file(rel_path, &content);
+                for c in &file_chunks {
+                    let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
+                }
+            }
         }
         for path in &changes.to_delete {
             db::delete_document(&conn, path)?;
@@ -359,16 +446,33 @@ async fn sync_kb_json(
         let vocab_count = fuzzy::build_vocabulary(&conn).unwrap_or(0);
         result["vocabulary_words"] = serde_json::Value::Number(vocab_count.into());
 
+        // Docs needing extraction: newly upserted + previously interrupted
+        let unextracted_paths = if !force {
+            db::get_unextracted_paths(&conn)?
+        } else {
+            Vec::new()
+        };
+        let unextracted_json: HashMap<String, std::path::PathBuf> = unextracted_paths
+            .into_iter()
+            .filter(|p| !changes.to_upsert.contains_key(p))
+            .filter_map(|p| local_files.get(&p).cloned().map(|abs| (p, abs)))
+            .collect();
+        let docs_to_extract_json: HashMap<&String, &std::path::PathBuf> = changes
+            .to_upsert
+            .iter()
+            .chain(unextracted_json.iter())
+            .collect();
+
         // Optional entity extraction
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
         if let Some(extraction_cfg) = &config.extraction
-            && extraction_cfg.enabled && !changes.to_upsert.is_empty() {
+            && extraction_cfg.enabled && !docs_to_extract_json.is_empty() {
                 let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
                 let extractor = Extractor::new(extraction_cfg, api_key, base_url);
                 if let Ok(kg) = KnowledgeGraph::open(&db_dir, kb_name) {
-                    for (rel_path, abs_path) in &changes.to_upsert {
+                    for (rel_path, abs_path) in &docs_to_extract_json {
                         let content = match std::fs::read_to_string(abs_path) {
                             Ok(c) => c,
                             Err(_) => continue,
@@ -377,38 +481,48 @@ async fn sync_kb_json(
                         if let Ok(res) = extractor.extract(&content, rel_path).await {
                             entities_extracted += res.entities.len();
                             rels_extracted += res.relationships.len();
-                            let _ = kg.ingest_entities(rel_path, &res.entities, &res.relationships);
+                            if kg.ingest_entities(rel_path, &res.entities, &res.relationships).is_ok() {
+                                let _ = db::mark_extracted(&conn, rel_path);
+                            }
                         }
                     }
                 }
             }
 
-        // Vector embeddings (JSON mode)
+        // Vector embeddings (JSON mode) — per chunk
         let mut vectors_embedded = 0usize;
         if let Some(embed_cfg) = &config.embeddings
-            && !changes.to_upsert.is_empty() && db::vec_table_exists(&conn) {
+            && !changes.to_upsert.is_empty() && db::chunks_vec_table_exists(&conn) {
                 let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
                 let embedder = Embedder::new(embed_cfg, api_key, base_url);
-                let paths_and_contents: Vec<(String, String)> = changes
-                    .to_upsert
-                    .iter()
-                    .filter_map(|(rel_path, abs_path)| {
-                        std::fs::read_to_string(abs_path)
-                            .ok()
-                            .map(|c| (rel_path.clone(), c))
-                    })
-                    .collect();
 
-                for chunk in paths_and_contents.chunks(20) {
-                    let texts: Vec<&str> = chunk.iter().map(|(_, c)| c.as_str()).collect();
-                    if let Ok(embeddings) = embedder.embed_batch(&texts).await {
-                        for ((rel_path, _), embedding) in chunk.iter().zip(embeddings.iter()) {
-                            if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
-                                use zerocopy::IntoBytes;
-                                if db::upsert_document_vec(&conn, doc_id, embedding.as_bytes()).is_ok() {
-                                    vectors_embedded += 1;
-                                }
+                let mut chunk_items: Vec<(i64, String, String)> = Vec::new();
+                for rel_path in changes.to_upsert.keys() {
+                    #[allow(clippy::collapsible_if)]
+                    if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
+                        if let Ok(doc_chunks) = db::get_chunks_for_doc(&conn, doc_id) {
+                            let title = std::path::Path::new(rel_path)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            for (cid, content, _, _, _) in doc_chunks {
+                                chunk_items.push((cid, content, title.clone()));
+                            }
+                        }
+                    }
+                }
+
+                for batch in chunk_items.chunks(100) {
+                    let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
+                        (content.as_str(), Some(title.as_str()))
+                    }).collect();
+                    if let Ok(embeddings) = embedder.embed_documents(&docs).await {
+                        for ((chunk_id, _, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                            use zerocopy::IntoBytes;
+                            if db::upsert_chunk_vec(&conn, *chunk_id, embedding.as_bytes()).is_ok() {
+                                vectors_embedded += 1;
                             }
                         }
                     }
@@ -604,6 +718,7 @@ mod tests {
             extraction: None,
             data_dir: Some(config_dir.to_string_lossy().to_string()),
             config_dir: config_dir.to_path_buf(),
+            watch: None,
         }
     }
 

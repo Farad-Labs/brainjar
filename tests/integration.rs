@@ -30,6 +30,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         extraction: None,
         data_dir: Some(config_dir.join(".brainjar").to_string_lossy().to_string()),
         config_dir: config_dir.to_path_buf(),
+        watch: None,
     }
 }
 
@@ -51,7 +52,8 @@ auto_sync = true
 
     let config = brainjar::config::load_config(Some(cfg_path.to_str().unwrap())).unwrap();
     assert!(config.knowledge_bases.contains_key("main"));
-    assert_eq!(config.config_dir, dir.path());
+    let expected = dir.path().canonicalize().unwrap_or(dir.path().to_path_buf());
+    assert_eq!(config.config_dir, expected);
 }
 
 #[test]
