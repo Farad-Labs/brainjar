@@ -6,9 +6,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  golden-corpus:
-    name: golden-corpus-qa
+  test-gemini:
+    name: Gemini (gemini-embedding-2-preview)
     runs-on: ubuntu-latest
+    outputs:
+      pass: ${{ steps.test.outputs.pass }}
+      time: ${{ steps.test.outputs.time }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,8 +20,7 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      # Test Gemini
-      - name: Sync test corpus (Gemini)
+      - name: Sync test corpus
         run: |
           export PATH="$PWD/target/release:$PATH"
           cd test-corpus
@@ -26,18 +28,44 @@ jobs:
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
-      - name: Run golden corpus tests (Gemini)
-        id: test-gemini
+      - name: Run golden corpus tests
+        id: test
         run: |
           cargo test --features golden-corpus --test search_integration -- --ignored --nocapture 2>&1 | tee gemini-results.txt
-          echo "gemini_pass=$(grep -o '[0-9]* passed' gemini-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "gemini_time=$(grep 'finished in' gemini-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
+          echo "pass=$(grep -o '[0-9]* passed' gemini-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "time=$(grep 'finished in' gemini-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
         continue-on-error: true
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
-      # Test OpenAI
-      - name: Sync test corpus (OpenAI)
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-results
+          path: gemini-results.txt
+
+      - name: Check results
+        run: |
+          if [ "${{ steps.test.outputs.pass }}" != "16" ]; then
+            echo "Gemini tests failed: ${{ steps.test.outputs.pass }}/16 passed"
+            exit 1
+          fi
+
+  test-openai:
+    name: OpenAI (text-embedding-3-large)
+    runs-on: ubuntu-latest
+    outputs:
+      pass: ${{ steps.test.outputs.pass }}
+      time: ${{ steps.test.outputs.time }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Sync test corpus
         run: |
           export PATH="$PWD/target/release:$PATH"
           cd test-corpus
@@ -45,19 +73,47 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      - name: Run golden corpus tests (OpenAI)
-        id: test-openai
+      - name: Run golden corpus tests
+        id: test
         run: |
           BRAINJAR_TEST_CONFIG=test-corpus/brainjar-openai-large.toml \
           BRAINJAR_TEST_KB=test-corpus-openai \
             cargo test --features golden-corpus --test search_integration -- --ignored --nocapture 2>&1 | tee openai-results.txt
-          echo "openai_pass=$(grep -o '[0-9]* passed' openai-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "openai_time=$(grep 'finished in' openai-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
+          echo "pass=$(grep -o '[0-9]* passed' openai-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "time=$(grep 'finished in' openai-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
         continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # Generate summary
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: openai-results
+          path: openai-results.txt
+
+      - name: Check results
+        run: |
+          if [ "${{ steps.test.outputs.pass }}" != "16" ]; then
+            echo "OpenAI tests failed: ${{ steps.test.outputs.pass }}/16 passed"
+            exit 1
+          fi
+
+  summary:
+    name: Generate Summary
+    runs-on: ubuntu-latest
+    needs: [test-gemini, test-openai]
+    if: always()
+    steps:
+      - name: Download Gemini results
+        uses: actions/download-artifact@v4
+        with:
+          name: gemini-results
+
+      - name: Download OpenAI results
+        uses: actions/download-artifact@v4
+        with:
+          name: openai-results
+
       - name: Generate summary
         run: |
           cat > golden-corpus-summary.md << 'EOF'
@@ -65,8 +121,8 @@ jobs:
 
           | Provider | Model | Dims | Pass | Fail | Time |
           |----------|-------|------|------|------|------|
-          | Gemini | gemini-embedding-2-preview | 3072 | ${{ steps.test-gemini.outputs.gemini_pass }}/16 | $(( 16 - ${{ steps.test-gemini.outputs.gemini_pass }} )) | ${{ steps.test-gemini.outputs.gemini_time }} |
-          | OpenAI | text-embedding-3-large | 1024 | ${{ steps.test-openai.outputs.openai_pass }}/16 | $(( 16 - ${{ steps.test-openai.outputs.openai_pass }} )) | ${{ steps.test-openai.outputs.openai_time }} |
+          | Gemini | gemini-embedding-2-preview | 3072 | ${{ needs.test-gemini.outputs.pass }}/16 | $(( 16 - ${{ needs.test-gemini.outputs.pass }} )) | ${{ needs.test-gemini.outputs.time }} |
+          | OpenAI | text-embedding-3-large | 1024 | ${{ needs.test-openai.outputs.pass }}/16 | $(( 16 - ${{ needs.test-openai.outputs.pass }} )) | ${{ needs.test-openai.outputs.time }} |
 
           ## Gemini Test Output
           \`\`\`
@@ -80,16 +136,8 @@ jobs:
           EOF
           cat golden-corpus-summary.md
 
-      - name: Upload summary artifact
+      - name: Upload summary
         uses: actions/upload-artifact@v4
         with:
           name: golden-corpus-summary
           path: golden-corpus-summary.md
-
-      # Fail if either provider failed
-      - name: Check results
-        run: |
-          if [ "${{ steps.test-gemini.outputs.gemini_pass }}" != "16" ] || [ "${{ steps.test-openai.outputs.openai_pass }}" != "16" ]; then
-            echo "Some tests failed — see summary artifact"
-            exit 1
-          fi
