@@ -190,15 +190,15 @@ pub fn resolve_data_dir(config_path: &Path) -> PathBuf {
 /// a shorthand for the user's home directory.
 pub fn resolve_data_dir_string(config_path: &Path) -> String {
     let data_dir = resolve_data_dir(config_path);
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rel) = data_dir.strip_prefix(&home) {
-            let rel_str = rel.to_string_lossy();
-            return if rel_str.is_empty() {
-                "~".to_string()
-            } else {
-                format!("~/{}", rel_str)
-            };
-        }
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rel) = data_dir.strip_prefix(&home)
+    {
+        let rel_str = rel.to_string_lossy();
+        return if rel_str.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rel_str)
+        };
     }
     data_dir.to_string_lossy().to_string()
 }
