@@ -197,7 +197,7 @@ pub async fn run_watch(
             };
 
             // Run sync (non-force, non-dry-run)
-            match crate::sync::run_sync(config, Some(name), false, false, false, json).await {
+            match crate::sync::run_sync(config, Some(name), false, false, false, json, false).await {
                 Ok(()) => {
                     // run_sync already prints output
                 }
