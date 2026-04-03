@@ -68,6 +68,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
                 "name": name,
                 "description": kb.description,
                 "db_path": db_path.display().to_string(),
+                "graph_db_path": if graph_db_path.exists() { serde_json::Value::String(graph_db_path.display().to_string()) } else { serde_json::Value::Null },
                 "db_exists": db_exists,
                 "db_size_bytes": db_size_bytes,
                 "graph_db_size_bytes": graph_db_size_bytes,
@@ -85,7 +86,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
             }
             all_statuses.push(entry);
         } else {
-            print_kb_status(name, kb, db_exists, db_size_bytes, graph_db_size_bytes, doc_count, extracted_count, chunk_count, embedding_count, &last_sync, graph_stats.as_ref());
+            print_kb_status(name, kb, &db_path, &graph_db_path, db_exists, db_size_bytes, graph_db_size_bytes, doc_count, extracted_count, chunk_count, embedding_count, &last_sync, graph_stats.as_ref());
         }
     }
 
@@ -115,6 +116,8 @@ fn format_size(bytes: u64) -> String {
 fn print_kb_status(
     name: &str,
     kb: &KnowledgeBaseConfig,
+    db_path: &std::path::Path,
+    graph_db_path: &std::path::Path,
     db_exists: bool,
     db_size_bytes: u64,
     graph_db_size_bytes: Option<u64>,
@@ -153,6 +156,18 @@ fn print_kb_status(
             None => format_size(db_size_bytes).cyan().to_string(),
         };
         println!("  {:<20} {}", "DB size:".dimmed(), size_str);
+        println!(
+            "  {:<20} {}",
+            "DB path:".dimmed(),
+            db_path.display().to_string().dimmed()
+        );
+        if graph_db_path.exists() {
+            println!(
+                "  {:<20} {}",
+                "Graph DB:".dimmed(),
+                graph_db_path.display().to_string().dimmed()
+            );
+        }
     }
     println!(
         "  {:<20} {}",
