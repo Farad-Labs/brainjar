@@ -41,9 +41,6 @@ jobs:
         run: |
           export PATH="$PWD/target/release:$PATH"
           cd test-corpus
-          pwd
-          ls -la *.toml
-          brainjar --config brainjar-openai-large.toml status
           brainjar --config brainjar-openai-large.toml sync --force
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
