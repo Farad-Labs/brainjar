@@ -311,7 +311,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Init => {
-            brainjar::init::run_init().await?;
+            brainjar::init::run_init(cli.config.as_deref()).await?;
         }
         Commands::Mcp => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
