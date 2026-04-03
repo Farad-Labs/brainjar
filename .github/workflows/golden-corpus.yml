@@ -7,6 +7,8 @@ on:
 
 jobs:
   test-gemini:
+    # Skip release-plz version bump PRs — golden corpus already passed on the dev→main PR
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     name: Gemini (gemini-embedding-2-preview)
     runs-on: ubuntu-latest
     outputs:
@@ -53,6 +55,7 @@ jobs:
 
   test-openai:
     name: OpenAI (text-embedding-3-large)
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     outputs:
       pass: ${{ steps.test.outputs.pass }}
@@ -102,7 +105,7 @@ jobs:
     name: Generate Summary
     runs-on: ubuntu-latest
     needs: [test-gemini, test-openai]
-    if: always()
+    if: ${{ always() && !startsWith(github.head_ref, 'release-plz-') }}
     steps:
       - name: Download Gemini results
         uses: actions/download-artifact@v4
