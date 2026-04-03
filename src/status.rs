@@ -34,59 +34,107 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
             None
         };
 
-        let (doc_count, extracted_count, chunk_count, embedding_count, last_sync) = if db_exists {
-            let conn = db::open_db(name, &db_dir)?;
-            let count = db::count_documents(&conn)?;
-            let extracted: i64 = conn
-                .query_row("SELECT COUNT(*) FROM documents WHERE extracted = 1", [], |r| r.get(0))
-                .unwrap_or(0);
-            let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
-            let embeddings: i64 = if db::chunks_vec_table_exists(&conn) {
-                conn.query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0)).unwrap_or(0)
+        let (doc_count, extracted_count, chunk_count, vocab_count, embedding_count, last_sync) =
+            if db_exists {
+                let conn = db::open_db(name, &db_dir)?;
+                let count = db::count_documents(&conn)?;
+                let extracted: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM documents WHERE extracted = 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let chunks: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let vocab: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM vocabulary", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let embeddings: i64 = if db::chunks_vec_table_exists(&conn) {
+                    conn.query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0))
+                        .unwrap_or(0)
+                } else {
+                    -1 // sentinel: vec table not configured
+                };
+                let sync_time = db::get_meta(&conn, "last_sync")?
+                    .unwrap_or_else(|| "Never".to_string());
+                (count, extracted, chunks, vocab, embeddings, sync_time)
             } else {
-                -1 // sentinel: vec table not configured
+                (
+                    0,
+                    0,
+                    0,
+                    0,
+                    -1,
+                    "Never (DB not initialized — run brainjar sync)".to_string(),
+                )
             };
-            let sync_time = db::get_meta(&conn, "last_sync")?.unwrap_or_else(|| "Never".to_string());
-            (count, extracted, chunks, embeddings, sync_time)
-        } else {
-            (0, 0, 0, -1, "Never (DB not initialized — run brainjar sync)".to_string())
-        };
 
         // Graph stats (optional — only if graph DB exists)
-        let graph_stats: Option<crate::graph::GraphStats> = if db_exists
-            && KnowledgeGraph::exists(&db_dir, name)
-        {
-            KnowledgeGraph::open(&db_dir, name)
-                .ok()
-                .and_then(|kg| kg.stats().ok())
-        } else {
-            None
-        };
+        let graph_stats: Option<crate::graph::GraphStats> =
+            if db_exists && KnowledgeGraph::exists(&db_dir, name) {
+                KnowledgeGraph::open(&db_dir, name)
+                    .ok()
+                    .and_then(|kg| kg.stats().ok())
+            } else {
+                None
+            };
 
         if json {
-            let mut entry = serde_json::json!({
+            let vector_db = if embedding_count >= 0 {
+                serde_json::json!({
+                    "path": db_path.display().to_string(),
+                    "size_bytes": db_size_bytes,
+                    "embedding_count": embedding_count,
+                })
+            } else {
+                serde_json::Value::Null
+            };
+
+            let graph_db = if let Some(ref gs) = graph_stats {
+                serde_json::json!({
+                    "path": graph_db_path.display().to_string(),
+                    "size_bytes": graph_db_size_bytes.unwrap_or(0),
+                    "node_count": gs.node_count,
+                    "edge_count": gs.edge_count,
+                })
+            } else {
+                serde_json::Value::Null
+            };
+
+            let entry = serde_json::json!({
                 "name": name,
                 "description": kb.description,
-                "db_path": db_path.display().to_string(),
-                "graph_db_path": if graph_db_path.exists() { serde_json::Value::String(graph_db_path.display().to_string()) } else { serde_json::Value::Null },
                 "db_exists": db_exists,
-                "db_size_bytes": db_size_bytes,
-                "graph_db_size_bytes": graph_db_size_bytes,
                 "document_count": doc_count,
                 "extracted_count": extracted_count,
                 "chunk_count": chunk_count,
-                "embedding_count": if embedding_count >= 0 { serde_json::Value::Number(embedding_count.into()) } else { serde_json::Value::Null },
+                "vocab_count": vocab_count,
                 "last_sync": last_sync,
                 "auto_sync": kb.auto_sync,
                 "watch_paths": kb.watch_paths,
+                "vector_db": vector_db,
+                "graph_db": graph_db,
             });
-            if let Some(ref gs) = graph_stats {
-                entry["graph_nodes"] = serde_json::Value::Number(gs.node_count.into());
-                entry["graph_edges"] = serde_json::Value::Number(gs.edge_count.into());
-            }
             all_statuses.push(entry);
         } else {
-            print_kb_status(name, kb, &db_path, &graph_db_path, db_exists, db_size_bytes, graph_db_size_bytes, doc_count, extracted_count, chunk_count, embedding_count, &last_sync, graph_stats.as_ref());
+            print_kb_status(
+                name,
+                kb,
+                &db_path,
+                &graph_db_path,
+                db_exists,
+                db_size_bytes,
+                graph_db_size_bytes,
+                doc_count,
+                extracted_count,
+                chunk_count,
+                vocab_count,
+                embedding_count,
+                &last_sync,
+                graph_stats.as_ref(),
+            );
         }
     }
 
@@ -112,6 +160,16 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Abbreviate the home directory in a path to `~`.
+fn tilde_path(path: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rel) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rel.display());
+    }
+    path.display().to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_kb_status(
     name: &str,
@@ -124,51 +182,39 @@ fn print_kb_status(
     doc_count: i64,
     extracted_count: i64,
     chunk_count: i64,
+    vocab_count: i64,
     embedding_count: i64, // -1 = vec table not configured
     last_sync: &str,
     graph_stats: Option<&crate::graph::GraphStats>,
 ) {
+    // ── Header ──────────────────────────────────────────────────────────────
     println!("\n{} {}", "📦".cyan(), name.bold().white());
     if let Some(desc) = &kb.description {
         println!("  {}", desc.dimmed());
     }
+
+    // ── Watch / sync metadata ────────────────────────────────────────────────
     println!(
         "  {:<20} {}",
-        "Backend:".dimmed(),
-        "SQLite (local)".cyan()
+        "Watch paths:".dimmed(),
+        kb.watch_paths.join(", ").dimmed()
     );
     println!(
         "  {:<20} {}",
-        "DB exists:".dimmed(),
-        if db_exists {
+        "Auto sync:".dimmed(),
+        if kb.auto_sync {
             "yes".green().to_string()
         } else {
-            "no (run brainjar sync)".yellow().to_string()
+            "no".dimmed().to_string()
         }
     );
-    if db_exists {
-        let size_str = match graph_db_size_bytes {
-            Some(graph_bytes) => format!(
-                "{} (+ {} graph)",
-                format_size(db_size_bytes).cyan(),
-                format_size(graph_bytes).cyan()
-            ),
-            None => format_size(db_size_bytes).cyan().to_string(),
-        };
-        println!("  {:<20} {}", "DB size:".dimmed(), size_str);
-        println!(
-            "  {:<20} {}",
-            "DB path:".dimmed(),
-            db_path.display().to_string().dimmed()
-        );
-        if graph_db_path.exists() {
-            println!(
-                "  {:<20} {}",
-                "Graph DB:".dimmed(),
-                graph_db_path.display().to_string().dimmed()
-            );
-        }
-    }
+    println!(
+        "  {:<20} {}",
+        "Last sync:".dimmed(),
+        last_sync.dimmed()
+    );
+
+    // ── Document / chunk counts ──────────────────────────────────────────────
     println!(
         "  {:<20} {}",
         "Documents:".dimmed(),
@@ -196,58 +242,87 @@ fn print_kb_status(
         "Chunks:".dimmed(),
         chunk_count.to_string().cyan()
     );
-    if embedding_count < 0 {
+    if vocab_count > 0 {
         println!(
             "  {:<20} {}",
-            "Embeddings:".dimmed(),
-            "not configured".dimmed()
-        );
-    } else if chunk_count > 0 && embedding_count < chunk_count {
-        let pending = chunk_count - embedding_count;
-        println!(
-            "  {:<20} {} ({} pending)",
-            "Embeddings:".dimmed(),
-            embedding_count.to_string().cyan(),
-            pending.to_string().yellow(),
-        );
-    } else {
-        println!(
-            "  {:<20} {}",
-            "Embeddings:".dimmed(),
-            format!("{} (all done)", embedding_count).green(),
+            "Vocabulary:".dimmed(),
+            format!("{} words", vocab_count).cyan()
         );
     }
-    println!(
-        "  {:<20} {}",
-        "Last sync:".dimmed(),
-        last_sync.dimmed()
-    );
-    println!(
-        "  {:<20} {}",
-        "Auto sync:".dimmed(),
-        if kb.auto_sync {
-            "yes".green().to_string()
-        } else {
-            "no".dimmed().to_string()
-        }
-    );
-    println!(
-        "  {:<20} {}",
-        "Watch paths:".dimmed(),
-        kb.watch_paths.join(", ").dimmed()
-    );
-    if let Some(gs) = graph_stats {
+
+    // ── Vector DB section ────────────────────────────────────────────────────
+    println!();
+    if embedding_count < 0 {
+        // Vec table not present — embeddings not configured
         println!(
-            "  {:<20} {} nodes, {} edges",
-            "Graph:".dimmed(),
-            gs.node_count.to_string().cyan(),
-            gs.edge_count.to_string().cyan(),
+            "  {:<20} {}",
+            "Vector DB".bold().white(),
+            "not configured (enable embeddings in config)".dimmed()
+        );
+    } else {
+        println!("  {}", "Vector DB".bold().white());
+        println!(
+            "  {:<20} {}",
+            "Path:".dimmed(),
+            tilde_path(db_path).dimmed()
+        );
+        println!(
+            "  {:<20} {}",
+            "Size:".dimmed(),
+            format_size(db_size_bytes).cyan()
+        );
+        if !db_exists {
+            println!(
+                "  {:<20} {}",
+                "Embeddings:".dimmed(),
+                "no DB yet".dimmed()
+            );
+        } else if chunk_count > 0 && embedding_count < chunk_count {
+            let pending = chunk_count - embedding_count;
+            println!(
+                "  {:<20} {} ({} pending)",
+                "Embeddings:".dimmed(),
+                embedding_count.to_string().cyan(),
+                pending.to_string().yellow(),
+            );
+        } else {
+            println!(
+                "  {:<20} {}",
+                "Embeddings:".dimmed(),
+                format!("{} (all done)", embedding_count).green(),
+            );
+        }
+    }
+
+    // ── Graph DB section ─────────────────────────────────────────────────────
+    println!();
+    if let Some(gs) = graph_stats {
+        println!("  {}", "Graph DB".bold().white());
+        println!(
+            "  {:<20} {}",
+            "Path:".dimmed(),
+            tilde_path(graph_db_path).dimmed()
+        );
+        println!(
+            "  {:<20} {}",
+            "Size:".dimmed(),
+            format_size(graph_db_size_bytes.unwrap_or(0)).cyan()
+        );
+        println!(
+            "  {:<20} {}",
+            "Entities:".dimmed(),
+            format!("{} nodes", gs.node_count).cyan()
+        );
+        println!(
+            "  {:<20} {}",
+            "Relationships:".dimmed(),
+            format!("{} edges", gs.edge_count).cyan()
         );
     } else {
         println!(
             "  {:<20} {}",
-            "Graph:".dimmed(),
-            "not built (run brainjar sync with extraction enabled)".dimmed()
+            "Graph DB".bold().white(),
+            "not built (enable extraction in config)".dimmed()
         );
     }
 }
