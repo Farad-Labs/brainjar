@@ -52,7 +52,8 @@ auto_sync = true
 
     let config = brainjar::config::load_config(Some(cfg_path.to_str().unwrap())).unwrap();
     assert!(config.knowledge_bases.contains_key("main"));
-    assert_eq!(config.config_dir, dir.path());
+    let expected = dir.path().canonicalize().unwrap_or(dir.path().to_path_buf());
+    assert_eq!(config.config_dir, expected);
 }
 
 #[test]

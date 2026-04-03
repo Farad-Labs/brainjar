@@ -69,7 +69,8 @@ pub struct WatchConfig {
 
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     let path = if let Some(p) = config_path {
-        PathBuf::from(p)
+        let raw = PathBuf::from(p);
+        raw.canonicalize().unwrap_or(raw)
     } else {
         find_config()?
     };
@@ -392,7 +393,8 @@ auto_sync = true
         std::fs::write(&config_path, content).unwrap();
         let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
         assert!(config.knowledge_bases.contains_key("main"));
-        assert_eq!(config.config_dir, dir.path());
+        let expected = dir.path().canonicalize().unwrap_or(dir.path().to_path_buf());
+        assert_eq!(config.config_dir, expected);
     }
 
     #[test]
