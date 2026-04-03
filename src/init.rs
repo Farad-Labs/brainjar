@@ -315,7 +315,6 @@ pub async fn run_init() -> Result<()> {
     // ── Step 3 — Model defaults ───────────────────────────────────────────────
     println!("\n  {}", "Step 3 of 4 — Model Defaults".bold().white());
     println!("  {}", "─".repeat(40).dimmed());
-    println!("  {}", "Choose which provider handles embeddings and entity extraction.".dimmed());
     println!();
 
     // Embedding provider
@@ -327,6 +326,12 @@ pub async fn run_init() -> Result<()> {
         embed_provider_name = None;
         embed_model = None;
     } else {
+        println!("  {}", "Embeddings convert your text into vectors for semantic search.".dimmed());
+        println!("  {}", "This lets brainjar find results by meaning, not just keywords.".dimmed());
+        println!("  {}", "Gemini = highest quality, OpenAI = lowest cost.".dimmed());
+        println!("  {}", "For ~200 docs: ~$0.25 (Gemini) or ~$0.15 (OpenAI).".dimmed());
+        println!();
+
         let mut embed_opts: Vec<String> = vec!["none (FTS + fuzzy only)".to_string()];
         embed_opts.extend(providers.iter().map(|p| p.name.clone()));
         let eidx = Select::with_theme(&theme)
@@ -339,6 +344,7 @@ pub async fn run_init() -> Result<()> {
             embed_provider_name = None;
             embed_model = None;
             println!("  {} Embeddings: none", "\u{2013}".dimmed());
+            println!();
         } else {
             let pname = providers[eidx - 1].name.clone();
             let default_model = default_embed_model(&pname);
@@ -357,6 +363,8 @@ pub async fn run_init() -> Result<()> {
         }
     }
 
+    println!(); // breathing room before next prompt
+
     // Extraction provider
     let extract_provider_name: Option<String>;
     let extract_model: Option<String>;
@@ -366,6 +374,11 @@ pub async fn run_init() -> Result<()> {
         extract_provider_name = None;
         extract_model = None;
     } else {
+        println!("  {}", "Extraction uses an LLM to pull out people, projects, and".dimmed());
+        println!("  {}", "relationships from your docs — powering graph search.".dimmed());
+        println!("  {}", "Uses a small/cheap model. Cost is negligible (~$0.01 for 200 docs).".dimmed());
+        println!();
+
         let mut ext_opts: Vec<String> = vec!["none (graph search disabled)".to_string()];
         ext_opts.extend(providers.iter().map(|p| p.name.clone()));
         let xidx = Select::with_theme(&theme)
@@ -378,6 +391,7 @@ pub async fn run_init() -> Result<()> {
             extract_provider_name = None;
             extract_model = None;
             println!("  {} Extraction: none", "\u{2013}".dimmed());
+            println!();
         } else {
             let pname = providers[xidx - 1].name.clone();
             let default_model = default_extract_model(&pname);
@@ -395,6 +409,8 @@ pub async fn run_init() -> Result<()> {
             extract_model = Some(model);
         }
     }
+
+    println!(); // breathing room before next step
 
     // ── Step 4 — Knowledge bases ──────────────────────────────────────────────
     println!("\n  {}", "Step 4 of 4 — Knowledge Bases".bold().white());
@@ -772,7 +788,7 @@ fn print_next_steps() {
 
 fn default_embed_model(provider: &str) -> &'static str {
     match provider {
-        "gemini" => "text-embedding-004",
+        "gemini" => "gemini-embedding-2-preview",
         "openai" => "text-embedding-3-small",
         "ollama" => "nomic-embed-text",
         _ => "text-embedding-004",

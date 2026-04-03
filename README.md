@@ -25,17 +25,18 @@ brainjar gives AI agents persistent, searchable memory backed entirely by SQLite
 ## Quick Start
 
 ```bash
-# Install from source
-git clone https://github.com/Farad-Labs/brainjar
-cd brainjar
-cargo install --path .
+# Install Rust (if you don't have it)
+brew install rust        # macOS (Homebrew)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Linux/other
 
-# Initialize a new project in your workspace
+# Install brainjar
+cargo install brainjar
+
+# Initialize in your workspace (interactive wizard)
 cd my-agent-workspace
 brainjar init
 
-# Edit brainjar.toml to configure your knowledge bases
-# Then sync your files
+# Sync your files
 brainjar sync
 
 # Search (fuzzy + graph + vector by default)
@@ -344,7 +345,7 @@ brainjar init
 brainjar mcp
 ```
 
-### Retrieve (coming in v0.2)
+### Retrieve
 
 ```bash
 # Fetch full content of a chunk by ID
@@ -402,10 +403,13 @@ PRs to `main` run the full golden corpus test suite with **both Gemini and OpenA
 
 ### Roadmap
 
-- [ ] `brainjar retrieve` — fetch full chunk content with line/chunk context (v0.2)
-- [ ] Chunking — split documents into overlapping chunks for better recall (v0.2)
-- [ ] `--chunks` flag on search — return full chunk content instead of previews (v0.2)
-- [ ] `--doc-score` flag on search — aggregate chunk scores to document level (v0.2)
+- [x] `brainjar retrieve` — fetch full chunk content with line/chunk context
+- [x] Chunking — split documents into overlapping chunks for better recall
+- [x] `--chunks` flag on search — return full chunk content instead of previews
+- [x] `--doc-score` flag on search — aggregate chunk scores to document level
+- [x] Watch mode: `brainjar watch` (polling-based file watcher)
+- [x] Smart search — conversational queries decomposed into targeted search terms
+- [x] OpenAI embedding support (text-embedding-3-small/large)
+- [x] Composable search modes (--text, --graph, --vector, --local, --smart)
 - [ ] MCP tool: `correct_query` (expose fuzzy correction to agents)
-- [ ] Watch mode: `brainjar sync --watch` (inotify/FSEvents)
 - [ ] Web UI for browsing the knowledge graph
