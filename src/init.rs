@@ -161,7 +161,7 @@ fn info_box(lines: &[&str]) {
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn run_init() -> Result<()> {
+pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     print_mascot();
 
     println!(
@@ -172,15 +172,23 @@ pub async fn run_init() -> Result<()> {
 
     let theme = ColorfulTheme::default();
 
+    // Determine the output config file path
+    let resolved_config_path: PathBuf = if let Some(p) = config_path {
+        PathBuf::from(p)
+    } else {
+        let brainjar_home = dirs::home_dir()
+            .map(|h| h.join(".brainjar"))
+            .unwrap_or_else(|| PathBuf::from(".brainjar"));
+        brainjar_home.join("brainjar.toml")
+    };
+
     // Guard against overwriting existing config
-    let brainjar_home = dirs::home_dir()
-        .map(|h| h.join(".brainjar"))
-        .unwrap_or_else(|| PathBuf::from(".brainjar"));
-    std::fs::create_dir_all(&brainjar_home).ok();
-    let config_path = brainjar_home.join("brainjar.toml");
-    if config_path.exists() {
+    if resolved_config_path.exists() {
         let overwrite = Confirm::with_theme(&theme)
-            .with_prompt("brainjar.toml already exists. Overwrite?")
+            .with_prompt(format!(
+                "Config already exists at {}. Overwrite?",
+                resolved_config_path.display()
+            ))
             .default(false)
             .interact()?;
         if !overwrite {
@@ -541,6 +549,7 @@ pub async fn run_init() -> Result<()> {
 
     // ── Generate brainjar.toml ────────────────────────────────────────────────
     generate_brainjar_toml(
+        &resolved_config_path,
         &data_dir,
         &providers,
         embed_provider_name.as_deref(),
@@ -638,6 +647,7 @@ fn format_api_key_value(key: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn generate_brainjar_toml(
+    config_path: &PathBuf,
     data_dir: &str,
     providers: &[ProviderEntry],
     embed_provider: Option<&str>,
@@ -725,14 +735,15 @@ fn generate_brainjar_toml(
         ));
     }
 
-    let brainjar_home = dirs::home_dir()
-        .map(|h| h.join(".brainjar"))
-        .unwrap_or_else(|| PathBuf::from(".brainjar"));
-    std::fs::create_dir_all(&brainjar_home).ok();
-    let config_path = brainjar_home.join("brainjar.toml");
-    std::fs::write(&config_path, &toml)
+    if let Some(parent) = config_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    std::fs::write(config_path, &toml)
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
-    println!("  {} Generated {}", "\u{2713}".green(), config_path.display().to_string().cyan());
+    println!("  {} Config written to {}", "\u{2713}".green(), config_path.display().to_string().cyan());
 
     Ok(())
 }
