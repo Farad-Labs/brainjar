@@ -143,6 +143,7 @@ pub struct VectorResult {
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
     pub chunk_type: Option<String>,
+    pub content: Option<String>,
 }
 
 /// Use a cheap LLM to extract targeted search queries from conversational text.
@@ -817,7 +818,7 @@ pub fn search_vector(
 ) -> Result<Vec<VectorResult>> {
     if db::chunks_vec_table_exists(conn) {
         let mut stmt = conn.prepare(
-            "SELECT cv.chunk_id, cv.distance, d.path, c.line_start, c.line_end, COALESCE(c.chunk_type, '')
+            "SELECT cv.chunk_id, cv.distance, d.path, c.line_start, c.line_end, COALESCE(c.chunk_type, ''), c.content
              FROM chunks_vec cv
              JOIN chunks c ON c.id = cv.chunk_id
              JOIN documents d ON d.id = c.doc_id
@@ -835,6 +836,7 @@ pub fn search_vector(
                     line_start: Some(row.get::<_, i64>(3)? as u32),
                     line_end: Some(row.get::<_, i64>(4)? as u32),
                     chunk_type: Some(row.get(5)?),
+                    content: row.get(6)?,
                 })
             },
         )?;
@@ -863,6 +865,7 @@ pub fn search_vector(
                     line_start: None,
                     line_end: None,
                     chunk_type: None,
+                    content: None,
                 })
             },
         )?;
@@ -978,6 +981,10 @@ fn build_unified_results(
                     line_start = v.line_start;
                     line_end = v.line_end;
                     chunk_type = v.chunk_type.clone();
+                    // Generate excerpt from chunk content
+                    if let Some(ref text) = v.content {
+                        excerpt = text.chars().take(200).collect::<String>();
+                    }
                 } else {
                     file = key.clone();
                 }
@@ -1002,9 +1009,10 @@ fn build_unified_results(
                     if !sources.contains(&"vector".to_string()) {
                         sources.push("vector".to_string());
                     }
-                    if excerpt.is_empty() && include_content {
-                        let _ = v;
-                    }
+                    if excerpt.is_empty()
+                        && let Some(ref text) = v.content {
+                            excerpt = text.chars().take(200).collect::<String>();
+                        }
                 }
             }
 
