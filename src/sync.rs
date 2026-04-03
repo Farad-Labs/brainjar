@@ -23,6 +23,7 @@ pub async fn run_sync(
     dry_run: bool,
     _no_wait: bool, // no-op: everything is local/instant
     json: bool,
+    reembed: bool,
 ) -> Result<()> {
     let kbs_to_sync: Vec<(&str, &KnowledgeBaseConfig)> = if let Some(name) = kb_name {
         let kb = config
@@ -49,9 +50,9 @@ pub async fn run_sync(
 
     for (name, kb) in &kbs_to_sync {
         if json {
-            sync_kb_json(config, name, kb, force, dry_run).await?;
+            sync_kb_json(config, name, kb, force, dry_run, reembed).await?;
         } else {
-            sync_kb_human(config, name, kb, force, dry_run).await?;
+            sync_kb_human(config, name, kb, force, dry_run, reembed).await?;
         }
     }
 
@@ -64,6 +65,7 @@ async fn sync_kb_human(
     kb: &KnowledgeBaseConfig,
     force: bool,
     dry_run: bool,
+    reembed: bool,
 ) -> Result<()> {
     println!("\n{} {}", "⟳ Syncing".cyan().bold(), kb_name.bold());
 
@@ -92,7 +94,12 @@ async fn sync_kb_human(
         })
         .collect();
 
-    if total_upsert == 0 && total_delete == 0 && unextracted.is_empty() {
+    // Detect if chunks exist but vec table is empty (e.g. after a dimension change)
+    let chunk_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
+    let vec_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0)).unwrap_or(0);
+    let needs_reembed = reembed || (chunk_count > 0 && vec_count == 0 && vec_dims > 0);
+
+    if total_upsert == 0 && total_delete == 0 && unextracted.is_empty() && !needs_reembed {
         println!("  {} Nothing to sync", "✓".green());
         return Ok(());
     }
@@ -293,6 +300,85 @@ async fn sync_kb_human(
             }
         }
 
+    // ── Re-embed all chunks if dimension changed or --reembed flag ───────────
+    if needs_reembed && db::chunks_vec_table_exists(&conn) && changes.to_upsert.is_empty()
+        && let Some(embed_cfg) = &config.embeddings {
+        // Ensure vec table matches current dimensions (drop+recreate if changed)
+        let vec_dims_cfg = embed_cfg.dimensions;
+        if vec_dims_cfg > 0 {
+            db::recreate_chunks_vec_if_needed(&conn, vec_dims_cfg)?;
+        }
+        let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+        let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+        let embedder = Embedder::new(embed_cfg, api_key, base_url);
+
+        // Load all chunks from DB
+        let mut all_chunks: Vec<(i64, String, String)> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT c.id, c.content, d.path FROM chunks c JOIN documents d ON c.doc_id = d.id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?;
+            for row in rows {
+                let (cid, content, path) = row?;
+                let title = std::path::Path::new(&path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                all_chunks.push((cid, content, title));
+            }
+        }
+
+        let reason = if reembed { "--reembed" } else { "dimension change detected" };
+        println!(
+            "  {} Re-embedding {} chunks ({})",
+            "⟳".cyan(),
+            all_chunks.len(),
+            reason
+        );
+
+        let mut embedded_count = 0usize;
+        let mut embed_errors = 0usize;
+
+        for batch in all_chunks.chunks(100) {
+            let docs: Vec<(&str, Option<&str>)> = batch
+                .iter()
+                .map(|(_, content, title)| (content.as_str(), Some(title.as_str())))
+                .collect();
+            match embedder.embed_documents(&docs).await {
+                Ok(embeddings) => {
+                    for ((chunk_id, _, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                        use zerocopy::IntoBytes;
+                        if let Err(e) = db::upsert_chunk_vec(&conn, *chunk_id, embedding.as_bytes()) {
+                            eprintln!("  ⚠ Chunk vec upsert failed for chunk {}: {}", chunk_id, e);
+                            embed_errors += 1;
+                        } else {
+                            embedded_count += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  ⚠ Embedding batch failed: {}", e);
+                    embed_errors += batch.len();
+                }
+            }
+        }
+
+        if embed_errors == 0 {
+            println!("  {} Re-embedded {} chunks", "✓".green(), embedded_count);
+        } else {
+            println!(
+                "  {} Re-embedded {} chunks ({} errors)",
+                "\u{26a0}".yellow(),
+                embedded_count,
+                embed_errors
+            );
+        }
+        } // end if let Some(embed_cfg)
+
     // ── Optional: vector embeddings via sqlite-vec (per chunk) ────────────────
     if let Some(embed_cfg) = &config.embeddings
         && !changes.to_upsert.is_empty() && db::chunks_vec_table_exists(&conn) {
@@ -410,6 +496,7 @@ async fn sync_kb_json(
     kb: &KnowledgeBaseConfig,
     force: bool,
     dry_run: bool,
+    reembed: bool,
 ) -> Result<()> {
     let db_dir = config.effective_db_dir();
     let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
@@ -492,6 +579,60 @@ async fn sync_kb_json(
                     }
                 }
             }
+
+        // Detect dimension change / --reembed for JSON mode
+        let chunk_count_json: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
+        let vec_count_json: i64 = conn.query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0)).unwrap_or(0);
+        let needs_reembed_json = reembed || (chunk_count_json > 0 && vec_count_json == 0 && vec_dims > 0);
+
+        // Re-embed all chunks if needed (and no new docs being upserted — avoid double-embedding)
+        if needs_reembed_json && db::chunks_vec_table_exists(&conn) && changes.to_upsert.is_empty()
+            && let Some(embed_cfg) = &config.embeddings {
+            // Ensure vec table matches current dimensions (drop+recreate if changed)
+            let vec_dims_cfg = embed_cfg.dimensions;
+            if vec_dims_cfg > 0 {
+                db::recreate_chunks_vec_if_needed(&conn, vec_dims_cfg)?;
+            }
+            let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
+            let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
+            let embedder = Embedder::new(embed_cfg, api_key, base_url);
+
+            let mut all_chunks_json: Vec<(i64, String, String)> = Vec::new();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.content, d.path FROM chunks c JOIN documents d ON c.doc_id = d.id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                })?;
+                for row in rows {
+                    let (cid, content, path) = row?;
+                    let title = std::path::Path::new(&path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    all_chunks_json.push((cid, content, title));
+                }
+            }
+
+            let mut reembedded = 0usize;
+            for batch in all_chunks_json.chunks(100) {
+                let docs: Vec<(&str, Option<&str>)> = batch
+                    .iter()
+                    .map(|(_, content, title)| (content.as_str(), Some(title.as_str())))
+                    .collect();
+                if let Ok(embeddings) = embedder.embed_documents(&docs).await {
+                    for ((chunk_id, _, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                        use zerocopy::IntoBytes;
+                        if db::upsert_chunk_vec(&conn, *chunk_id, embedding.as_bytes()).is_ok() {
+                            reembedded += 1;
+                        }
+                    }
+                }
+            }
+            result["vectors_reembedded"] = serde_json::Value::Number(reembedded.into());
+            } // end if let Some(embed_cfg)
 
         // Vector embeddings (JSON mode) — per chunk
         let mut vectors_embedded = 0usize;

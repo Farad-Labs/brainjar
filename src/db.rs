@@ -95,6 +95,12 @@ fn ensure_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
     Ok(())
 }
 
+/// Public wrapper: ensure chunks_vec table matches expected dimensions.
+/// Drops and recreates if dimensions changed.
+pub fn recreate_chunks_vec_if_needed(conn: &Connection, dimensions: usize) -> Result<()> {
+    ensure_chunks_vec_table(conn, dimensions)
+}
+
 /// Create the `chunks_vec` virtual table if it doesn't already exist.
 /// If the table exists with a different dimension count, it is dropped and
 /// recreated — the embeddings will be re-generated on the next sync.
@@ -607,11 +613,17 @@ pub fn search_chunks_fts(
 
 /// Upsert a chunk vector embedding.
 pub fn upsert_chunk_vec(conn: &Connection, chunk_id: i64, embedding: &[u8]) -> Result<()> {
+    // vec0 virtual tables don't support INSERT OR REPLACE —
+    // delete first, then insert.
     conn.execute(
-        "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
+        "DELETE FROM chunks_vec WHERE chunk_id = ?1",
+        rusqlite::params![chunk_id],
+    ).ok(); // ignore if row doesn't exist
+    conn.execute(
+        "INSERT INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
         rusqlite::params![chunk_id, embedding],
     )
-    .context("Failed to upsert chunk vector")?;
+    .with_context(|| format!("Failed to upsert chunk vector (id={}, embed_len={})", chunk_id, embedding.len()))?;
     Ok(())
 }
 

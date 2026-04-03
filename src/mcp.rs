@@ -430,7 +430,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let kb = args.get("kb").and_then(|v| v.as_str());
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            match crate::sync::run_sync(config, kb, force, false, false, false).await {
+            match crate::sync::run_sync(config, kb, force, false, false, false, false).await {
                 Ok(()) => Ok(tool_text("Sync completed successfully".to_string())),
                 Err(e) => Ok(tool_error(e.to_string())),
             }

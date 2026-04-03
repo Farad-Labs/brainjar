@@ -38,6 +38,9 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Re-embed all chunks without re-extracting entities (useful when switching embedding models)
+        #[arg(long)]
+        reembed: bool,
     },
     /// Search the knowledge base
     Search {
@@ -256,9 +259,10 @@ async fn main() -> Result<()> {
             dry_run,
             no_wait,
             json,
+            reembed,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, json)
+            brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, json, reembed)
                 .await?;
         }
         Commands::Search {

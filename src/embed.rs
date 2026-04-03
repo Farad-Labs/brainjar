@@ -224,11 +224,17 @@ impl Embedder {
         for batch in texts.chunks(100) {
             let requests: Vec<serde_json::Value> = batch
                 .iter()
-                .map(|text| serde_json::json!({
-                    "model": format!("models/{}", model),
-                    "content": {"parts": [{"text": text}]},
-                    "taskType": task_type.as_gemini_v1_str()
-                }))
+                .map(|text| {
+                    let mut req = serde_json::json!({
+                        "model": format!("models/{}", model),
+                        "content": {"parts": [{"text": text}]},
+                        "taskType": task_type.as_gemini_v1_str()
+                    });
+                    if self.config.dimensions > 0 {
+                        req["outputDimensionality"] = serde_json::json!(self.config.dimensions);
+                    }
+                    req
+                })
                 .collect();
 
             let mut batch_embeddings =
@@ -249,10 +255,16 @@ impl Embedder {
             // No taskType for v2 — task is encoded in the text prefix
             let requests: Vec<serde_json::Value> = batch
                 .iter()
-                .map(|text| serde_json::json!({
-                    "model": format!("models/{}", model),
-                    "content": {"parts": [{"text": text}]}
-                }))
+                .map(|text| {
+                    let mut req = serde_json::json!({
+                        "model": format!("models/{}", model),
+                        "content": {"parts": [{"text": text}]}
+                    });
+                    if self.config.dimensions > 0 {
+                        req["outputDimensionality"] = serde_json::json!(self.config.dimensions);
+                    }
+                    req
+                })
                 .collect();
 
             let mut batch_embeddings =

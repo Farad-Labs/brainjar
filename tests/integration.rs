@@ -233,7 +233,7 @@ async fn test_full_sync_documents_indexed() {
     std::fs::write(notes_dir.join("beta.md"), "# Beta\nThis is beta.").unwrap();
 
     let config = make_config(dir.path(), &notes_dir);
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
 
@@ -253,7 +253,7 @@ async fn test_full_sync_content_is_searchable() {
     .unwrap();
 
     let config = make_config(dir.path(), &notes_dir);
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
 
@@ -272,7 +272,7 @@ async fn test_full_sync_non_text_files_excluded() {
     std::fs::write(notes_dir.join("image.png"), b"\x89PNG\r\n\x1a\n").unwrap();
 
     let config = make_config(dir.path(), &notes_dir);
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
 
@@ -360,7 +360,7 @@ async fn test_incremental_sync_changed_file_is_re_indexed() {
     let config = make_config(dir.path(), &notes_dir);
 
     // First sync
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -370,7 +370,7 @@ async fn test_incremental_sync_changed_file_is_re_indexed() {
     std::fs::write(notes_dir.join("a.md"), "Updated content A — this changed!").unwrap();
 
     // Second sync
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -401,7 +401,7 @@ async fn test_incremental_sync_new_file_is_added() {
     let config = make_config(dir.path(), &notes_dir);
 
     // First sync: 1 document
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -411,7 +411,7 @@ async fn test_incremental_sync_new_file_is_added() {
     std::fs::write(notes_dir.join("new_file.md"), "Brand new document").unwrap();
 
     // Second sync: 2 documents
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -427,13 +427,13 @@ async fn test_incremental_sync_unchanged_file_hash_stable() {
 
     let config = make_config(dir.path(), &notes_dir);
 
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
     let h1 = db::get_all_hashes(&conn1).unwrap();
 
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -455,7 +455,7 @@ async fn test_delete_detection_removes_from_db() {
     let config = make_config(dir.path(), &notes_dir);
 
     // Sync with both files
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn1 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -465,7 +465,7 @@ async fn test_delete_detection_removes_from_db() {
     std::fs::remove_file(notes_dir.join("delete_me.md")).unwrap();
 
     // Second sync: deleted file should be removed
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
     let conn2 = db::open_db("test", &config.effective_db_dir()).unwrap();
@@ -489,7 +489,7 @@ async fn test_delete_detection_removes_from_fts() {
 
     let config = make_config(dir.path(), &notes_dir);
 
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
 
@@ -499,7 +499,7 @@ async fn test_delete_detection_removes_from_fts() {
     assert!(!before.is_empty(), "should find the unique term before deletion");
 
     std::fs::remove_file(notes_dir.join("gone.md")).unwrap();
-    sync::run_sync(&config, Some("test"), false, false, false, true)
+    sync::run_sync(&config, Some("test"), false, false, false, true, false)
         .await
         .unwrap();
 
