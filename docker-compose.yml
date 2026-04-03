@@ -1,0 +1,22 @@
+services:
+  brainjar:
+    build: .
+    volumes:
+      - brainjar-data:/data        # SQLite DBs and brainjar config
+      - ./my-knowledge:/kb         # Mount your knowledge base source files here
+    environment:
+      # API keys for embedding and entity extraction backends.
+      # Set these in your shell or a .env file — brainjar reads them from the environment.
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Uncomment for Ollama (local LLM)
+      # - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+    # Uncomment to expose MCP port (future HTTP API / TCP MCP transport)
+    # ports:
+    #   - "3333:3333"
+
+volumes:
+  brainjar-data:
+    # Named volume persists across container restarts:
+    # - SQLite knowledge base databases (*.db)
+    # - brainjar.toml config (if placed in /data)
