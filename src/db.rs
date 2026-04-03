@@ -95,6 +95,12 @@ fn ensure_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
     Ok(())
 }
 
+/// Public wrapper: ensure chunks_vec table matches expected dimensions.
+/// Drops and recreates if dimensions changed.
+pub fn recreate_chunks_vec_if_needed(conn: &Connection, dimensions: usize) -> Result<()> {
+    ensure_chunks_vec_table(conn, dimensions)
+}
+
 /// Create the `chunks_vec` virtual table if it doesn't already exist.
 /// If the table exists with a different dimension count, it is dropped and
 /// recreated — the embeddings will be re-generated on the next sync.
@@ -566,6 +572,35 @@ pub fn get_neighboring_chunks(
     Ok((before_chunks, this_chunk, after_chunks))
 }
 
+/// Fetch the first chunk of a document by file path.
+#[allow(clippy::type_complexity)]
+pub fn get_first_chunk_for_file(
+    conn: &Connection,
+    file_path: &str,
+) -> Result<Option<(i64, String, i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.content, c.line_start, c.line_end, COALESCE(c.chunk_type, '')
+         FROM chunks c
+         JOIN documents d ON d.id = c.doc_id
+         WHERE d.path = ?1
+         ORDER BY c.line_start ASC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![file_path], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    match rows.next() {
+        Some(Ok(tuple)) => Ok(Some(tuple)),
+        _ => Ok(None),
+    }
+}
+
 /// FTS search over chunks_fts. Returns matches with BM25 score.
 pub fn search_chunks_fts(
     conn: &Connection,
@@ -607,11 +642,17 @@ pub fn search_chunks_fts(
 
 /// Upsert a chunk vector embedding.
 pub fn upsert_chunk_vec(conn: &Connection, chunk_id: i64, embedding: &[u8]) -> Result<()> {
+    // vec0 virtual tables don't support INSERT OR REPLACE —
+    // delete first, then insert.
     conn.execute(
-        "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
+        "DELETE FROM chunks_vec WHERE chunk_id = ?1",
+        rusqlite::params![chunk_id],
+    ).ok(); // ignore if row doesn't exist
+    conn.execute(
+        "INSERT INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
         rusqlite::params![chunk_id, embedding],
     )
-    .context("Failed to upsert chunk vector")?;
+    .with_context(|| format!("Failed to upsert chunk vector (id={}, embed_len={})", chunk_id, embedding.len()))?;
     Ok(())
 }
 

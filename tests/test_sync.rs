@@ -37,7 +37,7 @@ async fn test_full_sync_cycle_documents_populated() {
 
     let config = make_config(dir.path(), &notes_dir);
 
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -54,7 +54,7 @@ async fn test_full_sync_cycle_fts_works() {
     std::fs::write(notes_dir.join("sqlite.md"), "SQLite is an embedded database.").unwrap();
 
     let config = make_config(dir.path(), &notes_dir);
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -75,7 +75,7 @@ async fn test_search_pipeline_fts_ranked() {
     std::fs::write(notes.join("doc_b.md"), "brainjar is mentioned here").unwrap();
 
     let config = make_config(dir.path(), &notes);
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -102,7 +102,7 @@ async fn test_incremental_sync_only_updates_changed_file() {
     let config = make_config(dir.path(), &notes);
 
     // First sync
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -119,7 +119,7 @@ async fn test_incremental_sync_only_updates_changed_file() {
     std::fs::write(notes.join("changing.md"), "NEW content after modification").unwrap();
 
     // Second sync
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -160,7 +160,7 @@ async fn test_delete_detection() {
     let config = make_config(dir.path(), &notes);
 
     // First sync
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -171,7 +171,7 @@ async fn test_delete_detection() {
     std::fs::remove_file(notes.join("delete_me.md")).unwrap();
 
     // Second sync
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -196,7 +196,7 @@ async fn test_brainjarignore_skips_patterns() {
     std::fs::write(notes.join("secret.md"), "private content").unwrap();
 
     let config = make_config(dir.path(), &notes);
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -216,7 +216,7 @@ async fn test_brainjarignore_with_extension_pattern() {
     std::fs::write(notes.join("notes.txt"), "plain text notes").unwrap();
 
     let config = make_config(dir.path(), &notes);
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -256,7 +256,7 @@ async fn test_sync_without_extraction_extracted_stays_zero() {
     std::fs::write(notes.join("doc.md"), "Hello world").unwrap();
 
     let config = make_config(dir.path(), &notes);
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -280,7 +280,7 @@ async fn test_interrupted_extraction_detected_on_resync() {
     let config = make_config(dir.path(), &notes);
 
     // First sync — files are indexed, extracted=0 (no extraction config)
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -293,7 +293,7 @@ async fn test_interrupted_extraction_detected_on_resync() {
     // (without extraction config they stay pending — the key test is that
     // "nothing to sync" is NOT printed when there are unextracted docs)
     // We verify the paths are still 0 (not falsely marked as done)
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -370,7 +370,7 @@ async fn test_force_resets_extracted_flag() {
     let config = make_config(dir.path(), &notes);
 
     // First sync
-    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
         .await
         .unwrap();
 
@@ -388,7 +388,7 @@ async fn test_force_resets_extracted_flag() {
     drop(conn2);
 
     // Force sync — should re-upsert all docs, resetting extracted=0
-    brainjar::sync::run_sync(&config, Some("test"), true, false, false, false)
+    brainjar::sync::run_sync(&config, Some("test"), true, false, false, false, false)
         .await
         .unwrap();
 

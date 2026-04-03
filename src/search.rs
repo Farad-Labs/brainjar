@@ -43,8 +43,7 @@ pub struct UnifiedResult {
     pub file: String,
     pub score: f64,
     pub sources: Vec<String>,
-    pub excerpt: String,
-    pub line: Option<u32>,
+    pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,10 +52,6 @@ pub struct UnifiedResult {
     pub line_end: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
 }
 
 /// Individual search engines that can be combined.
@@ -143,6 +138,7 @@ pub struct VectorResult {
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
     pub chunk_type: Option<String>,
+    pub content: Option<String>,
 }
 
 /// Use a cheap LLM to extract targeted search queries from conversational text.
@@ -290,7 +286,8 @@ pub async fn run_search(
         all_vector = dedup_vector_results(all_vector);
 
         if json {
-            let unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
@@ -482,7 +479,8 @@ pub async fn run_search(
     };
 
     if json {
-        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
+        enrich_graph_only_results(config, &mut unified);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
             let corrections_json: Vec<serde_json::Value> = query_corrections
@@ -817,7 +815,7 @@ pub fn search_vector(
 ) -> Result<Vec<VectorResult>> {
     if db::chunks_vec_table_exists(conn) {
         let mut stmt = conn.prepare(
-            "SELECT cv.chunk_id, cv.distance, d.path, c.line_start, c.line_end, COALESCE(c.chunk_type, '')
+            "SELECT cv.chunk_id, cv.distance, d.path, c.line_start, c.line_end, COALESCE(c.chunk_type, ''), c.content
              FROM chunks_vec cv
              JOIN chunks c ON c.id = cv.chunk_id
              JOIN documents d ON d.id = c.doc_id
@@ -835,6 +833,7 @@ pub fn search_vector(
                     line_start: Some(row.get::<_, i64>(3)? as u32),
                     line_end: Some(row.get::<_, i64>(4)? as u32),
                     chunk_type: Some(row.get(5)?),
+                    content: row.get(6)?,
                 })
             },
         )?;
@@ -863,6 +862,7 @@ pub fn search_vector(
                     line_start: None,
                     line_end: None,
                     chunk_type: None,
+                    content: None,
                 })
             },
         )?;
@@ -906,7 +906,7 @@ fn build_unified_results(
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
     limit: usize,
-    include_content: bool,
+    _include_content: bool, // deprecated: content always included now
     doc_score: bool,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
@@ -950,12 +950,10 @@ fn build_unified_results(
         .map(|(key, score)| {
             let mut sources = Vec::new();
             let mut excerpt = String::new();
-            let mut line: Option<u32> = None;
             let mut chunk_id_out: Option<i64> = None;
             let mut line_start: Option<u32> = None;
             let mut line_end: Option<u32> = None;
             let mut chunk_type: Option<String> = None;
-            let mut content_out: Option<String> = None;
             let file: String;
 
             if let Some(id_str) = key.strip_prefix("chunk:") {
@@ -964,20 +962,18 @@ fn build_unified_results(
 
                 if let Some(f) = fts_by_chunk.get(&chunk_id) {
                     sources.push("fts".to_string());
-                    excerpt = f.excerpt.clone();
+                    excerpt = f.content.clone().unwrap_or_default();
                     file = f.path.clone();
                     line_start = f.line_start;
                     line_end = f.line_end;
                     chunk_type = f.chunk_type.clone();
-                    if include_content {
-                        content_out = f.content.clone();
-                    }
                 } else if let Some(v) = vector_by_chunk.get(&chunk_id) {
                     sources.push("vector".to_string());
                     file = v.path.clone();
                     line_start = v.line_start;
                     line_end = v.line_end;
                     chunk_type = v.chunk_type.clone();
+                    excerpt = v.content.clone().unwrap_or_default();
                 } else {
                     file = key.clone();
                 }
@@ -996,14 +992,14 @@ fn build_unified_results(
                 file = key.clone();
                 if let Some(f) = fts_by_path.get(key.as_str()) {
                     sources.push("fts".to_string());
-                    excerpt = f.excerpt.clone();
+                    excerpt = f.content.clone().unwrap_or_default();
                 }
                 if let Some(v) = vector_by_path.get(key.as_str()) {
                     if !sources.contains(&"vector".to_string()) {
                         sources.push("vector".to_string());
                     }
-                    if excerpt.is_empty() && include_content {
-                        let _ = v;
+                    if excerpt.is_empty() {
+                        excerpt = v.content.clone().unwrap_or_default();
                     }
                 }
             }
@@ -1015,38 +1011,65 @@ fn build_unified_results(
                 if excerpt.is_empty() {
                     excerpt = l.matched_text.clone();
                 }
-                line = Some(l.line);
             }
             if graph_map.contains_key(file.as_str()) && !sources.contains(&"graph".to_string()) {
                 sources.push("graph".to_string());
             }
 
-            // Build preview (first 200 chars of content)
-            let preview = if !include_content && content_out.is_none() {
-                if !excerpt.is_empty() {
-                    Some(excerpt.chars().take(200).collect::<String>())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
             UnifiedResult {
                 file,
                 score,
                 sources,
-                excerpt: excerpt.clone(),
-                line,
+                content: excerpt.clone(),
                 chunk_id: chunk_id_out,
                 line_start,
                 line_end,
                 chunk_type,
-                preview,
-                content: content_out,
             }
         })
         .collect();
+
+    // Collapse path-keyed results into chunk-keyed results for the same file.
+    // Graph search returns file paths as keys, vector returns chunk:{id} keys.
+    // Without this, the same file can appear twice.
+    {
+        let mut chunk_files: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut path_only: HashMap<String, usize> = HashMap::new();
+
+        for (i, r) in results.iter().enumerate() {
+            if r.chunk_id.is_some() {
+                chunk_files.entry(r.file.clone()).or_default().push(i);
+            } else {
+                path_only.insert(r.file.clone(), i);
+            }
+        }
+
+        let mut indices_to_remove: Vec<usize> = Vec::new();
+        for (file, path_idx) in &path_only {
+            if let Some(chunk_indices) = chunk_files.get(file) {
+                let extra_sources: Vec<String> = results[*path_idx].sources.clone();
+                let extra_score = results[*path_idx].score;
+
+                for &ci in chunk_indices {
+                    for src in &extra_sources {
+                        if !results[ci].sources.contains(src) {
+                            results[ci].sources.push(src.clone());
+                        }
+                    }
+                    results[ci].score += extra_score;
+                }
+
+                indices_to_remove.push(*path_idx);
+            }
+        }
+
+        indices_to_remove.sort_unstable();
+        for idx in indices_to_remove.into_iter().rev() {
+            results.remove(idx);
+        }
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
 
     if doc_score {
         // Aggregate: sum top-3 chunk scores per document, return one result per doc
@@ -1081,6 +1104,31 @@ fn build_unified_results(
     }
 
     results
+}
+
+/// Enrich graph-only results (no FTS/vector match) with content from the chunks table.
+fn enrich_graph_only_results(config: &Config, results: &mut [UnifiedResult]) {
+    let db_dir = config.effective_db_dir();
+    for result in results.iter_mut() {
+        if result.content.is_empty()
+            && result.chunk_id.is_none()
+            && result.sources.contains(&"graph".to_string())
+        {
+            for kb_name in config.knowledge_bases.keys() {
+                if let Ok(conn) = db::open_db(kb_name, &db_dir)
+                    && let Ok(Some((id, content, ls, le, ct))) =
+                        db::get_first_chunk_for_file(&conn, &result.file)
+                {
+                    result.content = content;
+                    result.chunk_id = Some(id);
+                    result.line_start = Some(ls as u32);
+                    result.line_end = Some(le as u32);
+                    result.chunk_type = Some(ct);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,18 +1196,9 @@ fn print_results(
                 result.file.cyan().bold(),
                 format!("({})", sources).dimmed(),
             );
-            if !result.excerpt.is_empty() {
-                let excerpt = result.excerpt.replace('\n', " ");
-                if let Some(ln) = result.line {
-                    println!(
-                        "     {}:{} {}",
-                        result.file.dimmed(),
-                        ln,
-                        format!("...{}...", excerpt).dimmed()
-                    );
-                } else {
-                    println!("     {}", format!("...{}...", excerpt).dimmed());
-                }
+            if !result.content.is_empty() {
+                let content_preview = result.content.chars().take(200).collect::<String>().replace('\n', " ");
+                println!("     {}", format!("...{}...", content_preview).dimmed());
             }
             println!();
         }
@@ -1179,8 +1218,8 @@ fn print_results(
                     format!("[{:.4}]", r.score).green(),
                     r.path.cyan().bold(),
                 );
-                let excerpt = r.excerpt.replace('\n', " ");
-                println!("     {}", format!("...{}...", excerpt).dimmed());
+                let content_preview = r.content.clone().unwrap_or_default().chars().take(200).collect::<String>().replace('\n', " ");
+                println!("     {}", format!("...{}...", content_preview).dimmed());
                 println!();
             }
         } else {

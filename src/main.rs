@@ -35,9 +35,15 @@ enum Commands {
         /// (no-op in v2: sync is always instant)
         #[arg(long, hide = true)]
         no_wait: bool,
-        /// Output as JSON
-        #[arg(long)]
+        /// Human-readable output (default: JSON)
+        #[arg(short = 'H', long)]
+        human: bool,
+        /// (deprecated: JSON is now the default)
+        #[arg(long, hide = true)]
         json: bool,
+        /// Re-embed all chunks without re-extracting entities (useful when switching embedding models)
+        #[arg(long)]
+        reembed: bool,
     },
     /// Search the knowledge base
     Search {
@@ -49,8 +55,11 @@ enum Commands {
         /// Maximum number of results
         #[arg(long, default_value = "5")]
         limit: usize,
-        /// Output as JSON
-        #[arg(long)]
+        /// Human-readable output (default: JSON)
+        #[arg(short = 'H', long)]
+        human: bool,
+        /// (deprecated: JSON is now the default)
+        #[arg(long, hide = true)]
         json: bool,
         /// Local fuzzy file search (nucleo) — cannot combine with other modes
         #[arg(long, conflicts_with = "text", conflicts_with = "graph", conflicts_with = "vector")]
@@ -81,14 +90,20 @@ enum Commands {
     Status {
         /// Knowledge base name (default: all KBs)
         kb_name: Option<String>,
-        /// Output as JSON
-        #[arg(long)]
+        /// Human-readable output (default: JSON)
+        #[arg(short = 'H', long)]
+        human: bool,
+        /// (deprecated: JSON is now the default)
+        #[arg(long, hide = true)]
         json: bool,
     },
     /// List all configured knowledge bases
     List {
-        /// Output as JSON
-        #[arg(long)]
+        /// Human-readable output (default: JSON)
+        #[arg(short = 'H', long)]
+        human: bool,
+        /// (deprecated: JSON is now the default)
+        #[arg(long, hide = true)]
         json: bool,
     },
     /// Watch for file changes and auto-sync
@@ -105,8 +120,11 @@ enum Commands {
         /// Stop running daemon
         #[arg(long)]
         stop: bool,
-        /// Output as JSON
-        #[arg(long)]
+        /// Human-readable output (default: JSON)
+        #[arg(short = 'H', long)]
+        human: bool,
+        /// (deprecated: JSON is now the default)
+        #[arg(long, hide = true)]
         json: bool,
     },
     /// Initialize a new brainjar project
@@ -129,8 +147,11 @@ enum Commands {
         /// Number of following chunks to include
         #[arg(long, default_value = "0")]
         chunks_after: usize,
-        /// Output as JSON
-        #[arg(long)]
+        /// Human-readable output (default: JSON)
+        #[arg(short = 'H', long)]
+        human: bool,
+        /// (deprecated: JSON is now the default)
+        #[arg(long, hide = true)]
         json: bool,
     },
 }
@@ -255,17 +276,20 @@ async fn main() -> Result<()> {
             force,
             dry_run,
             no_wait,
-            json,
+            human,
+            json: _,
+            reembed,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, json)
+            brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, !human, reembed)
                 .await?;
         }
         Commands::Search {
             query,
             kb,
             limit,
-            json,
+            human,
+            json: _,
             local,
             text,
             graph,
@@ -277,23 +301,24 @@ async fn main() -> Result<()> {
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             let mode = brainjar::search::SearchMode::from_flags(text, graph, vector, local);
-            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score, smart)
+            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, !human, mode, exact, chunks, doc_score, smart)
                 .await?;
         }
-        Commands::Status { kb_name, json } => {
+        Commands::Status { kb_name, human, json: _ } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            brainjar::status::run_status(&config, kb_name.as_deref(), json).await?;
+            brainjar::status::run_status(&config, kb_name.as_deref(), !human).await?;
         }
-        Commands::List { json } => {
+        Commands::List { human, json: _ } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            run_list(&config, json).await?;
+            run_list(&config, !human).await?;
         }
         Commands::Watch {
             interval,
             kb,
             daemon,
             stop,
-            json,
+            human,
+            json: _,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             let effective_interval = config
@@ -304,14 +329,14 @@ async fn main() -> Result<()> {
             if stop {
                 brainjar::watch::stop_daemon(&config)?;
             } else if daemon {
-                brainjar::watch::start_daemon(&config, effective_interval, kb.as_deref(), json)?;
+                brainjar::watch::start_daemon(&config, effective_interval, kb.as_deref(), !human)?;
             } else {
-                brainjar::watch::run_watch(&config, kb.as_deref(), effective_interval, json)
+                brainjar::watch::run_watch(&config, kb.as_deref(), effective_interval, !human)
                     .await?;
             }
         }
         Commands::Init => {
-            brainjar::init::run_init().await?;
+            brainjar::init::run_init(cli.config.as_deref()).await?;
         }
         Commands::Mcp => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
@@ -323,7 +348,8 @@ async fn main() -> Result<()> {
             lines_after,
             chunks_before,
             chunks_after,
-            json,
+            human,
+            json: _,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             run_retrieve(
@@ -333,7 +359,7 @@ async fn main() -> Result<()> {
                 lines_after,
                 chunks_before,
                 chunks_after,
-                json,
+                !human,
             )
             .await?;
         }

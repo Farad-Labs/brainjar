@@ -7,7 +7,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config as RlConfig, Editor, Helper};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rustyline helper: filename completion only
@@ -46,14 +46,14 @@ impl Validator for PathHelper {}
 // Internal config structures gathered from the wizard
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct KbConfig {
+pub struct KbConfig {
     name: String,
     watch_paths: Vec<String>,
     description: Option<String>,
     auto_sync: bool,
 }
 
-struct ProviderEntry {
+pub struct ProviderEntry {
     name: String,   // "gemini" | "openai" | "ollama"
     api_key: String,
     base_url: String,
@@ -141,13 +141,14 @@ fn print_mascot() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn info_box(lines: &[&str]) {
-    let width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 4;
-    let border = "\u{2550}".repeat(width - 2);
+    let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    let inner_width = max_len + 4; // 2 padding each side
+    let border = "\u{2550}".repeat(inner_width);
     println!("  {}{}{}", "\u{2554}".cyan(), border.cyan(), "\u{2557}".cyan());
     for line in lines {
-        let pad = width - 4 - line.len();
+        let pad = max_len - line.len();
         println!(
-            "  {}   {}{} {}",
+            "  {}  {}{}  {}",
             "\u{2551}".cyan(),
             line,
             " ".repeat(pad),
@@ -161,7 +162,49 @@ fn info_box(lines: &[&str]) {
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn run_init() -> Result<()> {
+// ─────────────────────────────────────────────────────────────────────────────
+// Smart data_dir resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compute the appropriate data_dir for a given config file path.
+///
+/// Rules:
+/// - If the config is already inside a `.brainjar` directory, use that directory
+///   directly (no double-nesting).
+/// - Otherwise, create a `.brainjar` subdirectory next to the config file.
+pub fn resolve_data_dir(config_path: &Path) -> PathBuf {
+    let config_parent = config_path.parent().unwrap_or(Path::new("."));
+    if config_parent
+        .file_name()
+        .map(|n| n == ".brainjar")
+        .unwrap_or(false)
+    {
+        // Config is already inside a .brainjar dir — use it directly
+        config_parent.to_path_buf()
+    } else {
+        // Create a .brainjar subdirectory next to the config
+        config_parent.join(".brainjar")
+    }
+}
+
+/// Like [`resolve_data_dir`] but returns a human-readable string using `~` as
+/// a shorthand for the user's home directory.
+pub fn resolve_data_dir_string(config_path: &Path) -> String {
+    let data_dir = resolve_data_dir(config_path);
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rel) = data_dir.strip_prefix(&home)
+    {
+        let rel_str = rel.to_string_lossy();
+        return if rel_str.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rel_str)
+        };
+    }
+    data_dir.to_string_lossy().to_string()
+}
+
+pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     print_mascot();
 
     println!(
@@ -172,15 +215,23 @@ pub async fn run_init() -> Result<()> {
 
     let theme = ColorfulTheme::default();
 
+    // Determine the output config file path
+    let resolved_config_path: PathBuf = if let Some(p) = config_path {
+        PathBuf::from(p)
+    } else {
+        let brainjar_home = dirs::home_dir()
+            .map(|h| h.join(".brainjar"))
+            .unwrap_or_else(|| PathBuf::from(".brainjar"));
+        brainjar_home.join("brainjar.toml")
+    };
+
     // Guard against overwriting existing config
-    let brainjar_home = dirs::home_dir()
-        .map(|h| h.join(".brainjar"))
-        .unwrap_or_else(|| PathBuf::from(".brainjar"));
-    std::fs::create_dir_all(&brainjar_home).ok();
-    let config_path = brainjar_home.join("brainjar.toml");
-    if config_path.exists() {
+    if resolved_config_path.exists() {
         let overwrite = Confirm::with_theme(&theme)
-            .with_prompt("brainjar.toml already exists. Overwrite?")
+            .with_prompt(format!(
+                "Config already exists at {}. Overwrite?",
+                resolved_config_path.display()
+            ))
             .default(false)
             .interact()?;
         if !overwrite {
@@ -195,19 +246,22 @@ pub async fn run_init() -> Result<()> {
     println!("  {}", "Where should Brainjar store its databases?".dimmed());
     println!();
 
-    let storage_choices = &[
-        "~/.brainjar  (recommended — survives project moves)",
+    // Compute the smart default based on where the config file will live
+    let smart_data_dir = resolve_data_dir_string(&resolved_config_path);
+    let opt0_label = format!("{}  (recommended based on config location)", smart_data_dir);
+    let storage_choices = vec![
+        opt0_label.as_str(),
         ".brainjar    (current directory — project-local)",
         "Custom path",
     ];
     let storage_idx = Select::with_theme(&theme)
         .with_prompt("  Storage location")
-        .items(storage_choices)
+        .items(&storage_choices)
         .default(0)
         .interact()?;
 
     let data_dir: String = match storage_idx {
-        0 => "~/.brainjar".to_string(),
+        0 => smart_data_dir.clone(),
         1 => ".brainjar".to_string(),
         _ => {
             let custom: String = Input::with_theme(&theme)
@@ -230,8 +284,8 @@ pub async fn run_init() -> Result<()> {
     info_box(&[
         "Brainjar uses AI models for two things:",
         "",
-        "  1. Embeddings   — converting notes into searchable vectors",
-        "  2. Extraction   — finding people, projects, concepts in docs",
+        "  1. Embeddings   - converting notes into searchable vectors",
+        "  2. Extraction   - finding people, projects, concepts in docs",
         "",
         "You can use any OpenAI-compatible API, or choose from the",
         "defaults below that balance cost and quality.",
@@ -253,7 +307,7 @@ pub async fn run_init() -> Result<()> {
         let provider_name = match idx {
             0 => "gemini".to_string(),
             1 => "openai".to_string(),
-            2 => "ollama".to_string(),
+            2 => "ollama (experimental)".to_string(),
             _ => {
                 let name: String = Input::with_theme(&theme)
                     .with_prompt("  Provider name (used as key in config)")
@@ -320,11 +374,13 @@ pub async fn run_init() -> Result<()> {
     // Embedding provider
     let embed_provider_name: Option<String>;
     let embed_model: Option<String>;
+    let embed_dimensions: Option<usize>;
 
     if providers.is_empty() {
         println!("  {} Skipping embeddings (no providers configured)", "\u{2013}".dimmed());
         embed_provider_name = None;
         embed_model = None;
+        embed_dimensions = None;
     } else {
         println!("  {}", "Embeddings convert your text into vectors for semantic search.".dimmed());
         println!("  {}", "This lets brainjar find results by meaning, not just keywords.".dimmed());
@@ -343,23 +399,117 @@ pub async fn run_init() -> Result<()> {
         if eidx == 0 {
             embed_provider_name = None;
             embed_model = None;
+            embed_dimensions = None;
             println!("  {} Embeddings: none", "\u{2013}".dimmed());
             println!();
         } else {
             let pname = providers[eidx - 1].name.clone();
-            let default_model = default_embed_model(&pname);
-            let model: String = Input::with_theme(&theme)
-                .with_prompt(format!("  Embedding model ({})", &pname))
-                .default(default_model.to_string())
-                .interact_text()?;
+
+            // Model selection — multiple choice for gemini/openai, free text for ollama/other
+            let model: String = match pname.as_str() {
+                "gemini" => {
+                    let model_choices = &[
+                        "gemini-embedding-2-preview  (recommended)",
+                        "gemini-embedding-001",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Embedding model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "gemini-embedding-2-preview".to_string(),
+                        1 => "gemini-embedding-001".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                "openai" => {
+                    let model_choices = &[
+                        "text-embedding-3-small  (recommended)",
+                        "text-embedding-3-large",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Embedding model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "text-embedding-3-small".to_string(),
+                        1 => "text-embedding-3-large".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                _ => {
+                    // Ollama or other — free text
+                    let default_model = default_embed_model(&pname);
+                    Input::with_theme(&theme)
+                        .with_prompt(format!("  Embedding model ({})", &pname))
+                        .default(default_model.to_string())
+                        .interact_text()?
+                }
+            };
+
+            println!();
+
+            // Dimension selection
+            let dims: usize = {
+                let choices = dimension_choices(&model);
+                if choices.is_empty() {
+                    // Custom model — ask for dimensions via free text
+                    let d: String = Input::with_theme(&theme)
+                        .with_prompt("  Embedding dimensions")
+                        .default(default_dimensions(&model).to_string())
+                        .interact_text()?;
+                    d.trim().parse::<usize>().unwrap_or_else(|_| default_dimensions(&model))
+                } else {
+                    // Build a labeled list; last item is always "Custom"
+                    let mut dim_opts: Vec<String> = choices
+                        .iter()
+                        .map(|(v, recommended)| {
+                            if *recommended {
+                                format!("{}  (recommended)", v)
+                            } else {
+                                v.to_string()
+                            }
+                        })
+                        .collect();
+                    dim_opts.push("Custom".to_string());
+
+                    let didx = Select::with_theme(&theme)
+                        .with_prompt("  Embedding dimensions")
+                        .items(&dim_opts)
+                        .default(0)
+                        .interact()?;
+
+                    if didx == dim_opts.len() - 1 {
+                        // Custom
+                        let d: String = Input::with_theme(&theme)
+                            .with_prompt("  Custom dimensions")
+                            .default(default_dimensions(&model).to_string())
+                            .interact_text()?;
+                        d.trim().parse::<usize>().unwrap_or_else(|_| default_dimensions(&model))
+                    } else {
+                        choices[didx].0
+                    }
+                }
+            };
+
             println!(
-                "  {} Embeddings: {} / {}",
+                "  {} Embeddings: {} / {} / {} dims",
                 "\u{2713}".green(),
                 pname.cyan(),
-                model.dimmed()
+                model.dimmed(),
+                dims.to_string().dimmed()
             );
             embed_provider_name = Some(pname);
             embed_model = Some(model);
+            embed_dimensions = Some(dims);
         }
     }
 
@@ -394,11 +544,61 @@ pub async fn run_init() -> Result<()> {
             println!();
         } else {
             let pname = providers[xidx - 1].name.clone();
-            let default_model = default_extract_model(&pname);
-            let model: String = Input::with_theme(&theme)
-                .with_prompt(format!("  Extraction model ({})", &pname))
-                .default(default_model.to_string())
-                .interact_text()?;
+
+            // Model selection — multiple choice for gemini/openai, free text for ollama/other
+            let model: String = match pname.as_str() {
+                "gemini" => {
+                    let model_choices = &[
+                        "gemini-3.1-flash-lite-preview  (recommended — cheapest)",
+                        "gemini-3-flash-preview",
+                        "gemini-3.1-pro-preview",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Extraction model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "gemini-3.1-flash-lite-preview".to_string(),
+                        1 => "gemini-3-flash-preview".to_string(),
+                        2 => "gemini-3.1-pro-preview".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                "openai" => {
+                    let model_choices = &[
+                        "gpt-4.1-mini  (recommended)",
+                        "gpt-4.1-nano",
+                        "gpt-4.1",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Extraction model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "gpt-4.1-mini".to_string(),
+                        1 => "gpt-4.1-nano".to_string(),
+                        2 => "gpt-4.1".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                _ => {
+                    // Ollama or other — free text
+                    let default_model = default_extract_model(&pname);
+                    Input::with_theme(&theme)
+                        .with_prompt(format!("  Extraction model ({})", &pname))
+                        .default(default_model.to_string())
+                        .interact_text()?
+                }
+            };
+
             println!(
                 "  {} Extraction: {} / {}",
                 "\u{2713}".green(),
@@ -501,7 +701,10 @@ pub async fn run_init() -> Result<()> {
     );
     let embed_summary = embed_provider_name
         .as_deref()
-        .map(|p| format!("{} / {}", p, embed_model.as_deref().unwrap_or("")))
+        .map(|p| {
+            let dims_str = embed_dimensions.map(|d| format!(" / {} dims", d)).unwrap_or_default();
+            format!("{} / {}{}", p, embed_model.as_deref().unwrap_or(""), dims_str)
+        })
         .unwrap_or_else(|| "none".to_string());
     println!(
         "  {} Embeddings: {}",
@@ -541,10 +744,12 @@ pub async fn run_init() -> Result<()> {
 
     // ── Generate brainjar.toml ────────────────────────────────────────────────
     generate_brainjar_toml(
+        &resolved_config_path,
         &data_dir,
         &providers,
         embed_provider_name.as_deref(),
         embed_model.as_deref(),
+        embed_dimensions,
         extract_provider_name.as_deref(),
         extract_model.as_deref(),
         &knowledge_bases,
@@ -565,6 +770,11 @@ pub async fn run_init() -> Result<()> {
     }
 
     print_next_steps();
+    println!(
+        "  {} Config path: {}",
+        "\u{2139}".cyan(),
+        resolved_config_path.display().to_string().dimmed()
+    );
 
     Ok(())
 }
@@ -637,11 +847,13 @@ fn format_api_key_value(key: &str) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn generate_brainjar_toml(
+pub fn generate_brainjar_toml(
+    config_path: &PathBuf,
     data_dir: &str,
     providers: &[ProviderEntry],
     embed_provider: Option<&str>,
     embed_model: Option<&str>,
+    embed_dimensions: Option<usize>,
     extract_provider: Option<&str>,
     extract_model: Option<&str>,
     kbs: &[KbConfig],
@@ -687,7 +899,8 @@ fn generate_brainjar_toml(
         toml.push_str("[embeddings]\n");
         toml.push_str(&format!("provider   = \"{}\"\n", provider));
         toml.push_str(&format!("model      = \"{}\"\n", model));
-        toml.push_str("dimensions = 768\n\n");
+        let dims = embed_dimensions.unwrap_or_else(|| default_dimensions(model));
+        toml.push_str(&format!("dimensions = {}\n\n", dims));
     }
 
     // [extraction] section
@@ -725,14 +938,15 @@ fn generate_brainjar_toml(
         ));
     }
 
-    let brainjar_home = dirs::home_dir()
-        .map(|h| h.join(".brainjar"))
-        .unwrap_or_else(|| PathBuf::from(".brainjar"));
-    std::fs::create_dir_all(&brainjar_home).ok();
-    let config_path = brainjar_home.join("brainjar.toml");
-    std::fs::write(&config_path, &toml)
+    if let Some(parent) = config_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    std::fs::write(config_path, &toml)
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
-    println!("  {} Generated {}", "\u{2713}".green(), config_path.display().to_string().cyan());
+    println!("  {} Config written to {}", "\u{2713}".green(), config_path.display().to_string().cyan());
 
     Ok(())
 }
@@ -785,6 +999,199 @@ fn print_next_steps() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider defaults
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn default_dimensions(model: &str) -> usize {
+    match model {
+        "gemini-embedding-2-preview" => 3072,
+        "gemini-embedding-001" => 768,
+        "text-embedding-3-small" => 1536,
+        "text-embedding-3-large" => 3072,
+        _ => 768, // safe fallback
+    }
+}
+
+fn dimension_choices(model: &str) -> Vec<(usize, bool)> {
+    // Returns (dimension_value, is_recommended)
+    match model {
+        "gemini-embedding-2-preview" => vec![(3072, true), (768, false)],
+        "gemini-embedding-001" => vec![(768, true)],
+        "text-embedding-3-small" => vec![(1536, true)],
+        "text-embedding-3-large" => vec![(3072, true), (1024, false)],
+        _ => vec![], // custom model = ask for dimensions directly
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_data_dir_default_location() {
+        // ~/.brainjar/brainjar.toml → ~/.brainjar
+        let home = dirs::home_dir().unwrap();
+        let config = home.join(".brainjar").join("brainjar.toml");
+        let result = resolve_data_dir(&config);
+        assert_eq!(result, home.join(".brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_already_in_brainjar_dir() {
+        // /tmp/myproject/.brainjar/brainjar.toml → /tmp/myproject/.brainjar
+        let config = Path::new("/tmp/myproject/.brainjar/brainjar.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/tmp/myproject/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_no_double_nesting() {
+        // Ensure we never get .brainjar/.brainjar
+        let config = Path::new("/tmp/test/.brainjar/config.toml");
+        let result = resolve_data_dir(config);
+        assert!(!result.to_string_lossy().contains(".brainjar/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_root_path() {
+        // /brainjar.toml → /.brainjar
+        let config = Path::new("/brainjar.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_default_home() {
+        // Config inside .brainjar dir → use that dir directly (no nesting)
+        let config = Path::new("/home/user/.brainjar/brainjar.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/home/user/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_custom_location() {
+        // Config in a regular dir → create .brainjar subdir
+        let config = Path::new("/home/user/experiments/test.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/home/user/experiments/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_nested_brainjar() {
+        // Config already inside .brainjar → no double nesting
+        let config = Path::new("/home/user/myproject/.brainjar/brainjar.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/home/user/myproject/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_tmp_custom() {
+        let config = Path::new("/tmp/brainjar-test-custom/test.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/tmp/brainjar-test-custom/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_tmp_nested() {
+        let config = Path::new("/tmp/brainjar-test-nested/.brainjar/brainjar.toml");
+        let result = resolve_data_dir(config);
+        assert_eq!(result, Path::new("/tmp/brainjar-test-nested/.brainjar"));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_string_home() {
+        if let Some(home) = dirs::home_dir() {
+            // Default case: config in ~/.brainjar/
+            let config = home.join(".brainjar").join("brainjar.toml");
+            let result = resolve_data_dir_string(&config);
+            assert_eq!(result, "~/.brainjar");
+        }
+    }
+
+    #[test]
+    fn test_resolve_data_dir_string_custom_home_subdir() {
+        if let Some(home) = dirs::home_dir() {
+            // Custom config in ~/experiments/
+            let config = home.join("experiments").join("test.toml");
+            let result = resolve_data_dir_string(&config);
+            assert_eq!(result, "~/experiments/.brainjar");
+        }
+    }
+
+    #[test]
+    fn test_resolve_data_dir_string_absolute_non_home() {
+        // /tmp path → no ~ prefix, just absolute
+        let config = Path::new("/tmp/brainjar-test/test.toml");
+        let result = resolve_data_dir_string(config);
+        assert_eq!(result, "/tmp/brainjar-test/.brainjar");
+    }
+
+    #[test]
+    fn test_resolve_data_dir_string_nested_non_home() {
+        let config = Path::new("/tmp/proj/.brainjar/brainjar.toml");
+        let result = resolve_data_dir_string(config);
+        assert_eq!(result, "/tmp/proj/.brainjar");
+    }
+
+    #[test]
+    fn test_generate_toml_data_dir_custom() {
+        // Verify generate_brainjar_toml writes the data_dir we pass in
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test.toml");
+        generate_brainjar_toml(
+            &config_path,
+            "/tmp/brainjar-test-custom/.brainjar",
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            content.contains("data_dir = \"/tmp/brainjar-test-custom/.brainjar\""),
+            "Expected data_dir in toml, got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_generate_toml_data_dir_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test.toml");
+        generate_brainjar_toml(
+            &config_path,
+            "~/.brainjar",
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            content.contains("data_dir = \"~/.brainjar\""),
+            "Expected data_dir in toml, got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_no_collision_between_separate_configs() {
+        // Two different config paths should resolve to different data_dirs
+        let config1 = Path::new("/tmp/proj1/brainjar.toml");
+        let config2 = Path::new("/tmp/proj2/brainjar.toml");
+        let dir1 = resolve_data_dir(config1);
+        let dir2 = resolve_data_dir(config2);
+        assert_ne!(dir1, dir2);
+        assert_eq!(dir1, Path::new("/tmp/proj1/.brainjar"));
+        assert_eq!(dir2, Path::new("/tmp/proj2/.brainjar"));
+    }
+}
 
 fn default_embed_model(provider: &str) -> &'static str {
     match provider {
