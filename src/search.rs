@@ -1052,6 +1052,48 @@ fn build_unified_results(
         })
         .collect();
 
+    // Collapse path-keyed results into chunk-keyed results for the same file.
+    // Graph search returns file paths as keys, vector returns chunk:{id} keys.
+    // Without this, the same file can appear twice.
+    {
+        let mut chunk_files: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut path_only: HashMap<String, usize> = HashMap::new();
+
+        for (i, r) in results.iter().enumerate() {
+            if r.chunk_id.is_some() {
+                chunk_files.entry(r.file.clone()).or_default().push(i);
+            } else {
+                path_only.insert(r.file.clone(), i);
+            }
+        }
+
+        let mut indices_to_remove: Vec<usize> = Vec::new();
+        for (file, path_idx) in &path_only {
+            if let Some(chunk_indices) = chunk_files.get(file) {
+                let extra_sources: Vec<String> = results[*path_idx].sources.clone();
+                let extra_score = results[*path_idx].score;
+
+                for &ci in chunk_indices {
+                    for src in &extra_sources {
+                        if !results[ci].sources.contains(src) {
+                            results[ci].sources.push(src.clone());
+                        }
+                    }
+                    results[ci].score += extra_score;
+                }
+
+                indices_to_remove.push(*path_idx);
+            }
+        }
+
+        indices_to_remove.sort_unstable();
+        for idx in indices_to_remove.into_iter().rev() {
+            results.remove(idx);
+        }
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
     if doc_score {
         // Aggregate: sum top-3 chunk scores per document, return one result per doc
         let mut doc_scores: HashMap<String, (f64, UnifiedResult)> = HashMap::new();
