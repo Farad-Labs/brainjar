@@ -3,7 +3,7 @@
 /// These tests validate that each search engine (FTS, vector, graph, fuzzy)
 /// correctly finds planted signals in the test corpus.
 ///
-/// Run with: cargo test --test search_integration -- --ignored
+/// Run with: cargo test --features golden-corpus --test search_integration -- --ignored
 /// (Requires GOOGLE_API_KEY and synced test-corpus)
 
 use std::path::PathBuf;
@@ -80,6 +80,7 @@ fn results_contain_file(results: &str, filename: &str) -> bool {
 
 // ─── FTS Tests ───────────────────────────────────────────────────────────────
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_fts_finds_exact_terms() {
@@ -92,6 +93,7 @@ fn test_fts_finds_exact_terms() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_fts_misses_synonyms() {
@@ -104,6 +106,7 @@ fn test_fts_misses_synonyms() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_fts_finds_replacement_keyword() {
@@ -118,6 +121,7 @@ fn test_fts_finds_replacement_keyword() {
 
 // ─── Vector/Semantic Tests ───────────────────────────────────────────────────
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_vector_finds_synonyms() {
@@ -131,6 +135,7 @@ fn test_vector_finds_synonyms() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_vector_finds_paraphrased_concepts() {
@@ -143,6 +148,7 @@ fn test_vector_finds_paraphrased_concepts() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_vector_semantic_cost_overruns() {
@@ -155,6 +161,7 @@ fn test_vector_semantic_cost_overruns() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_vector_understands_performance_synonyms() {
@@ -167,6 +174,7 @@ fn test_vector_understands_performance_synonyms() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_vector_beats_fts_on_semantic_queries() {
@@ -181,6 +189,7 @@ fn test_vector_beats_fts_on_semantic_queries() {
 
 // ─── Fuzzy Tests ─────────────────────────────────────────────────────────────
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_fuzzy_corrects_typos() {
@@ -193,6 +202,7 @@ fn test_fuzzy_corrects_typos() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_fuzzy_handles_postgres_variations() {
@@ -205,6 +215,7 @@ fn test_fuzzy_handles_postgres_variations() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_fuzzy_bidirectional() {
@@ -219,6 +230,7 @@ fn test_fuzzy_bidirectional() {
 
 // ─── Graph Tests ─────────────────────────────────────────────────────────────
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_graph_traverses_relationships() {
@@ -231,6 +243,7 @@ fn test_graph_traverses_relationships() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_graph_finds_account_transfer() {
@@ -243,6 +256,7 @@ fn test_graph_finds_account_transfer() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_graph_multi_hop() {
@@ -255,6 +269,7 @@ fn test_graph_multi_hop() {
     );
 }
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_graph_executive_sponsorship() {
@@ -269,6 +284,7 @@ fn test_graph_executive_sponsorship() {
 
 // ─── All-mode Tests ──────────────────────────────────────────────────────────
 
+#[cfg(feature = "golden-corpus")]
 #[test]
 #[ignore]
 fn test_all_mode_merges_signals() {
