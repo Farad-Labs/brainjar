@@ -1,0 +1,22 @@
+name: Sync dev after release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FARAD_BOTS_PAT }}
+
+      - name: Merge main → dev
+        run: |
+          git config user.name "farad-bots"
+          git config user.email "farad-bots@users.noreply.github.com"
+          git checkout dev
+          git merge main --no-edit
+          git push origin dev
