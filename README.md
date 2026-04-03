@@ -93,7 +93,8 @@ brainjar search --smart "should we use flash lite for auto-recall entity extract
 brainjar search --kb personal "morning routine"
 
 # JSON output (for piping / agent use)
-brainjar search --json "deployment"
+brainjar search "deployment"          # JSON output (default)
+brainjar search -H "deployment"       # human-readable output
 
 # Return full chunk content instead of previews
 brainjar search --chunks "deployment workflow"
@@ -344,9 +345,9 @@ Graph data lives in `~/.brainjar/<kb_name>_graph.db` (GraphQLite).
 ## Commands
 
 ```bash
-brainjar sync [kb_name] [--force] [--dry-run] [--json]
-brainjar search <query> [--kb <name>] [--limit N] [--text] [--graph] [--vector] [--local] [--smart] [--chunks] [--doc-score] [--json]
-brainjar status [kb_name] [--json]
+brainjar sync [kb_name] [--force] [--dry-run] [-H]
+brainjar search <query> [--kb <name>] [--limit N] [--text] [--graph] [--vector] [--local] [--smart] [--chunks] [--doc-score] [-H]
+brainjar status [kb_name] [-H]
 brainjar init
 brainjar mcp
 ```
