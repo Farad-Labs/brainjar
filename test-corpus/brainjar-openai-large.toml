@@ -12,7 +12,7 @@ model = "gpt-5.4-nano"
 enabled = true
 
 # Use a separate DB so Gemini and OpenAI test corpora don't clobber each other
-data_dir = "${HOME}/.brainjar-openai-large"
+data_dir = "~/.brainjar-openai-large"
 
 [knowledge_bases.test-corpus]
 watch_paths = ["./"]
