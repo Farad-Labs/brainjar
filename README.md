@@ -39,6 +39,9 @@ brainjar init
 # Sync your files
 brainjar sync
 
+# Re-embed all chunks (e.g. after changing embedding model/dimensions)
+brainjar sync --reembed
+
 # Search (fuzzy + graph + vector by default)
 brainjar search "deployment workflow"
 
@@ -189,6 +192,9 @@ provider = "openai"                                # 10x cheaper than Gemini
 model = "text-embedding-3-small"                   # 62.3% MTEB, 1536 dims (or 1024 with Matryoshka)
 # dimensions = 1024                               # Matryoshka reduction: 67% storage savings
 ```
+
+> **Changing models or dimensions?** Run `brainjar sync --reembed` to regenerate all embeddings.
+> Brainjar also auto-detects dimension mismatches and re-embeds when needed.
 
 ### Knowledge Base Options
 

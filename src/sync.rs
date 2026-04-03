@@ -303,6 +303,11 @@ async fn sync_kb_human(
     // ── Re-embed all chunks if dimension changed or --reembed flag ───────────
     if needs_reembed && db::chunks_vec_table_exists(&conn) && changes.to_upsert.is_empty()
         && let Some(embed_cfg) = &config.embeddings {
+        // Ensure vec table matches current dimensions (drop+recreate if changed)
+        let vec_dims_cfg = embed_cfg.dimensions;
+        if vec_dims_cfg > 0 {
+            db::recreate_chunks_vec_if_needed(&conn, vec_dims_cfg)?;
+        }
         let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
         let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
         let embedder = Embedder::new(embed_cfg, api_key, base_url);
@@ -583,6 +588,11 @@ async fn sync_kb_json(
         // Re-embed all chunks if needed (and no new docs being upserted — avoid double-embedding)
         if needs_reembed_json && db::chunks_vec_table_exists(&conn) && changes.to_upsert.is_empty()
             && let Some(embed_cfg) = &config.embeddings {
+            // Ensure vec table matches current dimensions (drop+recreate if changed)
+            let vec_dims_cfg = embed_cfg.dimensions;
+            if vec_dims_cfg > 0 {
+                db::recreate_chunks_vec_if_needed(&conn, vec_dims_cfg)?;
+            }
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
             let embedder = Embedder::new(embed_cfg, api_key, base_url);
