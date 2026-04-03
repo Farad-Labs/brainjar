@@ -140,6 +140,7 @@ async fn sync_kb_human(
                 .progress_chars("\u{2588}\u{2588}\u{2591}"),
         );
 
+        let mut total_chunks = 0usize;
         for (rel_path, abs_path) in &changes.to_upsert {
             // Truncate long filenames for display
             let display_name = if rel_path.len() > 60 {
@@ -164,10 +165,13 @@ async fn sync_kb_human(
                 for c in &file_chunks {
                     let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
                 }
+                total_chunks += file_chunks.len();
             }
             pb.inc(1);
         }
         pb.finish_and_clear();
+
+        println!("  {} Chunked {} docs ({} chunks)", "✓".green(), total_upsert, total_chunks);
     }
 
     // Delete removed files
