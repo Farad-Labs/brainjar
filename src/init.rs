@@ -307,7 +307,7 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         let provider_name = match idx {
             0 => "gemini".to_string(),
             1 => "openai".to_string(),
-            2 => "ollama".to_string(),
+            2 => "ollama (experimental)".to_string(),
             _ => {
                 let name: String = Input::with_theme(&theme)
                     .with_prompt("  Provider name (used as key in config)")
