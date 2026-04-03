@@ -572,6 +572,35 @@ pub fn get_neighboring_chunks(
     Ok((before_chunks, this_chunk, after_chunks))
 }
 
+/// Fetch the first chunk of a document by file path.
+#[allow(clippy::type_complexity)]
+pub fn get_first_chunk_for_file(
+    conn: &Connection,
+    file_path: &str,
+) -> Result<Option<(i64, String, i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.content, c.line_start, c.line_end, COALESCE(c.chunk_type, '')
+         FROM chunks c
+         JOIN documents d ON d.id = c.doc_id
+         WHERE d.path = ?1
+         ORDER BY c.line_start ASC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![file_path], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    match rows.next() {
+        Some(Ok(tuple)) => Ok(Some(tuple)),
+        _ => Ok(None),
+    }
+}
+
 /// FTS search over chunks_fts. Returns matches with BM25 score.
 pub fn search_chunks_fts(
     conn: &Connection,

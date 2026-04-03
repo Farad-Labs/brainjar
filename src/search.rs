@@ -286,7 +286,8 @@ pub async fn run_search(
         all_vector = dedup_vector_results(all_vector);
 
         if json {
-            let unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
@@ -478,7 +479,8 @@ pub async fn run_search(
     };
 
     if json {
-        let unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
+        enrich_graph_only_results(config, &mut unified);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
             let corrections_json: Vec<serde_json::Value> = query_corrections
@@ -1102,6 +1104,31 @@ fn build_unified_results(
     }
 
     results
+}
+
+/// Enrich graph-only results (no FTS/vector match) with content from the chunks table.
+fn enrich_graph_only_results(config: &Config, results: &mut [UnifiedResult]) {
+    let db_dir = config.effective_db_dir();
+    for result in results.iter_mut() {
+        if result.content.is_empty()
+            && result.chunk_id.is_none()
+            && result.sources.contains(&"graph".to_string())
+        {
+            for kb_name in config.knowledge_bases.keys() {
+                if let Ok(conn) = db::open_db(kb_name, &db_dir)
+                    && let Ok(Some((id, content, ls, le, ct))) =
+                        db::get_first_chunk_for_file(&conn, &result.file)
+                {
+                    result.content = content;
+                    result.chunk_id = Some(id);
+                    result.line_start = Some(ls as u32);
+                    result.line_end = Some(le as u32);
+                    result.chunk_type = Some(ct);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
