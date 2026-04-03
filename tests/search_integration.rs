@@ -41,11 +41,14 @@ fn test_corpus_config() -> PathBuf {
 
 /// Run brainjar search with the given query and mode flags, return stdout
 fn run_search(query: &str, mode_flag: &str) -> String {
+    let kb_name = std::env::var("BRAINJAR_TEST_KB").unwrap_or_else(|_| "test-corpus".to_string());
     let mut cmd = Command::new(brainjar_bin());
     cmd.arg("search")
         .arg(query)
         .arg("--config")
         .arg(test_corpus_config())
+        .arg("--kb")
+        .arg(&kb_name)
         .arg("--json")
         .arg("--limit")
         .arg("10");

@@ -49,6 +49,7 @@ jobs:
         id: test-openai
         run: |
           BRAINJAR_TEST_CONFIG=test-corpus/brainjar-openai-large.toml \
+          BRAINJAR_TEST_KB=test-corpus-openai \
             cargo test --test search_integration -- --ignored --nocapture 2>&1 | tee openai-results.txt
           echo "openai_pass=$(grep -o '[0-9]* passed' openai-results.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "openai_time=$(grep 'finished in' openai-results.txt | head -1 | grep -o '[0-9.]*s')" >> $GITHUB_OUTPUT
