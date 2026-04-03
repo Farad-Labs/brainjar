@@ -11,10 +11,9 @@ provider = "openai"
 model = "gpt-5.4-nano"
 enabled = true
 
-# Use a separate DB so Gemini and OpenAI test corpora don't clobber each other
-data_dir = "~/.brainjar-openai-large"
+# Use a separate KB name so Gemini and OpenAI test corpora don't clobber each other
 
-[knowledge_bases.test-corpus]
+[knowledge_bases.test-corpus-openai]
 watch_paths = ["./"]
 auto_sync = true
 description = "Golden test corpus for search validation (OpenAI text-embedding-3-large)"
