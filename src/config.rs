@@ -69,7 +69,8 @@ pub struct WatchConfig {
 
 pub fn load_config(config_path: Option<&str>) -> Result<Config> {
     let path = if let Some(p) = config_path {
-        PathBuf::from(p)
+        let raw = PathBuf::from(p);
+        raw.canonicalize().unwrap_or(raw)
     } else {
         find_config()?
     };
