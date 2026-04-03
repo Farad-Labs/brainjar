@@ -1110,7 +1110,7 @@ fn build_unified_results(
 fn enrich_graph_only_results(config: &Config, results: &mut [UnifiedResult]) {
     let db_dir = config.effective_db_dir();
     for result in results.iter_mut() {
-        if result.excerpt.is_empty()
+        if result.content.is_empty()
             && result.chunk_id.is_none()
             && result.sources.contains(&"graph".to_string())
         {
@@ -1119,7 +1119,7 @@ fn enrich_graph_only_results(config: &Config, results: &mut [UnifiedResult]) {
                     && let Ok(Some((id, content, ls, le, ct))) =
                         db::get_first_chunk_for_file(&conn, &result.file)
                 {
-                    result.excerpt = content.chars().take(200).collect();
+                    result.content = content;
                     result.chunk_id = Some(id);
                     result.line_start = Some(ls as u32);
                     result.line_end = Some(le as u32);
