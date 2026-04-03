@@ -141,13 +141,14 @@ fn print_mascot() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn info_box(lines: &[&str]) {
-    let width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 4;
-    let border = "\u{2550}".repeat(width - 2);
+    let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+    let inner_width = max_len + 4; // 2 padding each side
+    let border = "\u{2550}".repeat(inner_width);
     println!("  {}{}{}", "\u{2554}".cyan(), border.cyan(), "\u{2557}".cyan());
     for line in lines {
-        let pad = width - 4 - line.len();
+        let pad = max_len - line.len();
         println!(
-            "  {}   {}{} {}",
+            "  {}  {}{}  {}",
             "\u{2551}".cyan(),
             line,
             " ".repeat(pad),
@@ -283,8 +284,8 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     info_box(&[
         "Brainjar uses AI models for two things:",
         "",
-        "  1. Embeddings   — converting notes into searchable vectors",
-        "  2. Extraction   — finding people, projects, concepts in docs",
+        "  1. Embeddings   - converting notes into searchable vectors",
+        "  2. Extraction   - finding people, projects, concepts in docs",
         "",
         "You can use any OpenAI-compatible API, or choose from the",
         "defaults below that balance cost and quality.",
@@ -373,11 +374,13 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     // Embedding provider
     let embed_provider_name: Option<String>;
     let embed_model: Option<String>;
+    let embed_dimensions: Option<usize>;
 
     if providers.is_empty() {
         println!("  {} Skipping embeddings (no providers configured)", "\u{2013}".dimmed());
         embed_provider_name = None;
         embed_model = None;
+        embed_dimensions = None;
     } else {
         println!("  {}", "Embeddings convert your text into vectors for semantic search.".dimmed());
         println!("  {}", "This lets brainjar find results by meaning, not just keywords.".dimmed());
@@ -396,23 +399,117 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         if eidx == 0 {
             embed_provider_name = None;
             embed_model = None;
+            embed_dimensions = None;
             println!("  {} Embeddings: none", "\u{2013}".dimmed());
             println!();
         } else {
             let pname = providers[eidx - 1].name.clone();
-            let default_model = default_embed_model(&pname);
-            let model: String = Input::with_theme(&theme)
-                .with_prompt(format!("  Embedding model ({})", &pname))
-                .default(default_model.to_string())
-                .interact_text()?;
+
+            // Model selection — multiple choice for gemini/openai, free text for ollama/other
+            let model: String = match pname.as_str() {
+                "gemini" => {
+                    let model_choices = &[
+                        "gemini-embedding-2-preview  (recommended)",
+                        "gemini-embedding-001",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Embedding model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "gemini-embedding-2-preview".to_string(),
+                        1 => "gemini-embedding-001".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                "openai" => {
+                    let model_choices = &[
+                        "text-embedding-3-small  (recommended)",
+                        "text-embedding-3-large",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Embedding model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "text-embedding-3-small".to_string(),
+                        1 => "text-embedding-3-large".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                _ => {
+                    // Ollama or other — free text
+                    let default_model = default_embed_model(&pname);
+                    Input::with_theme(&theme)
+                        .with_prompt(format!("  Embedding model ({})", &pname))
+                        .default(default_model.to_string())
+                        .interact_text()?
+                }
+            };
+
+            println!();
+
+            // Dimension selection
+            let dims: usize = {
+                let choices = dimension_choices(&model);
+                if choices.is_empty() {
+                    // Custom model — ask for dimensions via free text
+                    let d: String = Input::with_theme(&theme)
+                        .with_prompt("  Embedding dimensions")
+                        .default(default_dimensions(&model).to_string())
+                        .interact_text()?;
+                    d.trim().parse::<usize>().unwrap_or_else(|_| default_dimensions(&model))
+                } else {
+                    // Build a labeled list; last item is always "Custom"
+                    let mut dim_opts: Vec<String> = choices
+                        .iter()
+                        .map(|(v, recommended)| {
+                            if *recommended {
+                                format!("{}  (recommended)", v)
+                            } else {
+                                v.to_string()
+                            }
+                        })
+                        .collect();
+                    dim_opts.push("Custom".to_string());
+
+                    let didx = Select::with_theme(&theme)
+                        .with_prompt("  Embedding dimensions")
+                        .items(&dim_opts)
+                        .default(0)
+                        .interact()?;
+
+                    if didx == dim_opts.len() - 1 {
+                        // Custom
+                        let d: String = Input::with_theme(&theme)
+                            .with_prompt("  Custom dimensions")
+                            .default(default_dimensions(&model).to_string())
+                            .interact_text()?;
+                        d.trim().parse::<usize>().unwrap_or_else(|_| default_dimensions(&model))
+                    } else {
+                        choices[didx].0
+                    }
+                }
+            };
+
             println!(
-                "  {} Embeddings: {} / {}",
+                "  {} Embeddings: {} / {} / {} dims",
                 "\u{2713}".green(),
                 pname.cyan(),
-                model.dimmed()
+                model.dimmed(),
+                dims.to_string().dimmed()
             );
             embed_provider_name = Some(pname);
             embed_model = Some(model);
+            embed_dimensions = Some(dims);
         }
     }
 
@@ -447,11 +544,61 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
             println!();
         } else {
             let pname = providers[xidx - 1].name.clone();
-            let default_model = default_extract_model(&pname);
-            let model: String = Input::with_theme(&theme)
-                .with_prompt(format!("  Extraction model ({})", &pname))
-                .default(default_model.to_string())
-                .interact_text()?;
+
+            // Model selection — multiple choice for gemini/openai, free text for ollama/other
+            let model: String = match pname.as_str() {
+                "gemini" => {
+                    let model_choices = &[
+                        "gemini-3.1-flash-lite-preview  (recommended — cheapest)",
+                        "gemini-3-flash-preview",
+                        "gemini-3.1-pro-preview",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Extraction model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "gemini-3.1-flash-lite-preview".to_string(),
+                        1 => "gemini-3-flash-preview".to_string(),
+                        2 => "gemini-3.1-pro-preview".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                "openai" => {
+                    let model_choices = &[
+                        "gpt-4.1-mini  (recommended)",
+                        "gpt-4.1-nano",
+                        "gpt-4.1",
+                        "Custom",
+                    ];
+                    let midx = Select::with_theme(&theme)
+                        .with_prompt("  Extraction model")
+                        .items(model_choices)
+                        .default(0)
+                        .interact()?;
+                    match midx {
+                        0 => "gpt-4.1-mini".to_string(),
+                        1 => "gpt-4.1-nano".to_string(),
+                        2 => "gpt-4.1".to_string(),
+                        _ => Input::with_theme(&theme)
+                            .with_prompt("  Custom model name")
+                            .interact_text()?,
+                    }
+                }
+                _ => {
+                    // Ollama or other — free text
+                    let default_model = default_extract_model(&pname);
+                    Input::with_theme(&theme)
+                        .with_prompt(format!("  Extraction model ({})", &pname))
+                        .default(default_model.to_string())
+                        .interact_text()?
+                }
+            };
+
             println!(
                 "  {} Extraction: {} / {}",
                 "\u{2713}".green(),
@@ -554,7 +701,10 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     );
     let embed_summary = embed_provider_name
         .as_deref()
-        .map(|p| format!("{} / {}", p, embed_model.as_deref().unwrap_or("")))
+        .map(|p| {
+            let dims_str = embed_dimensions.map(|d| format!(" / {} dims", d)).unwrap_or_default();
+            format!("{} / {}{}", p, embed_model.as_deref().unwrap_or(""), dims_str)
+        })
         .unwrap_or_else(|| "none".to_string());
     println!(
         "  {} Embeddings: {}",
@@ -599,6 +749,7 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         &providers,
         embed_provider_name.as_deref(),
         embed_model.as_deref(),
+        embed_dimensions,
         extract_provider_name.as_deref(),
         extract_model.as_deref(),
         &knowledge_bases,
@@ -702,6 +853,7 @@ pub fn generate_brainjar_toml(
     providers: &[ProviderEntry],
     embed_provider: Option<&str>,
     embed_model: Option<&str>,
+    embed_dimensions: Option<usize>,
     extract_provider: Option<&str>,
     extract_model: Option<&str>,
     kbs: &[KbConfig],
@@ -747,7 +899,8 @@ pub fn generate_brainjar_toml(
         toml.push_str("[embeddings]\n");
         toml.push_str(&format!("provider   = \"{}\"\n", provider));
         toml.push_str(&format!("model      = \"{}\"\n", model));
-        toml.push_str("dimensions = 768\n\n");
+        let dims = embed_dimensions.unwrap_or_else(|| default_dimensions(model));
+        toml.push_str(&format!("dimensions = {}\n\n", dims));
     }
 
     // [extraction] section
@@ -846,6 +999,27 @@ fn print_next_steps() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider defaults
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn default_dimensions(model: &str) -> usize {
+    match model {
+        "gemini-embedding-2-preview" => 3072,
+        "gemini-embedding-001" => 768,
+        "text-embedding-3-small" => 1536,
+        "text-embedding-3-large" => 3072,
+        _ => 768, // safe fallback
+    }
+}
+
+fn dimension_choices(model: &str) -> Vec<(usize, bool)> {
+    // Returns (dimension_value, is_recommended)
+    match model {
+        "gemini-embedding-2-preview" => vec![(3072, true), (768, false)],
+        "gemini-embedding-001" => vec![(768, true)],
+        "text-embedding-3-small" => vec![(1536, true)],
+        "text-embedding-3-large" => vec![(3072, true), (1024, false)],
+        _ => vec![], // custom model = ask for dimensions directly
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -970,6 +1144,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &[],
         )
         .unwrap();
@@ -989,6 +1164,7 @@ mod tests {
             &config_path,
             "~/.brainjar",
             &[],
+            None,
             None,
             None,
             None,
