@@ -25,7 +25,14 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
     for (name, kb) in &kbs {
         let db_dir = config.effective_db_dir();
         let db_path = db_dir.join(format!("{}.db", name));
+        let graph_db_path = db_dir.join(format!("{}_graph.db", name));
         let db_exists = db_path.exists();
+        let db_size_bytes: u64 = db_path.metadata().map(|m| m.len()).unwrap_or(0);
+        let graph_db_size_bytes: Option<u64> = if graph_db_path.exists() {
+            graph_db_path.metadata().map(|m| m.len()).ok()
+        } else {
+            None
+        };
 
         let (doc_count, extracted_count, chunk_count, embedding_count, last_sync) = if db_exists {
             let conn = db::open_db(name, &db_dir)?;
@@ -62,6 +69,8 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
                 "description": kb.description,
                 "db_path": db_path.display().to_string(),
                 "db_exists": db_exists,
+                "db_size_bytes": db_size_bytes,
+                "graph_db_size_bytes": graph_db_size_bytes,
                 "document_count": doc_count,
                 "extracted_count": extracted_count,
                 "chunk_count": chunk_count,
@@ -76,7 +85,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
             }
             all_statuses.push(entry);
         } else {
-            print_kb_status(name, kb, db_exists, doc_count, extracted_count, chunk_count, embedding_count, &last_sync, graph_stats.as_ref());
+            print_kb_status(name, kb, db_exists, db_size_bytes, graph_db_size_bytes, doc_count, extracted_count, chunk_count, embedding_count, &last_sync, graph_stats.as_ref());
         }
     }
 
@@ -87,11 +96,28 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
     Ok(())
 }
 
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_kb_status(
     name: &str,
     kb: &KnowledgeBaseConfig,
     db_exists: bool,
+    db_size_bytes: u64,
+    graph_db_size_bytes: Option<u64>,
     doc_count: i64,
     extracted_count: i64,
     chunk_count: i64,
@@ -117,6 +143,17 @@ fn print_kb_status(
             "no (run brainjar sync)".yellow().to_string()
         }
     );
+    if db_exists {
+        let size_str = match graph_db_size_bytes {
+            Some(graph_bytes) => format!(
+                "{} (+ {} graph)",
+                format_size(db_size_bytes).cyan(),
+                format_size(graph_bytes).cyan()
+            ),
+            None => format_size(db_size_bytes).cyan().to_string(),
+        };
+        println!("  {:<20} {}", "DB size:".dimmed(), size_str);
+    }
     println!(
         "  {:<20} {}",
         "Documents:".dimmed(),
