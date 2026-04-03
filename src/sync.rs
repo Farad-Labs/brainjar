@@ -321,6 +321,15 @@ async fn sync_kb_human(
             let mut embedded_count = 0usize;
             let mut embed_errors = 0usize;
 
+            let embed_total = chunk_items.len() as u64;
+            let vpb = ProgressBar::new(embed_total);
+            vpb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  Embedding: {pos}/{len} chunks [{bar:38.magenta/white}] {percent}%")
+                    .unwrap()
+                    .progress_chars("\u{2588}\u{2588}\u{2591}"),
+            );
+
             // Batch 100 chunks at a time — matches Gemini batchEmbedContents limit
             for batch in chunk_items.chunks(100) {
                 let docs: Vec<(&str, Option<&str>)> = batch.iter().map(|(_, content, title)| {
@@ -343,7 +352,9 @@ async fn sync_kb_human(
                         embed_errors += batch.len();
                     }
                 }
+                vpb.inc(batch.len() as u64);
             }
+            vpb.finish_and_clear();
 
             if embed_errors == 0 {
                 println!(
