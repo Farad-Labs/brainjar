@@ -43,7 +43,7 @@ pub struct UnifiedResult {
     pub file: String,
     pub score: f64,
     pub sources: Vec<String>,
-    pub excerpt: String,
+    pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,10 +52,6 @@ pub struct UnifiedResult {
     pub line_end: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
 }
 
 /// Individual search engines that can be combined.
@@ -908,7 +904,7 @@ fn build_unified_results(
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
     limit: usize,
-    include_content: bool,
+    _include_content: bool, // deprecated: content always included now
     doc_score: bool,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
@@ -956,7 +952,6 @@ fn build_unified_results(
             let mut line_start: Option<u32> = None;
             let mut line_end: Option<u32> = None;
             let mut chunk_type: Option<String> = None;
-            let mut content_out: Option<String> = None;
             let file: String;
 
             if let Some(id_str) = key.strip_prefix("chunk:") {
@@ -965,24 +960,18 @@ fn build_unified_results(
 
                 if let Some(f) = fts_by_chunk.get(&chunk_id) {
                     sources.push("fts".to_string());
-                    excerpt = f.excerpt.clone();
+                    excerpt = f.content.clone().unwrap_or_default();
                     file = f.path.clone();
                     line_start = f.line_start;
                     line_end = f.line_end;
                     chunk_type = f.chunk_type.clone();
-                    if include_content {
-                        content_out = f.content.clone();
-                    }
                 } else if let Some(v) = vector_by_chunk.get(&chunk_id) {
                     sources.push("vector".to_string());
                     file = v.path.clone();
                     line_start = v.line_start;
                     line_end = v.line_end;
                     chunk_type = v.chunk_type.clone();
-                    // Generate excerpt from chunk content
-                    if let Some(ref text) = v.content {
-                        excerpt = text.chars().take(200).collect::<String>();
-                    }
+                    excerpt = v.content.clone().unwrap_or_default();
                 } else {
                     file = key.clone();
                 }
@@ -1001,16 +990,15 @@ fn build_unified_results(
                 file = key.clone();
                 if let Some(f) = fts_by_path.get(key.as_str()) {
                     sources.push("fts".to_string());
-                    excerpt = f.excerpt.clone();
+                    excerpt = f.content.clone().unwrap_or_default();
                 }
                 if let Some(v) = vector_by_path.get(key.as_str()) {
                     if !sources.contains(&"vector".to_string()) {
                         sources.push("vector".to_string());
                     }
-                    if excerpt.is_empty()
-                        && let Some(ref text) = v.content {
-                            excerpt = text.chars().take(200).collect::<String>();
-                        }
+                    if excerpt.is_empty() {
+                        excerpt = v.content.clone().unwrap_or_default();
+                    }
                 }
             }
 
@@ -1026,28 +1014,15 @@ fn build_unified_results(
                 sources.push("graph".to_string());
             }
 
-            // Build preview (first 200 chars of content)
-            let preview = if !include_content && content_out.is_none() {
-                if !excerpt.is_empty() {
-                    Some(excerpt.chars().take(200).collect::<String>())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
             UnifiedResult {
                 file,
                 score,
                 sources,
-                excerpt: excerpt.clone(),
+                content: excerpt.clone(),
                 chunk_id: chunk_id_out,
                 line_start,
                 line_end,
                 chunk_type,
-                preview,
-                content: content_out,
             }
         })
         .collect();
@@ -1194,9 +1169,9 @@ fn print_results(
                 result.file.cyan().bold(),
                 format!("({})", sources).dimmed(),
             );
-            if !result.excerpt.is_empty() {
-                let excerpt = result.excerpt.replace('\n', " ");
-                println!("     {}", format!("...{}...", excerpt).dimmed());
+            if !result.content.is_empty() {
+                let content_preview = result.content.chars().take(200).collect::<String>().replace('\n', " ");
+                println!("     {}", format!("...{}...", content_preview).dimmed());
             }
             println!();
         }
@@ -1216,8 +1191,8 @@ fn print_results(
                     format!("[{:.4}]", r.score).green(),
                     r.path.cyan().bold(),
                 );
-                let excerpt = r.excerpt.replace('\n', " ");
-                println!("     {}", format!("...{}...", excerpt).dimmed());
+                let content_preview = r.content.clone().unwrap_or_default().chars().take(200).collect::<String>().replace('\n', " ");
+                println!("     {}", format!("...{}...", content_preview).dimmed());
                 println!();
             }
         } else {
