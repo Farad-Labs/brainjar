@@ -14,6 +14,15 @@ use crate::config::EmbeddingConfig;
 static LOCAL_EMBEDDER: OnceCell<Mutex<fastembed::TextEmbedding>> = OnceCell::new();
 
 #[cfg(feature = "local-embed")]
+fn local_model_cache_dir(model_code: &str) -> std::path::PathBuf {
+    // fastembed caches models as "models--{org}--{name}" under the cache dir.
+    // model_code looks like "Xenova/bge-small-en-v1.5".
+    let cache_root = fastembed::get_cache_dir();
+    let dir_name = format!("models--{}", model_code.replace('/', "--"));
+    std::path::PathBuf::from(cache_root).join(dir_name)
+}
+
+#[cfg(feature = "local-embed")]
 fn get_local_embedder(model_name: &str) -> Result<&'static Mutex<fastembed::TextEmbedding>> {
     LOCAL_EMBEDDER.get_or_try_init(|| {
         let model = match model_name {
@@ -28,6 +37,16 @@ fn get_local_embedder(model_name: &str) -> Result<&'static Mutex<fastembed::Text
             "snowflake-arctic-embed-m" | "SnowflakeArcticEmbedM" => fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
             _ => anyhow::bail!("Unsupported local embedding model: {}. Use bge-small-en-v1.5, all-MiniLM-L6-v2, nomic-embed-text-v1.5, bge-m3, etc.", model_name),
         };
+        // Determine the model_code so we can check the cache before init.
+        let model_code = fastembed::TextEmbedding::get_model_info(&model)
+            .map(|info| info.model_code.clone())
+            .unwrap_or_default();
+        let cache_path = local_model_cache_dir(&model_code);
+        if cache_path.exists() {
+            eprintln!("Loading local embedding model ({model_name})...");
+        } else {
+            eprintln!("Downloading local embedding model ({model_name})... (first run only, may take a minute)");
+        }
         let init_opts = fastembed::InitOptions::new(model).with_show_download_progress(true);
         let embedder = fastembed::TextEmbedding::try_new(init_opts)
             .map_err(|e| anyhow::anyhow!("Failed to init local embedder: {}", e))?;
