@@ -426,16 +426,47 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         let local_picked = false;
 
         if local_picked {
-            // Local embedding: fixed values, no API key or URL required
+            // Local embedding: show model picker
+            let local_model_choices = &[
+                "BGE-small-en-v1.5    (33M params, fastest \u{2014} recommended)",
+                "BGE-base-en-v1.5     (110M params, better quality)",
+                "BGE-large-en-v1.5    (335M params, highest quality BGE)",
+                "Qwen3-Embedding-0.6B (600M params, best retrieval \u{2014} needs more RAM)",
+                "Custom model name",
+            ];
+            let midx = Select::with_theme(&theme)
+                .with_prompt("  Local embedding model")
+                .items(local_model_choices)
+                .default(0)
+                .interact()?;
+
+            let (local_model, local_dims): (String, usize) = match midx {
+                0 => ("BGE-small-en-v1.5".to_string(), 384),
+                1 => ("BGE-base-en-v1.5".to_string(), 768),
+                2 => ("BGE-large-en-v1.5".to_string(), 1024),
+                3 => ("Qwen3-Embedding-0.6B".to_string(), 1536),
+                _ => {
+                    let model_name: String = Input::with_theme(&theme)
+                        .with_prompt("  Model name")
+                        .interact_text()?;
+                    let dims_str: String = Input::with_theme(&theme)
+                        .with_prompt("  Dimensions")
+                        .default("768".to_string())
+                        .interact_text()?;
+                    let dims = dims_str.trim().parse::<usize>().unwrap_or(768);
+                    (model_name.trim().to_string(), dims)
+                }
+            };
+
             embed_provider_name = Some("local".to_string());
-            embed_model = Some("BGE-small-en-v1.5".to_string());
-            embed_dimensions = Some(384);
+            embed_model = Some(local_model.clone());
+            embed_dimensions = Some(local_dims);
             println!(
                 "  {} Embeddings: {} / {} / {} dims",
                 "\u{2713}".green(),
                 "local".cyan(),
-                "BGE-small-en-v1.5".dimmed(),
-                "384".dimmed()
+                local_model.dimmed(),
+                local_dims.to_string().dimmed()
             );
         } else if eidx == embed_offset {
             embed_provider_name = None;
