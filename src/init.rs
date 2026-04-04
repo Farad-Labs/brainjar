@@ -376,7 +376,14 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     let embed_model: Option<String>;
     let embed_dimensions: Option<usize>;
 
-    if providers.is_empty() {
+    // With local-embed: always show embedding section (local option needs no provider)
+    // Without: only show if providers are configured
+    #[cfg(feature = "local-embed")]
+    let has_embed_options = true;
+    #[cfg(not(feature = "local-embed"))]
+    let has_embed_options = !providers.is_empty();
+
+    if !has_embed_options {
         println!("  {} Skipping embeddings (no providers configured)", "\u{2013}".dimmed());
         embed_provider_name = None;
         embed_model = None;
@@ -384,26 +391,60 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     } else {
         println!("  {}", "Embeddings convert your text into vectors for semantic search.".dimmed());
         println!("  {}", "This lets brainjar find results by meaning, not just keywords.".dimmed());
-        println!("  {}", "Gemini = highest quality, OpenAI = lowest cost.".dimmed());
-        println!("  {}", "For ~200 docs: ~$0.25 (Gemini) or ~$0.15 (OpenAI).".dimmed());
+        #[cfg(feature = "local-embed")]
+        println!("  {}", "Local = free, private, no API key needed. API providers offer higher quality for large collections.".dimmed());
+        #[cfg(not(feature = "local-embed"))]
+        {
+            println!("  {}", "Gemini = highest quality, OpenAI = lowest cost.".dimmed());
+            println!("  {}", "For ~200 docs: ~$0.25 (Gemini) or ~$0.15 (OpenAI).".dimmed());
+        }
         println!();
 
-        let mut embed_opts: Vec<String> = vec!["none (FTS + fuzzy only)".to_string()];
+        // Build option list; with local-embed, prepend "Local" as first/default
+        let mut embed_opts: Vec<String> = Vec::new();
+        #[cfg(feature = "local-embed")]
+        embed_opts.push("Local (BGE-small, no API key needed)".to_string());
+        embed_opts.push("none (FTS + fuzzy only)".to_string());
         embed_opts.extend(providers.iter().map(|p| p.name.clone()));
+
         let eidx = Select::with_theme(&theme)
             .with_prompt("  Embedding provider")
             .items(&embed_opts)
-            .default(if providers.is_empty() { 0 } else { 1 })
+            .default(0)
             .interact()?;
 
-        if eidx == 0 {
+        // Index of the "none" option; shifts by 1 when local-embed prepends an entry
+        #[cfg(feature = "local-embed")]
+        let embed_offset: usize = 1;
+        #[cfg(not(feature = "local-embed"))]
+        let embed_offset: usize = 0;
+
+        // Whether the user picked the local embedding option (only exists with local-embed)
+        #[cfg(feature = "local-embed")]
+        let local_picked = eidx == 0;
+        #[cfg(not(feature = "local-embed"))]
+        let local_picked = false;
+
+        if local_picked {
+            // Local embedding: fixed values, no API key or URL required
+            embed_provider_name = Some("local".to_string());
+            embed_model = Some("BGE-small-en-v1.5".to_string());
+            embed_dimensions = Some(384);
+            println!(
+                "  {} Embeddings: {} / {} / {} dims",
+                "\u{2713}".green(),
+                "local".cyan(),
+                "BGE-small-en-v1.5".dimmed(),
+                "384".dimmed()
+            );
+        } else if eidx == embed_offset {
             embed_provider_name = None;
             embed_model = None;
             embed_dimensions = None;
             println!("  {} Embeddings: none", "\u{2013}".dimmed());
             println!();
         } else {
-            let pname = providers[eidx - 1].name.clone();
+            let pname = providers[eidx - embed_offset - 1].name.clone();
 
             // Model selection — multiple choice for gemini/openai, free text for ollama/other
             let model: String = match pname.as_str() {
