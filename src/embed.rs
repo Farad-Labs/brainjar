@@ -175,7 +175,7 @@ impl Embedder {
             #[cfg(feature = "local-embed")]
             "local" => self.embed_local(texts).await,
             #[cfg(not(feature = "local-embed"))]
-            "local" => anyhow::bail!("Local embedding requires the 'local-embed' feature. Rebuild with: cargo build --features local-embed"),
+            "local" => anyhow::bail!("Local embedding is not available in this build. Reinstall with default features: cargo install brainjar"),
             p => anyhow::bail!("Unknown embedding provider: {}", p),
         }
     }

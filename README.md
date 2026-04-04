@@ -29,8 +29,11 @@ brainjar gives AI agents persistent, searchable memory backed entirely by SQLite
 brew install rust        # macOS (Homebrew)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Linux/other
 
-# Install brainjar
+# Install brainjar (includes local CPU embedding)
 cargo install brainjar
+
+# Slim build without local embedding (smaller binary, requires API key for embeddings)
+# cargo install brainjar --no-default-features
 
 # Initialize in your workspace (interactive wizard)
 cd my-agent-workspace
@@ -188,7 +191,7 @@ model = "gemini-3.1-flash-lite-preview"
 enabled = true
 
 # Optional: vector embeddings
-# Option A: Local (fast, no API key, requires local-embed feature)
+# Option A: Local (fast, no API key, included by default)
 [embeddings]
 provider = "local"                                 # ~30ms, runs on CPU
 model = "bge-small-en-v1.5"                        # 62.2% MTEB, 384 dims
@@ -200,8 +203,8 @@ model = "bge-small-en-v1.5"                        # 62.2% MTEB, 384 dims
 # dimensions = 1024                               # Matryoshka reduction (OpenAI/Gemini only)
 ```
 
-> **Local embedding** requires building with `cargo install brainjar --features local-embed`.
-> Model weights (~80MB) are downloaded on first use.
+> **Local embedding** is included by default. Model weights (~80MB) are downloaded on first use.
+> For a slim build without local embedding, use `cargo install brainjar --no-default-features`.
 
 > **Changing models or dimensions?** Run `brainjar sync --reembed` to regenerate all embeddings.
 > Brainjar also auto-detects dimension mismatches and re-embeds when needed.
