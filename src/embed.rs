@@ -41,7 +41,7 @@ fn resolve_local_model(model_name: &str) -> Option<fastembed::EmbeddingModel> {
 }
 
 #[cfg(feature = "local-embed")]
-fn get_local_embedder(model_name: &str) -> Result<&'static Mutex<fastembed::TextEmbedding>> {
+fn get_local_embedder(model_name: &str, show_progress: bool) -> Result<&'static Mutex<fastembed::TextEmbedding>> {
     LOCAL_EMBEDDER.get_or_try_init(|| {
         let model = resolve_local_model(model_name)
             .ok_or_else(|| anyhow::anyhow!(
@@ -53,12 +53,14 @@ fn get_local_embedder(model_name: &str) -> Result<&'static Mutex<fastembed::Text
             .map(|info| info.model_code.clone())
             .unwrap_or_default();
         let cache_path = local_model_cache_dir(&model_code);
-        if cache_path.exists() {
-            eprintln!("Loading local embedding model ({model_name})...");
-        } else {
-            eprintln!("Downloading local embedding model ({model_name})... (first run only, may take a minute)");
+        if show_progress {
+            if cache_path.exists() {
+                eprintln!("Loading local embedding model ({model_name})...");
+            } else {
+                eprintln!("Downloading local embedding model ({model_name})... (first run only, may take a minute)");
+            }
         }
-        let init_opts = fastembed::InitOptions::new(model).with_show_download_progress(true);
+        let init_opts = fastembed::InitOptions::new(model).with_show_download_progress(show_progress);
         let embedder = fastembed::TextEmbedding::try_new(init_opts)
             .map_err(|e| anyhow::anyhow!("Failed to init local embedder: {}", e))?;
         Ok(Mutex::new(embedder))
@@ -156,6 +158,8 @@ pub struct Embedder {
     /// Resolved base URL (used by Ollama).
     base_url: Option<String>,
     client: reqwest::Client,
+    /// When true, suppress download/loading messages and fastembed progress bars.
+    json_mode: bool,
 }
 
 impl Embedder {
@@ -169,7 +173,14 @@ impl Embedder {
             api_key,
             base_url,
             client: reqwest::Client::new(),
+            json_mode: false,
         }
+    }
+
+    /// Set JSON mode — suppresses download/loading messages and fastembed progress bars.
+    pub fn with_json_mode(mut self, json_mode: bool) -> Self {
+        self.json_mode = json_mode;
+        self
     }
 
     /// Embed a batch of texts and return one vector per input.
@@ -466,11 +477,12 @@ impl Embedder {
     #[cfg(feature = "local-embed")]
     async fn embed_local(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let model_name = self.config.model.clone();
+        let show_progress = !self.json_mode;
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
 
         // Run blocking fastembed on a thread pool to avoid blocking tokio
         tokio::task::spawn_blocking(move || {
-            let embedder_lock = get_local_embedder(&model_name)?;
+            let embedder_lock = get_local_embedder(&model_name, show_progress)?;
             let mut embedder = embedder_lock.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
             embedder
                 .embed(owned.iter().map(|s| s.as_str()).collect::<Vec<_>>(), None)
