@@ -23,20 +23,31 @@ fn local_model_cache_dir(model_code: &str) -> std::path::PathBuf {
 }
 
 #[cfg(feature = "local-embed")]
+fn resolve_local_model(model_name: &str) -> Option<fastembed::EmbeddingModel> {
+    // Match exact name first, then fall back to lowercase for hand-edited configs.
+    let lower = model_name.to_lowercase();
+    match lower.as_str() {
+        "bge-small-en-v1.5" | "bgesmallenv15" => Some(fastembed::EmbeddingModel::BGESmallENV15),
+        "bge-small-en-v1.5-q" | "bgesmallenv15q" => Some(fastembed::EmbeddingModel::BGESmallENV15Q),
+        "bge-base-en-v1.5" | "bgebaseenv15" => Some(fastembed::EmbeddingModel::BGEBaseENV15),
+        "bge-large-en-v1.5" | "bgelargeenv15" => Some(fastembed::EmbeddingModel::BGELargeENV15),
+        "all-minilm-l6-v2" | "allminilml6v2" => Some(fastembed::EmbeddingModel::AllMiniLML6V2),
+        "all-minilm-l12-v2" | "allminilml12v2" => Some(fastembed::EmbeddingModel::AllMiniLML12V2),
+        "nomic-embed-text-v1.5" | "nomicembedtextv15" => Some(fastembed::EmbeddingModel::NomicEmbedTextV15),
+        "bge-m3" | "bgem3" => Some(fastembed::EmbeddingModel::BGEM3),
+        "snowflake-arctic-embed-m" | "snowflakearcticembedm" => Some(fastembed::EmbeddingModel::SnowflakeArcticEmbedM),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "local-embed")]
 fn get_local_embedder(model_name: &str) -> Result<&'static Mutex<fastembed::TextEmbedding>> {
     LOCAL_EMBEDDER.get_or_try_init(|| {
-        let model = match model_name {
-            "bge-small-en-v1.5" | "BGESmallENV15" => fastembed::EmbeddingModel::BGESmallENV15,
-            "bge-small-en-v1.5-q" | "BGESmallENV15Q" => fastembed::EmbeddingModel::BGESmallENV15Q,
-            "bge-base-en-v1.5" | "BGEBaseENV15" => fastembed::EmbeddingModel::BGEBaseENV15,
-            "bge-large-en-v1.5" | "BGELargeENV15" => fastembed::EmbeddingModel::BGELargeENV15,
-            "all-MiniLM-L6-v2" | "AllMiniLML6V2" => fastembed::EmbeddingModel::AllMiniLML6V2,
-            "all-MiniLM-L12-v2" | "AllMiniLML12V2" => fastembed::EmbeddingModel::AllMiniLML12V2,
-            "nomic-embed-text-v1.5" | "NomicEmbedTextV15" => fastembed::EmbeddingModel::NomicEmbedTextV15,
-            "bge-m3" | "BGEM3" => fastembed::EmbeddingModel::BGEM3,
-            "snowflake-arctic-embed-m" | "SnowflakeArcticEmbedM" => fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
-            _ => anyhow::bail!("Unsupported local embedding model: {}. Use bge-small-en-v1.5, all-MiniLM-L6-v2, nomic-embed-text-v1.5, bge-m3, etc.", model_name),
-        };
+        let model = resolve_local_model(model_name)
+            .ok_or_else(|| anyhow::anyhow!(
+                "Unsupported local embedding model: {}. Valid options: bge-small-en-v1.5, bge-base-en-v1.5, bge-large-en-v1.5, bge-m3, all-minilm-l6-v2, all-minilm-l12-v2, nomic-embed-text-v1.5, snowflake-arctic-embed-m",
+                model_name
+            ))?;
         // Determine the model_code so we can check the cache before init.
         let model_code = fastembed::TextEmbedding::get_model_info(&model)
             .map(|info| info.model_code.clone())
@@ -213,16 +224,17 @@ impl Embedder {
 }
 
 /// Return the native dimensions for a local embedding model.
+/// Uses case-insensitive matching so hand-edited configs still work.
 fn local_model_dimensions(model: &str) -> usize {
-    match model {
-        "bge-small-en-v1.5" | "BGESmallENV15" | "bge-small-en-v1.5-q" | "BGESmallENV15Q" => 384,
-        "bge-base-en-v1.5" | "BGEBaseENV15" => 768,
-        "bge-large-en-v1.5" | "BGELargeENV15" => 1024,
-        "all-MiniLM-L6-v2" | "AllMiniLML6V2" => 384,
-        "all-MiniLM-L12-v2" | "AllMiniLML12V2" => 384,
-        "nomic-embed-text-v1.5" | "NomicEmbedTextV15" => 768,
-        "bge-m3" | "BGEM3" => 1024,
-        "snowflake-arctic-embed-m" | "SnowflakeArcticEmbedM" => 768,
+    match model.to_lowercase().as_str() {
+        "bge-small-en-v1.5" | "bgesmallenv15" | "bge-small-en-v1.5-q" | "bgesmallenv15q" => 384,
+        "bge-base-en-v1.5" | "bgebaseenv15" => 768,
+        "bge-large-en-v1.5" | "bgelargeenv15" => 1024,
+        "all-minilm-l6-v2" | "allminilml6v2" => 384,
+        "all-minilm-l12-v2" | "allminilml12v2" => 384,
+        "nomic-embed-text-v1.5" | "nomicembedtextv15" => 768,
+        "bge-m3" | "bgem3" => 1024,
+        "snowflake-arctic-embed-m" | "snowflakearcticembedm" => 768,
         _ => 384, // fallback
     }
 }

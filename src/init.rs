@@ -441,9 +441,9 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                 .interact()?;
 
             let (local_model, local_dims): (String, usize) = match midx {
-                0 => ("BGE-small-en-v1.5".to_string(), 384),
-                1 => ("BGE-base-en-v1.5".to_string(), 768),
-                2 => ("BGE-large-en-v1.5".to_string(), 1024),
+                0 => ("bge-small-en-v1.5".to_string(), 384),
+                1 => ("bge-base-en-v1.5".to_string(), 768),
+                2 => ("bge-large-en-v1.5".to_string(), 1024),
                 3 => ("Qwen3-Embedding-0.6B".to_string(), 1536),
                 _ => {
                     let model_name: String = Input::with_theme(&theme)
