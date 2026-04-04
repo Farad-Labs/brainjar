@@ -60,6 +60,62 @@ pub struct ProviderEntry {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Defaults carried into the wizard for edit mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct WizardDefaults {
+    data_dir: Option<String>,
+    providers: Vec<ProviderEntry>,
+    embed_provider: Option<String>,
+    embed_model: Option<String>,
+    embed_dimensions: Option<usize>,
+    extract_provider: Option<String>,
+    extract_model: Option<String>,
+    knowledge_bases: Vec<KbConfig>,
+}
+
+impl WizardDefaults {
+    fn from_config(config: &crate::config::Config) -> Self {
+        // Convert providers map to ProviderEntry vec (sorted for stable ordering)
+        let mut providers: Vec<ProviderEntry> = config
+            .providers
+            .iter()
+            .map(|(name, p)| ProviderEntry {
+                name: name.clone(),
+                api_key: p.api_key.clone().unwrap_or_default(),
+                base_url: p.base_url.clone().unwrap_or_default(),
+            })
+            .collect();
+        providers.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Convert knowledge_bases map to KbConfig vec (sorted)
+        let mut knowledge_bases: Vec<KbConfig> = config
+            .knowledge_bases
+            .iter()
+            .map(|(name, kb)| KbConfig {
+                name: name.clone(),
+                watch_paths: kb.watch_paths.clone(),
+                description: kb.description.clone(),
+                auto_sync: kb.auto_sync,
+            })
+            .collect();
+        knowledge_bases.sort_by(|a, b| a.name.cmp(&b.name));
+
+        WizardDefaults {
+            data_dir: config.data_dir.clone(),
+            providers,
+            embed_provider: config.embeddings.as_ref().map(|e| e.provider.clone()),
+            embed_model: config.embeddings.as_ref().map(|e| e.model.clone()),
+            embed_dimensions: config.embeddings.as_ref().map(|e| e.dimensions),
+            extract_provider: config.extraction.as_ref().map(|e| e.provider.clone()),
+            extract_model: config.extraction.as_ref().map(|e| e.model.clone()),
+            knowledge_bases,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ASCII art mascot
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -226,19 +282,59 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     };
 
     // Guard against overwriting existing config
-    if resolved_config_path.exists() {
-        let overwrite = Confirm::with_theme(&theme)
-            .with_prompt(format!(
-                "Config already exists at {}. Overwrite?",
-                resolved_config_path.display()
-            ))
-            .default(false)
+    let defaults: Option<WizardDefaults> = if resolved_config_path.exists() {
+        println!(
+            "\n  {}",
+            "Config file already exists. What would you like to do?"
+                .bold()
+                .white()
+        );
+        let choices = &[
+            "1. Edit    (modify existing settings)",
+            "2. Overwrite  (start from scratch)",
+            "3. Abort      (exit without changes)",
+        ];
+        let idx = Select::with_theme(&theme)
+            .items(choices)
+            .default(0)
             .interact()?;
-        if !overwrite {
-            println!("{}", "  Aborted.".yellow());
-            return Ok(());
+        match idx {
+            0 => {
+                // Edit mode — load existing config and extract defaults
+                match crate::config::load_config(Some(
+                    resolved_config_path.to_str().unwrap_or(""),
+                )) {
+                    Ok(cfg) => {
+                        println!(
+                            "  {} Loaded existing config from {}",
+                            "\u{2713}".green(),
+                            resolved_config_path.display().to_string().cyan()
+                        );
+                        Some(WizardDefaults::from_config(&cfg))
+                    }
+                    Err(e) => {
+                        println!(
+                            "  {} Could not parse existing config: {}",
+                            "!".yellow(),
+                            e
+                        );
+                        println!(
+                            "  {}",
+                            "Continuing with fresh wizard (no pre-fills).".dimmed()
+                        );
+                        Some(WizardDefaults::default())
+                    }
+                }
+            }
+            1 => None, // Overwrite — no defaults, fresh wizard
+            _ => {
+                println!("{}", "  Aborted.".yellow());
+                return Ok(());
+            }
         }
-    }
+    } else {
+        None
+    };
 
     // ── Step 1 — Storage location ─────────────────────────────────────────────
     println!("\n  {}", "Step 1 of 4 — Storage".bold().white());
@@ -254,19 +350,43 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         ".brainjar    (current directory — project-local)",
         "Custom path",
     ];
+
+    // In edit mode, try to pre-select the option matching the existing data_dir
+    let default_storage_idx: usize = defaults
+        .as_ref()
+        .and_then(|d| d.data_dir.as_ref())
+        .map(|existing| {
+            if existing == &smart_data_dir {
+                0
+            } else if existing == ".brainjar" {
+                1
+            } else {
+                2 // Custom
+            }
+        })
+        .unwrap_or(0);
+
     let storage_idx = Select::with_theme(&theme)
         .with_prompt("  Storage location")
         .items(&storage_choices)
-        .default(0)
+        .default(default_storage_idx)
         .interact()?;
 
     let data_dir: String = match storage_idx {
         0 => smart_data_dir.clone(),
         1 => ".brainjar".to_string(),
         _ => {
-            let custom: String = Input::with_theme(&theme)
-                .with_prompt("  Custom path (~ is expanded)")
-                .interact_text()?;
+            // In edit mode, pre-fill custom path with existing value
+            let custom_default = defaults
+                .as_ref()
+                .and_then(|d| d.data_dir.clone())
+                .unwrap_or_default();
+            let mut builder = Input::with_theme(&theme)
+                .with_prompt("  Custom path (~ is expanded)");
+            if !custom_default.is_empty() {
+                builder = builder.default(custom_default);
+            }
+            let custom: String = builder.interact_text()?;
             custom.trim().to_string()
         }
     };
@@ -296,8 +416,46 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
 
     let provider_choices = &["gemini", "openai", "ollama", "other (OpenAI-compatible)"];
 
-    let mut providers: Vec<ProviderEntry> = Vec::new();
-    loop {
+    // In edit mode, pre-load existing providers
+    let mut providers: Vec<ProviderEntry> = if let Some(ref defs) = defaults {
+        if !defs.providers.is_empty() {
+            println!(
+                "  {} Loaded {} existing provider(s): {}",
+                "\u{2713}".green(),
+                defs.providers.len(),
+                defs.providers
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+                    .cyan()
+            );
+            defs.providers
+                .iter()
+                .map(|p| ProviderEntry {
+                    name: p.name.clone(),
+                    api_key: p.api_key.clone(),
+                    base_url: p.base_url.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // In edit mode with existing providers, ask before entering the add loop
+    let enter_provider_loop = if providers.is_empty() {
+        true
+    } else {
+        Confirm::with_theme(&theme)
+            .with_prompt("  Add or modify providers?")
+            .default(false)
+            .interact()?
+    };
+
+    if enter_provider_loop { loop {
         let idx = Select::with_theme(&theme)
             .with_prompt("  Provider to configure")
             .items(provider_choices)
@@ -364,7 +522,7 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
             break;
         }
         println!();
-    }
+    } } // end if enter_provider_loop / end loop
 
     // ── Step 3 — Model defaults ───────────────────────────────────────────────
     println!("\n  {}", "Step 3 of 4 — Model Defaults".bold().white());
@@ -406,11 +564,17 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         embed_opts.push("Local (BGE-small, no API key needed)".to_string());
         embed_opts.push("none (FTS + fuzzy only)".to_string());
         embed_opts.extend(providers.iter().map(|p| p.name.clone()));
+        // In edit mode, try to pre-select the existing embed provider
+        let default_eidx = defaults
+            .as_ref()
+            .and_then(|d| d.embed_provider.as_ref())
+            .and_then(|ep| embed_opts.iter().position(|o| o == ep))
+            .unwrap_or(if providers.is_empty() { 0 } else { 1 });
 
         let eidx = Select::with_theme(&theme)
             .with_prompt("  Embedding provider")
             .items(&embed_opts)
-            .default(0)
+            .default(default_eidx)
             .interact()?;
 
         // Index of the "none" option; shifts by 1 when local-embed prepends an entry
@@ -485,17 +649,30 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                         "gemini-embedding-001",
                         "Custom",
                     ];
+                    let existing_embed_model = defaults
+                        .as_ref()
+                        .and_then(|d| d.embed_model.as_deref());
+                    let default_midx = match existing_embed_model {
+                        Some("gemini-embedding-2-preview") => 0,
+                        Some("gemini-embedding-001") => 1,
+                        Some(_) => 2,
+                        None => 0,
+                    };
                     let midx = Select::with_theme(&theme)
                         .with_prompt("  Embedding model")
                         .items(model_choices)
-                        .default(0)
+                        .default(default_midx)
                         .interact()?;
                     match midx {
                         0 => "gemini-embedding-2-preview".to_string(),
                         1 => "gemini-embedding-001".to_string(),
-                        _ => Input::with_theme(&theme)
-                            .with_prompt("  Custom model name")
-                            .interact_text()?,
+                        _ => {
+                            let custom_default = existing_embed_model.unwrap_or("").to_string();
+                            Input::with_theme(&theme)
+                                .with_prompt("  Custom model name")
+                                .default(custom_default)
+                                .interact_text()?
+                        }
                     }
                 }
                 "openai" => {
@@ -504,25 +681,43 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                         "text-embedding-3-large",
                         "Custom",
                     ];
+                    let existing_embed_model = defaults
+                        .as_ref()
+                        .and_then(|d| d.embed_model.as_deref());
+                    let default_midx = match existing_embed_model {
+                        Some("text-embedding-3-small") => 0,
+                        Some("text-embedding-3-large") => 1,
+                        Some(_) => 2,
+                        None => 0,
+                    };
                     let midx = Select::with_theme(&theme)
                         .with_prompt("  Embedding model")
                         .items(model_choices)
-                        .default(0)
+                        .default(default_midx)
                         .interact()?;
                     match midx {
                         0 => "text-embedding-3-small".to_string(),
                         1 => "text-embedding-3-large".to_string(),
-                        _ => Input::with_theme(&theme)
-                            .with_prompt("  Custom model name")
-                            .interact_text()?,
+                        _ => {
+                            let custom_default = existing_embed_model.unwrap_or("").to_string();
+                            Input::with_theme(&theme)
+                                .with_prompt("  Custom model name")
+                                .default(custom_default)
+                                .interact_text()?
+                        }
                     }
                 }
                 _ => {
                     // Ollama or other — free text
-                    let default_model = default_embed_model(&pname);
+                    let existing_embed_model = defaults
+                        .as_ref()
+                        .and_then(|d| d.embed_model.as_deref());
+                    let default_model = existing_embed_model
+                        .unwrap_or_else(|| default_embed_model(&pname))
+                        .to_string();
                     Input::with_theme(&theme)
                         .with_prompt(format!("  Embedding model ({})", &pname))
-                        .default(default_model.to_string())
+                        .default(default_model)
                         .interact_text()?
                 }
             };
@@ -560,10 +755,14 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                         .interact()?;
 
                     if didx == dim_opts.len() - 1 {
-                        // Custom
+                        // Custom — pre-fill with existing dims if in edit mode
+                        let custom_dims_default = defaults
+                            .as_ref()
+                            .and_then(|d| d.embed_dimensions)
+                            .unwrap_or_else(|| default_dimensions(&model));
                         let d: String = Input::with_theme(&theme)
                             .with_prompt("  Custom dimensions")
-                            .default(default_dimensions(&model).to_string())
+                            .default(custom_dims_default.to_string())
                             .interact_text()?;
                         d.trim().parse::<usize>().unwrap_or_else(|_| default_dimensions(&model))
                     } else {
@@ -603,10 +802,17 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
 
         let mut ext_opts: Vec<String> = vec!["none (graph search disabled)".to_string()];
         ext_opts.extend(providers.iter().map(|p| p.name.clone()));
+        // In edit mode, try to pre-select the existing extract provider
+        let default_xidx = defaults
+            .as_ref()
+            .and_then(|d| d.extract_provider.as_ref())
+            .and_then(|ep| ext_opts.iter().position(|o| o == ep))
+            .unwrap_or(if providers.is_empty() { 0 } else { 1 });
+
         let xidx = Select::with_theme(&theme)
             .with_prompt("  Extraction provider")
             .items(&ext_opts)
-            .default(if providers.is_empty() { 0 } else { 1 })
+            .default(default_xidx)
             .interact()?;
 
         if xidx == 0 {
@@ -626,18 +832,32 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                         "gemini-3.1-pro-preview",
                         "Custom",
                     ];
+                    let existing_extract_model = defaults
+                        .as_ref()
+                        .and_then(|d| d.extract_model.as_deref());
+                    let default_midx = match existing_extract_model {
+                        Some("gemini-3.1-flash-lite-preview") => 0,
+                        Some("gemini-3-flash-preview") => 1,
+                        Some("gemini-3.1-pro-preview") => 2,
+                        Some(_) => 3,
+                        None => 0,
+                    };
                     let midx = Select::with_theme(&theme)
                         .with_prompt("  Extraction model")
                         .items(model_choices)
-                        .default(0)
+                        .default(default_midx)
                         .interact()?;
                     match midx {
                         0 => "gemini-3.1-flash-lite-preview".to_string(),
                         1 => "gemini-3-flash-preview".to_string(),
                         2 => "gemini-3.1-pro-preview".to_string(),
-                        _ => Input::with_theme(&theme)
-                            .with_prompt("  Custom model name")
-                            .interact_text()?,
+                        _ => {
+                            let custom_default = existing_extract_model.unwrap_or("").to_string();
+                            Input::with_theme(&theme)
+                                .with_prompt("  Custom model name")
+                                .default(custom_default)
+                                .interact_text()?
+                        }
                     }
                 }
                 "openai" => {
@@ -647,26 +867,45 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                         "gpt-4.1",
                         "Custom",
                     ];
+                    let existing_extract_model = defaults
+                        .as_ref()
+                        .and_then(|d| d.extract_model.as_deref());
+                    let default_midx = match existing_extract_model {
+                        Some("gpt-4.1-mini") => 0,
+                        Some("gpt-4.1-nano") => 1,
+                        Some("gpt-4.1") => 2,
+                        Some(_) => 3,
+                        None => 0,
+                    };
                     let midx = Select::with_theme(&theme)
                         .with_prompt("  Extraction model")
                         .items(model_choices)
-                        .default(0)
+                        .default(default_midx)
                         .interact()?;
                     match midx {
                         0 => "gpt-4.1-mini".to_string(),
                         1 => "gpt-4.1-nano".to_string(),
                         2 => "gpt-4.1".to_string(),
-                        _ => Input::with_theme(&theme)
-                            .with_prompt("  Custom model name")
-                            .interact_text()?,
+                        _ => {
+                            let custom_default = existing_extract_model.unwrap_or("").to_string();
+                            Input::with_theme(&theme)
+                                .with_prompt("  Custom model name")
+                                .default(custom_default)
+                                .interact_text()?
+                        }
                     }
                 }
                 _ => {
                     // Ollama or other — free text
-                    let default_model = default_extract_model(&pname);
+                    let existing_extract_model = defaults
+                        .as_ref()
+                        .and_then(|d| d.extract_model.as_deref());
+                    let default_model = existing_extract_model
+                        .unwrap_or_else(|| default_extract_model(&pname))
+                        .to_string();
                     Input::with_theme(&theme)
                         .with_prompt(format!("  Extraction model ({})", &pname))
-                        .default(default_model.to_string())
+                        .default(default_model)
                         .interact_text()?
                 }
             };
@@ -693,9 +932,47 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
     );
     println!();
 
-    let mut knowledge_bases: Vec<KbConfig> = Vec::new();
+    // In edit mode, pre-load existing knowledge bases
+    let mut knowledge_bases: Vec<KbConfig> = if let Some(ref defs) = defaults {
+        if !defs.knowledge_bases.is_empty() {
+            println!(
+                "  {} Loaded {} existing knowledge base(s): {}",
+                "\u{2713}".green(),
+                defs.knowledge_bases.len(),
+                defs.knowledge_bases
+                    .iter()
+                    .map(|kb| kb.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+                    .cyan()
+            );
+            defs.knowledge_bases
+                .iter()
+                .map(|kb| KbConfig {
+                    name: kb.name.clone(),
+                    watch_paths: kb.watch_paths.clone(),
+                    description: kb.description.clone(),
+                    auto_sync: kb.auto_sync,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
-    loop {
+    // In edit mode with existing KBs, confirm before adding more
+    let enter_kb_loop = if knowledge_bases.is_empty() {
+        true
+    } else {
+        Confirm::with_theme(&theme)
+            .with_prompt("  Add more knowledge bases?")
+            .default(false)
+            .interact()?
+    };
+
+    if enter_kb_loop { loop {
         let kb_num = knowledge_bases.len() + 1;
         println!(
             "  {}",
@@ -756,7 +1033,7 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
             break;
         }
         println!();
-    }
+    } } // end if enter_kb_loop / end loop
 
     // ── Step 5 — Summary + confirm + write ───────────────────────────────────
     println!("\n  {}", "Summary".bold().white());
