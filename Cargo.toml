@@ -27,18 +27,18 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 sha2 = "0.10"
 walkdir = "2"
 indicatif = "0.17"
-colored = "2"
+colored = "3"
 glob = "0.3"
 anyhow = "1"
 nucleo-matcher = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
-dirs = "5"
-dialoguer = "0.11"
+dirs = "6"
+dialoguer = "0.12"
 rustyline = { version = "18", features = ["derive"] }
 graphqlite = "0.4.3"
 sqlite-vec = "=0.1.9"
