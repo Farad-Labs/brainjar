@@ -342,8 +342,6 @@ async fn sync_kb_human(
                 .unwrap()
                 .progress_chars("\u{2588}\u{2588}\u{2591}"),
         );
-        let reason = reason;
-        let _ = reason; // suppress unused warning — printed below after bar finishes
 
         let mut embedded_count = 0usize;
         let mut embed_errors = 0usize;
