@@ -333,11 +333,14 @@ async fn sync_kb_human(
         }
 
         let reason = if reembed { "--reembed" } else { "dimension change detected" };
-        println!(
-            "  {} Re-embedding {} chunks ({})",
-            "⟳".cyan(),
-            all_chunks.len(),
-            reason
+        let total_reembed = all_chunks.len();
+        let batch_count = total_reembed.div_ceil(100) as u64;
+        let embed_pb = ProgressBar::new(batch_count);
+        embed_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("  \u{27f3} Embedding chunks [{bar:38.cyan/blue}] {pos}/{len} batches")
+                .unwrap()
+                .progress_chars("\u{2588}\u{2588}\u{2591}"),
         );
 
         let mut embedded_count = 0usize;
@@ -365,15 +368,18 @@ async fn sync_kb_human(
                     embed_errors += batch.len();
                 }
             }
+            embed_pb.inc(1);
         }
+        embed_pb.finish_and_clear();
 
         if embed_errors == 0 {
-            println!("  {} Re-embedded {} chunks", "✓".green(), embedded_count);
+            println!("  {} Re-embedded {} chunks ({})", "✓".green(), embedded_count, reason);
         } else {
             println!(
-                "  {} Re-embedded {} chunks ({} errors)",
+                "  {} Re-embedded {} chunks ({}, {} errors)",
                 "\u{26a0}".yellow(),
                 embedded_count,
+                reason,
                 embed_errors
             );
         }
@@ -404,6 +410,16 @@ async fn sync_kb_human(
                 }
             }
 
+            let total_new_chunks = chunk_items.len();
+            let new_batch_count = total_new_chunks.div_ceil(100) as u64;
+            let new_embed_pb = ProgressBar::new(new_batch_count);
+            new_embed_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  \u{27f3} Embedding chunks [{bar:38.cyan/blue}] {pos}/{len} batches")
+                    .unwrap()
+                    .progress_chars("\u{2588}\u{2588}\u{2591}"),
+            );
+
             let mut embedded_count = 0usize;
             let mut embed_errors = 0usize;
 
@@ -429,7 +445,9 @@ async fn sync_kb_human(
                         embed_errors += batch.len();
                     }
                 }
+                new_embed_pb.inc(1);
             }
+            new_embed_pb.finish_and_clear();
 
             if embed_errors == 0 {
                 println!(
@@ -595,7 +613,7 @@ async fn sync_kb_json(
             }
             let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
-            let embedder = Embedder::new(embed_cfg, api_key, base_url);
+            let embedder = Embedder::new(embed_cfg, api_key, base_url).with_json_mode(true);
 
             let mut all_chunks_json: Vec<(i64, String, String)> = Vec::new();
             {
@@ -640,7 +658,7 @@ async fn sync_kb_json(
             && !changes.to_upsert.is_empty() && db::chunks_vec_table_exists(&conn) {
                 let api_key = config.resolve_api_key(&embed_cfg.provider, embed_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&embed_cfg.provider, embed_cfg.base_url.as_deref());
-                let embedder = Embedder::new(embed_cfg, api_key, base_url);
+                let embedder = Embedder::new(embed_cfg, api_key, base_url).with_json_mode(true);
 
                 let mut chunk_items: Vec<(i64, String, String)> = Vec::new();
                 for rel_path in changes.to_upsert.keys() {

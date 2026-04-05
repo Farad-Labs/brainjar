@@ -1,7 +1,71 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
+#[cfg(feature = "local-embed")]
+use once_cell::sync::OnceCell;
+#[cfg(feature = "local-embed")]
+use std::sync::Mutex;
+
 use crate::config::EmbeddingConfig;
+
+// ─── Local embedding (fastembed) ─────────────────────────────────────────────
+
+#[cfg(feature = "local-embed")]
+static LOCAL_EMBEDDER: OnceCell<Mutex<fastembed::TextEmbedding>> = OnceCell::new();
+
+#[cfg(feature = "local-embed")]
+fn local_model_cache_dir(model_code: &str) -> std::path::PathBuf {
+    // fastembed caches models as "models--{org}--{name}" under the cache dir.
+    // model_code looks like "Xenova/bge-small-en-v1.5".
+    let cache_root = fastembed::get_cache_dir();
+    let dir_name = format!("models--{}", model_code.replace('/', "--"));
+    std::path::PathBuf::from(cache_root).join(dir_name)
+}
+
+#[cfg(feature = "local-embed")]
+fn resolve_local_model(model_name: &str) -> Option<fastembed::EmbeddingModel> {
+    // Match exact name first, then fall back to lowercase for hand-edited configs.
+    let lower = model_name.to_lowercase();
+    match lower.as_str() {
+        "bge-small-en-v1.5" | "bgesmallenv15" => Some(fastembed::EmbeddingModel::BGESmallENV15),
+        "bge-small-en-v1.5-q" | "bgesmallenv15q" => Some(fastembed::EmbeddingModel::BGESmallENV15Q),
+        "bge-base-en-v1.5" | "bgebaseenv15" => Some(fastembed::EmbeddingModel::BGEBaseENV15),
+        "bge-large-en-v1.5" | "bgelargeenv15" => Some(fastembed::EmbeddingModel::BGELargeENV15),
+        "all-minilm-l6-v2" | "allminilml6v2" => Some(fastembed::EmbeddingModel::AllMiniLML6V2),
+        "all-minilm-l12-v2" | "allminilml12v2" => Some(fastembed::EmbeddingModel::AllMiniLML12V2),
+        "nomic-embed-text-v1.5" | "nomicembedtextv15" => Some(fastembed::EmbeddingModel::NomicEmbedTextV15),
+        "bge-m3" | "bgem3" => Some(fastembed::EmbeddingModel::BGEM3),
+        "snowflake-arctic-embed-m" | "snowflakearcticembedm" => Some(fastembed::EmbeddingModel::SnowflakeArcticEmbedM),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "local-embed")]
+fn get_local_embedder(model_name: &str, show_progress: bool) -> Result<&'static Mutex<fastembed::TextEmbedding>> {
+    LOCAL_EMBEDDER.get_or_try_init(|| {
+        let model = resolve_local_model(model_name)
+            .ok_or_else(|| anyhow::anyhow!(
+                "Unsupported local embedding model: {}. Valid options: bge-small-en-v1.5, bge-base-en-v1.5, bge-large-en-v1.5, bge-m3, all-minilm-l6-v2, all-minilm-l12-v2, nomic-embed-text-v1.5, snowflake-arctic-embed-m",
+                model_name
+            ))?;
+        // Determine the model_code so we can check the cache before init.
+        let model_code = fastembed::TextEmbedding::get_model_info(&model)
+            .map(|info| info.model_code.clone())
+            .unwrap_or_default();
+        let cache_path = local_model_cache_dir(&model_code);
+        if show_progress {
+            if cache_path.exists() {
+                eprintln!("Loading local embedding model ({model_name})...");
+            } else {
+                eprintln!("Downloading local embedding model ({model_name})... (first run only, may take a minute)");
+            }
+        }
+        let init_opts = fastembed::InitOptions::new(model).with_show_download_progress(show_progress);
+        let embedder = fastembed::TextEmbedding::try_new(init_opts)
+            .map_err(|e| anyhow::anyhow!("Failed to init local embedder: {}", e))?;
+        Ok(Mutex::new(embedder))
+    })
+}
 
 /// Embedding task types for optimized retrieval.
 /// Different models handle these differently:
@@ -94,6 +158,8 @@ pub struct Embedder {
     /// Resolved base URL (used by Ollama).
     base_url: Option<String>,
     client: reqwest::Client,
+    /// When true, suppress download/loading messages and fastembed progress bars.
+    json_mode: bool,
 }
 
 impl Embedder {
@@ -107,7 +173,14 @@ impl Embedder {
             api_key,
             base_url,
             client: reqwest::Client::new(),
+            json_mode: false,
         }
+    }
+
+    /// Set JSON mode — suppresses download/loading messages and fastembed progress bars.
+    pub fn with_json_mode(mut self, json_mode: bool) -> Self {
+        self.json_mode = json_mode;
+        self
     }
 
     /// Embed a batch of texts and return one vector per input.
@@ -140,13 +213,40 @@ impl Embedder {
             "gemini" => self.embed_gemini(texts, task_type).await,
             "openai" => self.embed_openai(texts).await,
             "ollama" => self.embed_ollama(texts).await,
+            #[cfg(feature = "local-embed")]
+            "local" => self.embed_local(texts).await,
+            #[cfg(not(feature = "local-embed"))]
+            "local" => anyhow::bail!("Local embedding is not available in this build. Reinstall with default features: cargo install brainjar"),
             p => anyhow::bail!("Unknown embedding provider: {}", p),
         }
     }
 
     /// The dimensionality of the embeddings produced by this provider.
+    /// For local models, returns the model's native dimensions if config is 0.
     pub fn dimensions(&self) -> usize {
+        if self.config.dimensions > 0 {
+            return self.config.dimensions;
+        }
+        if self.config.provider == "local" {
+            return local_model_dimensions(&self.config.model);
+        }
         self.config.dimensions
+    }
+}
+
+/// Return the native dimensions for a local embedding model.
+/// Uses case-insensitive matching so hand-edited configs still work.
+fn local_model_dimensions(model: &str) -> usize {
+    match model.to_lowercase().as_str() {
+        "bge-small-en-v1.5" | "bgesmallenv15" | "bge-small-en-v1.5-q" | "bgesmallenv15q" => 384,
+        "bge-base-en-v1.5" | "bgebaseenv15" => 768,
+        "bge-large-en-v1.5" | "bgelargeenv15" => 1024,
+        "all-minilm-l6-v2" | "allminilml6v2" => 384,
+        "all-minilm-l12-v2" | "allminilml12v2" => 384,
+        "nomic-embed-text-v1.5" | "nomicembedtextv15" => 768,
+        "bge-m3" | "bgem3" => 1024,
+        "snowflake-arctic-embed-m" | "snowflakearcticembedm" => 768,
+        _ => 384, // fallback
     }
 }
 
@@ -372,6 +472,24 @@ impl Embedder {
         }
 
         Ok(result)
+    }
+
+    #[cfg(feature = "local-embed")]
+    async fn embed_local(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let model_name = self.config.model.clone();
+        let show_progress = !self.json_mode;
+        let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+
+        // Run blocking fastembed on a thread pool to avoid blocking tokio
+        tokio::task::spawn_blocking(move || {
+            let embedder_lock = get_local_embedder(&model_name, show_progress)?;
+            let mut embedder = embedder_lock.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+            embedder
+                .embed(owned.iter().map(|s| s.as_str()).collect::<Vec<_>>(), None)
+                .map_err(|e| anyhow::anyhow!("Local embedding failed: {}", e))
+        })
+        .await
+        .context("Local embed task panicked")?
     }
 
     fn require_api_key(&self) -> Result<&str> {
