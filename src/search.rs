@@ -286,7 +286,7 @@ pub async fn run_search(
         all_vector = dedup_vector_results(all_vector);
 
         if json {
-            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score, query);
             enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -479,7 +479,7 @@ pub async fn run_search(
     };
 
     if json {
-        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score, query);
         enrich_graph_only_results(config, &mut unified);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
@@ -876,8 +876,43 @@ pub fn search_vector(
     }
 }
 
+/// Weighted Normalized Score Fusion over multiple ranked result sets.
+/// For each engine's result set, scores are normalized to [0.0, 1.0] via min-max,
+/// then combined as: final_score = sum(weight × normalized_score).
+/// This preserves score magnitude: a BM25 score of 4.76 outranks 4.41, not just "both rank N".
+pub fn weighted_score_fusion(
+    result_sets: Vec<(Vec<(String, f64)>, f64)>, // (results, weight)
+) -> Vec<(String, f64)> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
+
+    for (result_set, weight) in &result_sets {
+        if result_set.is_empty() {
+            continue;
+        }
+
+        // Min-max normalization within this engine's result set
+        let min_score = result_set.iter().map(|(_, s)| *s).fold(f64::INFINITY, f64::min);
+        let max_score = result_set.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
+        let range = max_score - min_score;
+
+        for (doc_id, score) in result_set {
+            let normalized = if range > 1e-10 {
+                (score - min_score) / range
+            } else {
+                1.0 // All scores equal — treat as max normalized
+            };
+            *scores.entry(doc_id.clone()).or_insert(0.0) += weight * normalized;
+        }
+    }
+
+    let mut merged: Vec<(String, f64)> = scores.into_iter().collect();
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged
+}
+
 /// Reciprocal Rank Fusion over multiple ranked result sets.
 /// Each set is Vec<(doc_id, score)>. Returns merged Vec<(doc_id, rrf_score)>.
+/// Kept for potential future use as a configurable alternative to weighted_score_fusion.
 pub fn reciprocal_rank_fusion(
     result_sets: Vec<Vec<(String, f64)>>,
     k: f64,
@@ -900,6 +935,7 @@ pub fn reciprocal_rank_fusion(
     merged
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_unified_results(
     fts: &[FtsResult],
     local: &[LocalSearchResult],
@@ -908,6 +944,7 @@ fn build_unified_results(
     limit: usize,
     _include_content: bool, // deprecated: content always included now
     doc_score: bool,
+    query: &str,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
     // We use chunk-keyed ranking: each chunk is its own ranked item
@@ -929,7 +966,15 @@ fn build_unified_results(
         (key, r.score)
     }).collect();
 
-    let merged = reciprocal_rank_fusion(vec![fts_ranked, local_ranked, graph_ranked, vector_ranked], 60.0);
+    // Weighted Normalized Score Fusion:
+    // FTS5=0.4, Vector=0.3, Graph=0.2, Local/fuzzy=0.1
+    // Scores within each engine are min-max normalized before weighting.
+    let merged = weighted_score_fusion(vec![
+        (fts_ranked, 0.4),
+        (vector_ranked, 0.3),
+        (graph_ranked, 0.2),
+        (local_ranked, 0.1),
+    ]);
 
     // Build lookup maps
     let fts_by_chunk: HashMap<i64, &FtsResult> =
@@ -1016,9 +1061,28 @@ fn build_unified_results(
                 sources.push("graph".to_string());
             }
 
+            // Filename boost: if any query word appears in the filename (without extension),
+            // add a flat +0.15 to the final score.
+            let boosted_score = {
+                let fname = std::path::Path::new(&file)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let boost: f64 = if query
+                    .split_whitespace()
+                    .any(|word| fname.contains(&word.to_lowercase()))
+                {
+                    0.15
+                } else {
+                    0.0
+                };
+                score + boost
+            };
+
             UnifiedResult {
                 file,
-                score,
+                score: boosted_score,
                 sources,
                 content: excerpt.clone(),
                 chunk_id: chunk_id_out,
@@ -1185,7 +1249,7 @@ fn print_results(
     let single_local = mode.run_local();
     if !single_text && !single_local {
         // Merged RRF view (default for any engine combination)
-        let unified = build_unified_results(fts, local, graph, vector, limit, include_content, doc_score);
+        let unified = build_unified_results(fts, local, graph, vector, limit, include_content, doc_score, query);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");
@@ -1396,6 +1460,232 @@ mod tests {
     }
 
     // ─── reciprocal_rank_fusion ─────────────────────────────────────────────
+
+    // ─── weighted_score_fusion ─────────────────────────────────────────────
+
+    #[test]
+    fn test_wsf_single_set_preserves_magnitude() {
+        // Higher raw scores should produce higher normalized+weighted scores
+        let set = vec![
+            ("doc_a".to_string(), 4.76),
+            ("doc_b".to_string(), 4.41),
+            ("doc_c".to_string(), 1.0),
+        ];
+        let merged = weighted_score_fusion(vec![(set, 1.0)]);
+        assert_eq!(merged.len(), 3);
+        // doc_a has highest raw score → should rank first
+        assert_eq!(merged[0].0, "doc_a");
+        // doc_a normalized = 1.0, doc_b = (4.41-1.0)/(4.76-1.0) ≈ 0.906, doc_c = 0.0
+        let score_a = merged.iter().find(|(k, _)| k == "doc_a").unwrap().1;
+        let score_b = merged.iter().find(|(k, _)| k == "doc_b").unwrap().1;
+        let score_c = merged.iter().find(|(k, _)| k == "doc_c").unwrap().1;
+        assert!(score_a > score_b);
+        assert!(score_b > score_c);
+        assert!((score_a - 1.0).abs() < 1e-9); // max normalized = 1.0 × weight
+        assert!((score_c - 0.0).abs() < 1e-9); // min normalized = 0.0 × weight
+    }
+
+    #[test]
+    fn test_wsf_two_sets_combined() {
+        // doc_x appears in both sets, should get contributions from both
+        let set_fts = vec![
+            ("doc_x".to_string(), 10.0),
+            ("doc_y".to_string(), 5.0),
+        ];
+        let set_graph = vec![
+            ("doc_x".to_string(), 8.0),
+            ("doc_z".to_string(), 3.0),
+        ];
+        let merged = weighted_score_fusion(vec![(set_fts, 0.4), (set_graph, 0.2)]);
+        let score_x = merged.iter().find(|(k, _)| k == "doc_x").unwrap().1;
+        let score_y = merged.iter().find(|(k, _)| k == "doc_y").unwrap().1;
+        // doc_x appears in both, should score higher than doc_y (only in one)
+        assert!(score_x > score_y);
+    }
+
+    #[test]
+    fn test_wsf_all_equal_scores() {
+        // All equal scores → all normalize to 1.0 (range=0 edge case)
+        let set = vec![
+            ("a".to_string(), 5.0),
+            ("b".to_string(), 5.0),
+        ];
+        let merged = weighted_score_fusion(vec![(set, 0.5)]);
+        assert_eq!(merged.len(), 2);
+        // Both should have score = 0.5 × 1.0
+        for (_, score) in &merged {
+            assert!((score - 0.5).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_wsf_empty_sets() {
+        let merged = weighted_score_fusion(vec![]);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_wsf_result_sorted_descending() {
+        let set = vec![
+            ("low".to_string(), 1.0),
+            ("high".to_string(), 100.0),
+            ("mid".to_string(), 50.0),
+        ];
+        let merged = weighted_score_fusion(vec![(set, 1.0)]);
+        for i in 0..merged.len() - 1 {
+            assert!(merged[i].1 >= merged[i + 1].1);
+        }
+    }
+
+    // ─── filename boost ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_filename_boost_applies_when_query_matches() {
+        // pricing.md and old-blog.md have identical raw FTS scores.
+        // After min-max normalization both get 1.0 (range == 0 edge case).
+        // The filename boost (+0.15) applied only to pricing.md should be the tiebreaker.
+        let fts_results = vec![
+            FtsResult {
+                path: "docs/pricing.md".to_string(),
+                excerpt: "Our pricing plans start at $10/mo.".to_string(),
+                score: 3.0,
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: Some("Our pricing plans start at $10/mo.".to_string()),
+            },
+            FtsResult {
+                path: "archive/old-blog.md".to_string(),
+                excerpt: "We changed our pricing last year.".to_string(),
+                score: 3.0, // same raw FTS score — only filename boost differs
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: Some("We changed our pricing last year.".to_string()),
+            },
+        ];
+        let local_results = vec![];
+        let graph_results = vec![];
+        let vector_results = vec![];
+
+        let unified = build_unified_results(
+            &fts_results,
+            &local_results,
+            &graph_results,
+            &vector_results,
+            10,
+            true,
+            false,
+            "pricing",
+        );
+
+        // pricing.md should appear in results
+        let pricing_result = unified.iter().find(|r| r.file.contains("pricing.md"));
+        let archive_result = unified.iter().find(|r| r.file.contains("old-blog.md"));
+
+        assert!(pricing_result.is_some(), "pricing.md should be in results");
+        assert!(archive_result.is_some(), "old-blog.md should be in results");
+
+        // After filename boost, pricing.md should outrank old-blog.md
+        // Both normalized to 1.0 (equal scores), pricing.md gets +0.15 boost
+        let pricing_score = pricing_result.unwrap().score;
+        let archive_score = archive_result.unwrap().score;
+        assert!(
+            pricing_score > archive_score,
+            "pricing.md (score {:.4}) should outrank archive/old-blog.md (score {:.4}) due to filename boost",
+            pricing_score,
+            archive_score
+        );
+    }
+
+    #[test]
+    fn test_filename_boost_case_insensitive() {
+        // PRICING.md (uppercase) should still get the boost for query "pricing"
+        let fts_results = vec![
+            FtsResult {
+                path: "docs/PRICING.md".to_string(),
+                excerpt: "Pricing information.".to_string(),
+                score: 2.0,
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: Some("Pricing information.".to_string()),
+            },
+            FtsResult {
+                path: "docs/other.md".to_string(),
+                excerpt: "Also mentions pricing.".to_string(),
+                score: 2.0, // same raw score, so only boost makes the difference
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: Some("Also mentions pricing.".to_string()),
+            },
+        ];
+
+        let unified = build_unified_results(
+            &fts_results,
+            &[],
+            &[],
+            &[],
+            10,
+            true,
+            false,
+            "pricing",
+        );
+
+        let pricing_result = unified.iter().find(|r| r.file.contains("PRICING.md"));
+        let other_result = unified.iter().find(|r| r.file.contains("other.md"));
+
+        assert!(pricing_result.is_some());
+        assert!(other_result.is_some());
+
+        // PRICING.md should score higher (0.15 boost for case-insensitive filename match)
+        assert!(
+            pricing_result.unwrap().score > other_result.unwrap().score,
+            "PRICING.md should get filename boost for query 'pricing'"
+        );
+    }
+
+    #[test]
+    fn test_filename_boost_no_match_no_boost() {
+        // A file whose name doesn't match the query should not get boosted
+        let fts_results = vec![
+            FtsResult {
+                path: "docs/readme.md".to_string(),
+                excerpt: "This readme covers pricing details.".to_string(),
+                score: 4.0,
+                chunk_id: None,
+                line_start: None,
+                line_end: None,
+                chunk_type: None,
+                content: Some("Pricing details.".to_string()),
+            },
+        ];
+
+        let unified = build_unified_results(
+            &fts_results,
+            &[],
+            &[],
+            &[],
+            10,
+            true,
+            false,
+            "pricing",
+        );
+
+        assert_eq!(unified.len(), 1);
+        // Score should be the normalized FTS score (1.0 × 0.4 weight) + 0 boost = 0.4
+        // No filename boost since "readme" doesn't contain "pricing"
+        assert!(
+            (unified[0].score - 0.4).abs() < 1e-9,
+            "readme.md should not get filename boost; expected 0.4, got {:.4}",
+            unified[0].score
+        );
+    }
 
     #[test]
     fn test_rrf_single_set() {
