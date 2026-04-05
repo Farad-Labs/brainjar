@@ -6,9 +6,12 @@
 /// Run with: cargo test --features golden-corpus --test search_integration -- --ignored
 /// (Requires GOOGLE_API_KEY and synced test-corpus)
 
+#[cfg(feature = "golden-corpus")]
 use std::path::PathBuf;
+#[cfg(feature = "golden-corpus")]
 use std::process::Command;
 
+#[cfg(feature = "golden-corpus")]
 fn brainjar_bin() -> PathBuf {
     // Use cargo-installed binary (most reliable config resolution)
     let cargo_bin = PathBuf::from(env!("HOME")).join(".cargo/bin/brainjar");
@@ -29,6 +32,7 @@ fn brainjar_bin() -> PathBuf {
         .join("brainjar")
 }
 
+#[cfg(feature = "golden-corpus")]
 fn test_corpus_config() -> PathBuf {
     // Allow overriding the config for multi-provider testing
     if let Ok(path) = std::env::var("BRAINJAR_TEST_CONFIG") {
@@ -39,6 +43,7 @@ fn test_corpus_config() -> PathBuf {
         .join("brainjar.toml")
 }
 
+#[cfg(feature = "golden-corpus")]
 /// Run brainjar search with the given query and mode flags, return stdout
 fn run_search(query: &str, mode_flag: &str) -> String {
     let kb_name = std::env::var("BRAINJAR_TEST_KB").unwrap_or_else(|_| "test-corpus".to_string());
@@ -74,6 +79,7 @@ fn run_search(query: &str, mode_flag: &str) -> String {
     stdout
 }
 
+#[cfg(feature = "golden-corpus")]
 fn results_contain_file(results: &str, filename: &str) -> bool {
     results.contains(filename)
 }

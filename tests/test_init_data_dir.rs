@@ -5,7 +5,7 @@
 /// 3. Custom config already in .brainjar → data_dir = {parent} (no double nesting)
 use brainjar::config::load_config;
 use brainjar::init::{resolve_data_dir, resolve_data_dir_string, generate_brainjar_toml};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[test]
 fn test_resolve_data_dir_prevents_double_nesting() {
