@@ -935,6 +935,7 @@ pub fn reciprocal_rank_fusion(
     merged
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_unified_results(
     fts: &[FtsResult],
     local: &[LocalSearchResult],
