@@ -1,0 +1,20 @@
+# Weekly Consolidation — Week of January 28, 2026
+
+**Period:** 2026-01-28 to 2026-02-04
+**Source entries:** 7 episodic, 3 semantic
+
+## Key Insights (Deduplicated)
+
+1. **Temporal scoring** is the top priority — mentioned in 4/7 daily entries
+2. **Redis stability** confirmed after the 2026-03-10 fix (PR #847)
+3. **ClickHouse schema** still pending approval (blocked since 2026-01-21)
+
+## Extracted Preferences
+
+- Marcus Webb prefers incremental changes (confirmed 2026-01-28)
+- Team consensus: integration tests > unit tests for DB layers
+
+## Stale Entries Removed
+
+- Duplicate standup notes from 2026-01-21 (identical content)
+- Superseded terminology entry (AtlasQL definition updated)
