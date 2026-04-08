@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use brainjar::db;
@@ -132,6 +132,31 @@ enum Commands {
     },
     /// Initialize a new brainjar project
     Init,
+    /// Add a folder to an existing knowledge base
+    AddFolder {
+        /// Knowledge base name
+        kb_name: String,
+        /// Folder path to add
+        path: String,
+        /// Apply a named decay preset (daily, reference, meetings, ephemeral, sot)
+        #[arg(long)]
+        preset: Option<String>,
+        /// Folder title
+        #[arg(long)]
+        title: Option<String>,
+        /// Weight boost (0.0-1.0)
+        #[arg(long)]
+        boost: Option<f64>,
+        /// Decay horizon in days
+        #[arg(long)]
+        horizon: Option<u32>,
+        /// Decay floor (0.0-1.0)
+        #[arg(long)]
+        floor: Option<f64>,
+        /// Decay shape (> 0)
+        #[arg(long)]
+        shape: Option<f64>,
+    },
     /// Run as an MCP server (stdio transport)
     Mcp,
     /// Retrieve a chunk by ID with optional context expansion
@@ -342,6 +367,28 @@ async fn main() -> Result<()> {
         Commands::Init => {
             brainjar::init::run_init(cli.config.as_deref()).await?;
         }
+        Commands::AddFolder {
+            kb_name,
+            path,
+            preset,
+            title,
+            boost,
+            horizon,
+            floor,
+            shape,
+        } => {
+            run_add_folder(
+                cli.config.as_deref(),
+                &kb_name,
+                &path,
+                preset.as_deref(),
+                title.as_deref(),
+                boost,
+                horizon,
+                floor,
+                shape,
+            ).await?;
+        }
         Commands::Mcp => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             brainjar::mcp::run_mcp(config).await?;
@@ -539,6 +586,227 @@ async fn run_retrieve(
             println!("{}", raw_after.join("\n").dimmed());
         }
     }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_add_folder(
+    config_path: Option<&str>,
+    kb_name: &str,
+    folder_path: &str,
+    preset: Option<&str>,
+    title: Option<&str>,
+    boost: Option<f64>,
+    horizon: Option<u32>,
+    floor: Option<f64>,
+    shape: Option<f64>,
+) -> Result<()> {
+    use brainjar::config::{DecayConfig, FolderConfig, KbType};
+    use colored::Colorize;
+    use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+
+    let mut config = brainjar::config::load_config(config_path)?;
+
+    // Determine config file path for writing back
+    let config_file = if let Some(p) = config_path {
+        std::path::PathBuf::from(p)
+            .canonicalize()
+            .unwrap_or(std::path::PathBuf::from(p))
+    } else {
+        config.config_dir.join("brainjar.toml")
+    };
+
+    // Validate KB exists
+    if !config.knowledge_bases.contains_key(kb_name) {
+        anyhow::bail!(
+            "Knowledge base '{}' not found in config.\nAvailable KBs: {}",
+            kb_name,
+            config.knowledge_bases.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    let kb_type = config.knowledge_bases[kb_name].kb_type.clone();
+
+    // Warn if path doesn't exist
+    if !std::path::Path::new(folder_path).exists() {
+        println!(
+            "{}",
+            format!("Warning: '{}' does not exist (will be indexed when created).", folder_path).yellow()
+        );
+    }
+
+    // Resolve folder config from preset or interactive
+    let new_folder = if let Some(preset_name) = preset {
+        // Apply named preset
+        let (title_val, horizon_val, floor_val, shape_val, boost_val): (Option<&str>, Option<u32>, Option<f64>, Option<f64>, f64) =
+            match preset_name {
+                "daily"     => (Some("Daily Notes"),     Some(180), Some(0.3), Some(1.5), 0.1),
+                "reference" => (Some("Reference Docs"),  Some(730), Some(0.6), Some(1.0), 0.2),
+                "meetings"  => (Some("Meeting Notes"),   Some(90),  Some(0.2), Some(1.2), 0.1),
+                "ephemeral" => (Some("Scratch Files"),   Some(30),  Some(0.0), Some(0.5), 0.0),
+                "sot"       => (Some("Source of Truth"), None,      None,      None,      0.3),
+                _ => anyhow::bail!(
+                    "Unknown preset '{}'. Valid presets: daily, reference, meetings, ephemeral, sot",
+                    preset_name
+                ),
+            };
+        FolderConfig {
+            path: folder_path.to_string(),
+            title: title.map(|s| s.to_string()).or_else(|| title_val.map(|s| s.to_string())),
+            weight_boost: boost.unwrap_or(boost_val),
+            decay: if let (Some(h), Some(fl), Some(sh)) = (
+                horizon.or(horizon_val),
+                floor.or(floor_val),
+                shape.or(shape_val),
+            ) {
+                Some(DecayConfig { horizon_days: h, floor: fl, shape: sh })
+            } else {
+                None
+            },
+        }
+    } else if horizon.is_some() || floor.is_some() || shape.is_some() || boost.is_some() || title.is_some() {
+        // Values provided via flags
+        let weight_boost = boost.unwrap_or(0.1);
+        if weight_boost > 0.5 {
+            println!("{}", "Warning: weight_boost > 0.5 may dominate other signals.".yellow());
+        }
+        FolderConfig {
+            path: folder_path.to_string(),
+            title: title.map(|s| s.to_string()),
+            weight_boost,
+            decay: horizon.map(|h| DecayConfig {
+                horizon_days: h,
+                floor: floor.unwrap_or(0.3),
+                shape: shape.unwrap_or(1.5),
+            }),
+        }
+    } else {
+        // Interactive mode
+        let theme = ColorfulTheme::default();
+
+        let title_str: String = Input::with_theme(&theme)
+            .with_prompt("Title (optional)")
+            .default(String::new())
+            .allow_empty(true)
+            .interact_text()?;
+        let title_val = if title_str.trim().is_empty() { None } else { Some(title_str.trim().to_string()) };
+
+        if matches!(kb_type, KbType::Code) {
+            // Code KB: simple
+            let boost_str: String = Input::with_theme(&theme)
+                .with_prompt("Weight boost (0.0-0.5) [0.1]")
+                .default("0.1".to_string())
+                .interact_text()?;
+            let weight_boost = boost_str.trim().parse::<f64>().unwrap_or(0.1).clamp(0.0, 1.0);
+            FolderConfig {
+                path: folder_path.to_string(),
+                title: title_val,
+                weight_boost,
+                decay: None,
+            }
+        } else {
+            // Docs KB: show decay presets
+            let preset_idx = Select::with_theme(&theme)
+                .with_prompt("What kind of documents are in this folder?")
+                .items(&[
+                    "Daily notes, journals, logs        (fade over months)",
+                    "Reference docs, wikis              (stay relevant for years)",
+                    "Meeting notes, standups            (useful for weeks)",
+                    "Scratch files, temp notes          (stale in days)",
+                    "Source of truth, specs             (never decay)",
+                    "Custom                             (set your own values)",
+                ])
+                .default(0)
+                .interact()?;
+
+            let (horizon_val, floor_val, shape_val, boost_val): (Option<u32>, Option<f64>, Option<f64>, f64) =
+                match preset_idx {
+                    0 => (Some(180), Some(0.3), Some(1.5), 0.1),
+                    1 => (Some(730), Some(0.6), Some(1.0), 0.2),
+                    2 => (Some(90),  Some(0.2), Some(1.2), 0.1),
+                    3 => (Some(30),  Some(0.0), Some(0.5), 0.0),
+                    4 => (None,      None,      None,      0.3),
+                    _ => {
+                        let enable_decay = Confirm::with_theme(&theme)
+                            .with_prompt("Enable temporal decay?")
+                            .default(true)
+                            .interact()?;
+                        let (h, fl, sh) = if enable_decay {
+                            let h_str: String = Input::with_theme(&theme)
+                                .with_prompt("horizon_days [180]")
+                                .default("180".to_string())
+                                .interact_text()?;
+                            let fl_str: String = Input::with_theme(&theme)
+                                .with_prompt("floor (0.0-1.0) [0.3]")
+                                .default("0.3".to_string())
+                                .interact_text()?;
+                            let sh_str: String = Input::with_theme(&theme)
+                                .with_prompt("shape (>0, 1.0=linear) [1.5]")
+                                .default("1.5".to_string())
+                                .interact_text()?;
+                            (
+                                Some(h_str.trim().parse::<u32>().unwrap_or(180).max(1)),
+                                Some(fl_str.trim().parse::<f64>().unwrap_or(0.3).clamp(0.0, 1.0)),
+                                Some(sh_str.trim().parse::<f64>().unwrap_or(1.5).max(0.01)),
+                            )
+                        } else {
+                            (None, None, None)
+                        };
+                        let b_str: String = Input::with_theme(&theme)
+                            .with_prompt("weight_boost (0.0-0.5) [0.1]")
+                            .default("0.1".to_string())
+                            .interact_text()?;
+                        let custom_boost = b_str.trim().parse::<f64>().unwrap_or(0.1).clamp(0.0, 1.0);
+                        if custom_boost > 0.5 {
+                            println!("{}", "Warning: weight_boost > 0.5 may dominate other signals.".yellow());
+                        }
+                        (h, fl, sh, custom_boost)
+                    }
+                };
+
+            FolderConfig {
+                path: folder_path.to_string(),
+                title: title_val,
+                weight_boost: boost_val,
+                decay: if let (Some(h), Some(fl), Some(sh)) = (horizon_val, floor_val, shape_val) {
+                    Some(DecayConfig { horizon_days: h, floor: fl, shape: sh })
+                } else {
+                    None
+                },
+            }
+        }
+    };
+
+    // Validate
+    if let Some(d) = &new_folder.decay {
+        if d.floor < 0.0 || d.floor > 1.0 {
+            anyhow::bail!("floor must be in [0.0, 1.0]");
+        }
+        if d.shape <= 0.0 {
+            anyhow::bail!("shape must be > 0.0");
+        }
+    }
+
+    let label = new_folder.title.clone().unwrap_or_else(|| folder_path.to_string());
+    config.knowledge_bases
+        .get_mut(kb_name)
+        .unwrap()
+        .folders
+        .push(new_folder);
+
+    // Serialize config back
+    let toml_out = toml::to_string_pretty(&config)?;
+    std::fs::write(&config_file, &toml_out)
+        .with_context(|| format!("Failed to write config to {}", config_file.display()))?;
+
+    println!(
+        "{} Added folder \"{}\" to KB '{}' → {}",
+        "✓".green(),
+        label.cyan(),
+        kb_name.bold(),
+        config_file.display().to_string().dimmed()
+    );
 
     Ok(())
 }
