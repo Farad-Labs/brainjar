@@ -30,12 +30,70 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecayConfig {
+    pub horizon_days: u32,
+    #[serde(default = "default_floor")]
+    pub floor: f64,
+    #[serde(default = "default_shape")]
+    pub shape: f64,
+}
+
+fn default_floor() -> f64 { 0.3 }
+fn default_shape() -> f64 { 1.0 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FolderType {
+    #[default]
+    Docs,
+    Code,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderConfig {
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, rename = "type")]
+    pub folder_type: FolderType,
+    #[serde(default)]
+    pub weight_boost: f64,
+    #[serde(default)]
+    pub decay: Option<DecayConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeBaseConfig {
+    #[serde(default)]
     pub watch_paths: Vec<String>,
+    #[serde(default)]
+    pub folders: Vec<FolderConfig>,
     #[serde(default)]
     pub auto_sync: bool,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+impl KnowledgeBaseConfig {
+    /// Returns the effective list of folders to watch.
+    /// If `folders` is non-empty, returns those directly.
+    /// If only `watch_paths` are set (legacy), converts each to a default `FolderConfig`.
+    pub fn effective_folders(&self) -> Vec<FolderConfig> {
+        if !self.folders.is_empty() {
+            self.folders.clone()
+        } else {
+            self.watch_paths
+                .iter()
+                .map(|p| FolderConfig {
+                    path: p.clone(),
+                    title: None,
+                    folder_type: FolderType::Docs,
+                    weight_boost: 0.0,
+                    decay: None,
+                })
+                .collect()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,11 +196,15 @@ impl Config {
         legacy_url.map(|s| s.to_string())
     }
 
-    /// Expand watch paths relative to the config dir, with ~ support
-    pub fn expand_watch_paths(&self, kb: &KnowledgeBaseConfig) -> Vec<PathBuf> {
-        kb.watch_paths
-            .iter()
-            .map(|p| self.expand_path(p))
+    /// Expand folder paths relative to the config dir, with ~ support.
+    /// Returns `(absolute_path, folder_config)` pairs.
+    pub fn expand_watch_paths(&self, kb: &KnowledgeBaseConfig) -> Vec<(PathBuf, FolderConfig)> {
+        kb.effective_folders()
+            .into_iter()
+            .map(|f| {
+                let path = self.expand_path(&f.path);
+                (path, f)
+            })
             .collect()
     }
 
@@ -370,7 +432,7 @@ api_key = "inline-key"
         let paths = config.expand_watch_paths(&kb);
         assert_eq!(paths.len(), 1);
         // Relative path should be joined to config_dir (/tmp)
-        assert!(paths[0].to_string_lossy().contains("notes"));
+        assert!(paths[0].0.to_string_lossy().contains("notes"));
     }
 
     #[test]
@@ -410,5 +472,94 @@ auto_sync = true
         std::fs::write(&config_path, "this is not { valid toml [").unwrap();
         let result = load_config(Some(config_path.to_str().unwrap()));
         assert!(result.is_err());
+    }
+
+    // ─── FolderConfig / effective_folders ────────────────────────────────────
+
+    #[test]
+    fn test_effective_folders_uses_folders_when_present() {
+        let toml_str = r#"
+[knowledge_bases.test]
+auto_sync = false
+
+[[knowledge_bases.test.folders]]
+path = "docs"
+type = "docs"
+weight_boost = 0.5
+
+[[knowledge_bases.test.folders]]
+path = "src"
+type = "code"
+weight_boost = 1.0
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let kb = config.knowledge_bases.get("test").unwrap();
+        let folders = kb.effective_folders();
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].path, "docs");
+        assert!((folders[0].weight_boost - 0.5).abs() < f64::EPSILON);
+        assert_eq!(folders[1].path, "src");
+        assert_eq!(folders[1].folder_type, FolderType::Code);
+    }
+
+    #[test]
+    fn test_effective_folders_converts_watch_paths_when_folders_empty() {
+        let toml_str = r#"
+[knowledge_bases.test]
+watch_paths = ["notes", "docs"]
+auto_sync = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let kb = config.knowledge_bases.get("test").unwrap();
+        let folders = kb.effective_folders();
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].path, "notes");
+        assert_eq!(folders[0].folder_type, FolderType::Docs);
+        assert!((folders[0].weight_boost).abs() < f64::EPSILON);
+        assert!(folders[0].decay.is_none());
+    }
+
+    #[test]
+    fn test_config_folders_with_decay() {
+        let toml_str = r#"
+[knowledge_bases.test]
+auto_sync = false
+
+[[knowledge_bases.test.folders]]
+path = "news"
+weight_boost = 0.2
+
+[knowledge_bases.test.folders.decay]
+horizon_days = 30
+floor = 0.1
+shape = 2.0
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let kb = config.knowledge_bases.get("test").unwrap();
+        let folders = kb.effective_folders();
+        assert_eq!(folders.len(), 1);
+        let decay = folders[0].decay.as_ref().unwrap();
+        assert_eq!(decay.horizon_days, 30);
+        assert!((decay.floor - 0.1).abs() < 1e-9);
+        assert!((decay.shape - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_legacy_watch_paths_config_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("brainjar.toml");
+        let content = r#"
+[knowledge_bases.main]
+watch_paths = ["notes"]
+auto_sync = true
+"#;
+        std::fs::write(&config_path, content).unwrap();
+        let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
+        let kb = config.knowledge_bases.get("main").unwrap();
+        assert_eq!(kb.watch_paths.len(), 1);
+        assert!(kb.folders.is_empty());
+        let folders = kb.effective_folders();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].path, "notes");
     }
 }

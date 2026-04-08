@@ -11,6 +11,7 @@ pub fn make_config(config_dir: &Path, watch_path: &Path) -> Config {
         "test".to_string(),
         KnowledgeBaseConfig {
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
+            folders: vec![],
             auto_sync: true,
             description: None,
         },

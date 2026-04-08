@@ -191,7 +191,7 @@ async fn run_list(config: &brainjar::config::Config, json: bool) -> Result<()> {
             entries.push(serde_json::json!({
                 "name": name,
                 "description": kb.description,
-                "watch_paths": kb.watch_paths,
+                "watch_paths": kb.effective_folders().iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
                 "auto_sync": kb.auto_sync,
                 "document_count": doc_count,
                 "last_sync": last_sync,
@@ -231,7 +231,7 @@ async fn run_list(config: &brainjar::config::Config, json: bool) -> Result<()> {
         if let Some(desc) = &kb.description {
             println!("    {}", desc.dimmed());
         }
-        let paths = kb.watch_paths.join(", ");
+        let paths = kb.effective_folders().iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join(", ");
         println!("    {}  {}", "Paths:".dimmed(), paths);
 
         let graph_exists = KnowledgeGraph::exists(&db_dir, name);

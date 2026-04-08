@@ -19,6 +19,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         "test".to_string(),
         KnowledgeBaseConfig {
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
+            folders: vec![],
             auto_sync: true,
             description: None,
         },
@@ -292,6 +293,7 @@ fn test_search_fts_hit() {
         "notes/sqlite.md",
         "SQLite is an embedded relational database.",
         "h1",
+        0.0, None, None, None, None,
     )
     .unwrap();
 
@@ -304,7 +306,7 @@ fn test_search_fts_hit() {
 fn test_search_fts_scores_are_positive() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open_db("test", dir.path()).unwrap();
-    db::upsert_document(&conn, "doc.md", "brainjar is wonderful", "h1").unwrap();
+    db::upsert_document(&conn, "doc.md", "brainjar is wonderful", "h1", 0.0, None, None, None, None).unwrap();
 
     let results = search::search_fts(&conn, "brainjar", 5).unwrap();
     assert!(!results.is_empty());
@@ -316,7 +318,7 @@ fn test_search_fts_scores_are_positive() {
 fn test_search_fts_miss_returns_empty() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open_db("test", dir.path()).unwrap();
-    db::upsert_document(&conn, "doc.md", "Hello world from Rust.", "h1").unwrap();
+    db::upsert_document(&conn, "doc.md", "Hello world from Rust.", "h1", 0.0, None, None, None, None).unwrap();
 
     let results = search::search_fts(&conn, "python", 5).unwrap();
     assert!(results.is_empty());
@@ -332,6 +334,7 @@ fn test_search_fts_limit_respected() {
             &format!("doc{i}.md"),
             &format!("searchterm document {i}"),
             &format!("h{i}"),
+            0.0, None, None, None, None,
         )
         .unwrap();
     }
@@ -731,6 +734,7 @@ fn test_db_upsert_makes_content_searchable() {
         "notes/test.md",
         "The quick brown fox jumps over the lazy dog",
         "h1",
+        0.0, None, None, None, None,
     )
     .unwrap();
 
@@ -744,7 +748,7 @@ fn test_db_delete_removes_from_fts() {
     let conn = db::open_db("test", dir.path()).unwrap();
 
     let unique_term = "xyzzy_unique_word_9876543";
-    db::upsert_document(&conn, "del.md", unique_term, "h1").unwrap();
+    db::upsert_document(&conn, "del.md", unique_term, "h1", 0.0, None, None, None, None).unwrap();
 
     let before = search::search_fts(&conn, unique_term, 5).unwrap();
     assert!(!before.is_empty());
@@ -759,8 +763,8 @@ fn test_db_upsert_updates_fts_content() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open_db("test", dir.path()).unwrap();
 
-    db::upsert_document(&conn, "doc.md", "old_term_abc content here", "h1").unwrap();
-    db::upsert_document(&conn, "doc.md", "completely new content now", "h2").unwrap();
+    db::upsert_document(&conn, "doc.md", "old_term_abc content here", "h1", 0.0, None, None, None, None).unwrap();
+    db::upsert_document(&conn, "doc.md", "completely new content now", "h2", 0.0, None, None, None, None).unwrap();
 
     // Old term should not match
     let old = search::search_fts(&conn, "old_term_abc", 5).unwrap();
@@ -849,4 +853,107 @@ fn test_rrf_empty_input() {
 #[test]
 fn test_rrf_empty_inner_set() {
     assert!(search::reciprocal_rank_fusion(vec![vec![]], 60.0).is_empty());
+}
+
+// ─── 11. Per-folder config with decay and weight boost ───────────────────────
+
+#[tokio::test]
+async fn test_per_folder_config_docs_stored_with_folder_params() {
+    use brainjar::config::{DecayConfig, FolderConfig, FolderType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let docs_dir = dir.path().join("docs");
+    let news_dir = dir.path().join("news");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::create_dir_all(&news_dir).unwrap();
+    std::fs::write(docs_dir.join("guide.md"), "# Guide\nA permanent guide.").unwrap();
+    std::fs::write(news_dir.join("update.md"), "# News\nToday's news.").unwrap();
+
+    let mut kbs = HashMap::new();
+    kbs.insert(
+        "test".to_string(),
+        KnowledgeBaseConfig {
+            watch_paths: vec![],
+            folders: vec![
+                FolderConfig {
+                    path: docs_dir.to_string_lossy().to_string(),
+                    title: Some("Docs".to_string()),
+                    folder_type: FolderType::Docs,
+                    weight_boost: 0.5,
+                    decay: None,
+                },
+                FolderConfig {
+                    path: news_dir.to_string_lossy().to_string(),
+                    title: Some("News".to_string()),
+                    folder_type: FolderType::Docs,
+                    weight_boost: 0.1,
+                    decay: Some(DecayConfig {
+                        horizon_days: 30,
+                        floor: 0.2,
+                        shape: 1.0,
+                    }),
+                },
+            ],
+            auto_sync: true,
+            description: None,
+        },
+    );
+    let config = Config {
+        providers: HashMap::new(),
+        knowledge_bases: kbs,
+        embeddings: None,
+        extraction: None,
+        data_dir: Some(dir.path().to_string_lossy().to_string()),
+        config_dir: dir.path().to_path_buf(),
+        watch: None,
+    };
+
+    brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)
+        .await
+        .unwrap();
+
+    let conn = db::open_db("test", &config.effective_db_dir()).unwrap();
+    assert_eq!(db::count_documents(&conn).unwrap(), 2);
+
+    // Verify docs folder document has weight_boost=0.5 and no decay
+    let (wb_docs, dh_docs): (f64, Option<i64>) = conn
+        .query_row(
+            "SELECT weight_boost, decay_horizon FROM documents WHERE path LIKE '%guide%'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!((wb_docs - 0.5).abs() < 1e-9, "guide.md should have weight_boost=0.5, got {wb_docs}");
+    assert!(dh_docs.is_none(), "guide.md should have no decay horizon");
+
+    // Verify news folder document has weight_boost=0.1 and decay horizon=30
+    let (wb_news, dh_news, df_news): (f64, Option<i64>, Option<f64>) = conn
+        .query_row(
+            "SELECT weight_boost, decay_horizon, decay_floor FROM documents WHERE path LIKE '%update%'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!((wb_news - 0.1).abs() < 1e-9, "update.md should have weight_boost=0.1, got {wb_news}");
+    assert_eq!(dh_news, Some(30), "update.md should have decay_horizon=30");
+    assert!((df_news.unwrap() - 0.2).abs() < 1e-9, "update.md decay_floor should be 0.2");
+}
+
+#[test]
+fn test_effective_folders_watch_paths_backward_compat() {
+    use brainjar::config::{FolderType};
+
+    let toml_str = r#"
+[knowledge_bases.kb]
+watch_paths = ["notes", "docs"]
+auto_sync = true
+"#;
+    let config: brainjar::config::Config = toml::from_str(toml_str).unwrap();
+    let kb = config.knowledge_bases.get("kb").unwrap();
+    let folders = kb.effective_folders();
+    assert_eq!(folders.len(), 2);
+    assert_eq!(folders[0].path, "notes");
+    assert_eq!(folders[0].folder_type, FolderType::Docs);
+    assert!((folders[0].weight_boost).abs() < f64::EPSILON);
+    assert!(folders[0].decay.is_none());
 }
