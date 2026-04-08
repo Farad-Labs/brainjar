@@ -59,8 +59,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Summary
+        if: always() && env.GITHUB_STEP_SUMMARY != ''
         run: |
-          echo "### Docker image published" >> "$GITHUB_SUMMARY"
-          echo "" >> "$GITHUB_SUMMARY"
-          echo "- **Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\`" >> "$GITHUB_SUMMARY"
-          echo "- **Tags:** \`${{ steps.meta.outputs.tags }}\`" >> "$GITHUB_SUMMARY"
+          echo "### Docker image published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** \`${{ steps.meta.outputs.tags }}\`" >> "$GITHUB_STEP_SUMMARY"
