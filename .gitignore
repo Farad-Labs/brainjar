@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 .brainjar/state.json
 brainjar.toml
 !test-corpus/brainjar*.toml
