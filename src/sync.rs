@@ -178,7 +178,7 @@ async fn sync_kb_human(
             // Chunk the document and (re)insert chunks
             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                 let _ = db::delete_chunks_for_doc(&conn, doc_id);
-                let file_chunks = chunk::chunk_file(rel_path, &content);
+                let file_chunks = chunk::chunk_file(rel_path, &content, Some(&folder_cfg.folder_type));
                 for c in &file_chunks {
                     let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
                 }
@@ -213,23 +213,123 @@ async fn sync_kb_human(
         }
     }
 
-    // ── Optional: entity extraction via configured LLM ──────────────────────
+    // ── Tree-sitter extraction for code folders (zero LLM cost) ─────────────
+    // Build a lookup: rel_path → FolderConfig (for unextracted docs that don't
+    // carry their folder_cfg through the changes map).
+    let path_to_folder_cfg: HashMap<&String, &FolderConfig> = local_files
+        .iter()
+        .map(|(k, (_, fc))| (k, fc))
+        .collect();
+
     // Extract: newly upserted docs + previously-interrupted docs
-    let docs_to_extract: HashMap<&String, &std::path::PathBuf> = changes
+    // We keep the full (abs_path, folder_cfg) so we can decide the extraction path.
+    let docs_to_extract: HashMap<&String, (&std::path::PathBuf, &FolderConfig)> = changes
         .to_upsert
         .iter()
-        .map(|(k, (v, _))| (k, v))
-        .chain(unextracted.iter())
+        .map(|(k, (v, fc))| (k, (v, fc)))
+        .chain(
+            unextracted.iter().filter_map(|(k, v)| {
+                path_to_folder_cfg.get(k).map(|fc| (k, (v, *fc)))
+            })
+        )
+        .collect();
+
+    #[cfg(feature = "ts-core")]
+    {
+        use crate::config::FolderType;
+        use crate::treesitter;
+
+        // Partition: code docs that tree-sitter can handle
+        let ts_docs: Vec<(&String, &std::path::PathBuf)> = docs_to_extract
+            .iter()
+            .filter(|(rel_path, (_, fc))| {
+                fc.folder_type == FolderType::Code && {
+                    let ext = std::path::Path::new(rel_path.as_str())
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    treesitter::get_language(ext).is_some()
+                }
+            })
+            .map(|(k, (v, _))| (*k, *v))
+            .collect();
+
+        if !ts_docs.is_empty() {
+            match KnowledgeGraph::open(&db_dir, kb_name) {
+                Ok(kg) => {
+                    let mut ts_entities = 0usize;
+                    let mut ts_rels = 0usize;
+
+                    for (rel_path, abs_path) in &ts_docs {
+                        let content = match std::fs::read_to_string(abs_path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        let ext = std::path::Path::new(rel_path.as_str())
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        let (entities, rels) = treesitter::extract_code_entities(&content, ext, rel_path);
+                        ts_entities += entities.len();
+                        ts_rels += rels.len();
+                        let _ = kg.remove_document(rel_path);
+                        if let Err(e) = kg.ingest_code_entities(&entities, &rels, rel_path) {
+                            eprintln!("  ⚠ Code graph ingest failed for {}: {}", rel_path, e);
+                        } else if let Err(e) = db::mark_extracted(&conn, rel_path) {
+                            eprintln!("  ⚠ mark_extracted failed for {}: {}", rel_path, e);
+                        }
+                    }
+
+                    println!(
+                        "  {} AST entities ({} entities, {} relationships, {} files)",
+                        "✓".green(),
+                        ts_entities,
+                        ts_rels,
+                        ts_docs.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  ⚠ Could not open graph DB for code extraction: {}", e);
+                }
+            }
+        }
+    }
+
+    // ── Optional: entity extraction via configured LLM ──────────────────────
+    // Only for docs that weren't handled by tree-sitter above.
+    #[cfg(feature = "ts-core")]
+    let llm_docs_to_extract: HashMap<&String, &std::path::PathBuf> = {
+        use crate::config::FolderType;
+        use crate::treesitter;
+        docs_to_extract
+            .iter()
+            .filter(|(rel_path, (_, fc))| {
+                // Skip code folders where tree-sitter handled it
+                !(fc.folder_type == FolderType::Code && {
+                    let ext = std::path::Path::new(rel_path.as_str())
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    treesitter::get_language(ext).is_some()
+                })
+            })
+            .map(|(k, (v, _))| (*k, *v))
+            .collect()
+    };
+    #[cfg(not(feature = "ts-core"))]
+    let llm_docs_to_extract: HashMap<&String, &std::path::PathBuf> = docs_to_extract
+        .iter()
+        .map(|(k, (v, _))| (*k, *v))
         .collect();
 
     if let Some(extraction_cfg) = &config.extraction
-        && extraction_cfg.enabled && !docs_to_extract.is_empty() {
+        && extraction_cfg.enabled && !llm_docs_to_extract.is_empty() {
             let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
             let extractor = Extractor::new(extraction_cfg, api_key, base_url);
             match KnowledgeGraph::open(&db_dir, kb_name) {
                 Ok(kg) => {
-                    let extract_total = docs_to_extract.len() as u64;
+                    let extract_total = llm_docs_to_extract.len() as u64;
                     let epb = ProgressBar::new(extract_total);
                     epb.set_style(
                         ProgressStyle::default_bar()
@@ -242,7 +342,7 @@ async fn sync_kb_human(
                     let mut total_rels = 0usize;
                     let mut extraction_errors = 0usize;
 
-                    for (rel_path, abs_path) in &docs_to_extract {
+                    for (rel_path, abs_path) in &llm_docs_to_extract {
                         let display_name = if rel_path.len() > 60 {
                             format!("...{}", &rel_path[rel_path.len() - 57..])
                         } else {
@@ -559,7 +659,7 @@ async fn sync_kb_json(
             // Chunk the document
             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                 let _ = db::delete_chunks_for_doc(&conn, doc_id);
-                let file_chunks = chunk::chunk_file(rel_path, &content);
+                let file_chunks = chunk::chunk_file(rel_path, &content, Some(&folder_cfg.folder_type));
                 for c in &file_chunks {
                     let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
                 }
@@ -587,23 +687,99 @@ async fn sync_kb_json(
             .filter(|p| !changes.to_upsert.contains_key(p))
             .filter_map(|p| local_files.get(&p).map(|(abs, _)| (p, abs.clone())))
             .collect();
-        let docs_to_extract_json: HashMap<&String, &std::path::PathBuf> = changes
-            .to_upsert
+
+        // Build path → FolderConfig lookup for unextracted docs
+        let path_to_fc_json: HashMap<&String, &FolderConfig> = local_files
             .iter()
-            .map(|(k, (v, _))| (k, v))
-            .chain(unextracted_json.iter())
+            .map(|(k, (_, fc))| (k, fc))
             .collect();
 
-        // Optional entity extraction
+        let docs_to_extract_json: HashMap<&String, (&std::path::PathBuf, &FolderConfig)> = changes
+            .to_upsert
+            .iter()
+            .map(|(k, (v, fc))| (k, (v, fc)))
+            .chain(
+                unextracted_json.iter().filter_map(|(k, v)| {
+                    path_to_fc_json.get(k).map(|fc| (k, (v, *fc)))
+                })
+            )
+            .collect();
+
+        // Tree-sitter extraction for code folders (JSON mode)
+        #[cfg(feature = "ts-core")]
+        {
+            use crate::config::FolderType;
+            use crate::treesitter;
+
+            let ts_docs_json: Vec<(&String, &std::path::PathBuf)> = docs_to_extract_json
+                .iter()
+                .filter(|(rel_path, (_, fc))| {
+                    fc.folder_type == FolderType::Code && {
+                        let ext = std::path::Path::new(rel_path.as_str())
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        treesitter::get_language(ext).is_some()
+                    }
+                })
+                .map(|(k, (v, _))| (*k, *v))
+                .collect();
+
+            if !ts_docs_json.is_empty()
+                && let Ok(kg) = KnowledgeGraph::open(&db_dir, kb_name) {
+                    for (rel_path, abs_path) in &ts_docs_json {
+                        let content = match std::fs::read_to_string(abs_path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        let ext = std::path::Path::new(rel_path.as_str())
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        let (entities, rels) = treesitter::extract_code_entities(&content, ext, rel_path);
+                        let _ = kg.remove_document(rel_path);
+                        if kg.ingest_code_entities(&entities, &rels, rel_path).is_ok() {
+                            let _ = db::mark_extracted(&conn, rel_path);
+                        }
+                    }
+                }
+        }
+
+        // Optional LLM entity extraction for non-code (or unsupported) folders
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
+
+        #[cfg(feature = "ts-core")]
+        let llm_docs_json: HashMap<&String, &std::path::PathBuf> = {
+            use crate::config::FolderType;
+            use crate::treesitter;
+            docs_to_extract_json
+                .iter()
+                .filter(|(rel_path, (_, fc))| {
+                    !(fc.folder_type == FolderType::Code && {
+                        let ext = std::path::Path::new(rel_path.as_str())
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        treesitter::get_language(ext).is_some()
+                    })
+                })
+                .map(|(k, (v, _))| (*k, *v))
+                .collect()
+        };
+        #[cfg(not(feature = "ts-core"))]
+        let llm_docs_json: HashMap<&String, &std::path::PathBuf> = docs_to_extract_json
+            .iter()
+            .map(|(k, (v, _))| (*k, *v))
+            .collect();
+
         if let Some(extraction_cfg) = &config.extraction
-            && extraction_cfg.enabled && !docs_to_extract_json.is_empty() {
+            && extraction_cfg.enabled && !llm_docs_json.is_empty() {
                 let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
                 let extractor = Extractor::new(extraction_cfg, api_key, base_url);
                 if let Ok(kg) = KnowledgeGraph::open(&db_dir, kb_name) {
-                    for (rel_path, abs_path) in &docs_to_extract_json {
+                    for (rel_path, abs_path) in &llm_docs_json {
                         let content = match std::fs::read_to_string(abs_path) {
                             Ok(c) => c,
                             Err(_) => continue,
