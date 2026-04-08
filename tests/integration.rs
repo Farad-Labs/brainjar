@@ -18,6 +18,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
     kbs.insert(
         "test".to_string(),
         KnowledgeBaseConfig {
+            kb_type: brainjar::config::KbType::Docs,
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
             folders: vec![],
             auto_sync: true,
@@ -859,7 +860,7 @@ fn test_rrf_empty_inner_set() {
 
 #[tokio::test]
 async fn test_per_folder_config_docs_stored_with_folder_params() {
-    use brainjar::config::{DecayConfig, FolderConfig, FolderType};
+    use brainjar::config::{DecayConfig, FolderConfig, KbType};
 
     let dir = tempfile::tempdir().unwrap();
     let docs_dir = dir.path().join("docs");
@@ -873,19 +874,18 @@ async fn test_per_folder_config_docs_stored_with_folder_params() {
     kbs.insert(
         "test".to_string(),
         KnowledgeBaseConfig {
+            kb_type: KbType::Docs,
             watch_paths: vec![],
             folders: vec![
                 FolderConfig {
                     path: docs_dir.to_string_lossy().to_string(),
                     title: Some("Docs".to_string()),
-                    folder_type: FolderType::Docs,
                     weight_boost: 0.5,
                     decay: None,
                 },
                 FolderConfig {
                     path: news_dir.to_string_lossy().to_string(),
                     title: Some("News".to_string()),
-                    folder_type: FolderType::Docs,
                     weight_boost: 0.1,
                     decay: Some(DecayConfig {
                         horizon_days: 30,
@@ -941,8 +941,6 @@ async fn test_per_folder_config_docs_stored_with_folder_params() {
 
 #[test]
 fn test_effective_folders_watch_paths_backward_compat() {
-    use brainjar::config::{FolderType};
-
     let toml_str = r#"
 [knowledge_bases.kb]
 watch_paths = ["notes", "docs"]
@@ -953,7 +951,6 @@ auto_sync = true
     let folders = kb.effective_folders();
     assert_eq!(folders.len(), 2);
     assert_eq!(folders[0].path, "notes");
-    assert_eq!(folders[0].folder_type, FolderType::Docs);
     assert!((folders[0].weight_boost).abs() < f64::EPSILON);
     assert!(folders[0].decay.is_none());
 }

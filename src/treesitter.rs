@@ -1742,10 +1742,10 @@ CONSTANT = 42
     #[test]
     fn test_chunk_fallback_for_unsupported_ext() {
         use crate::chunk::chunk_file;
-        use crate::config::FolderType;
-        // Unknown extension → chunk_file should fall back to regex-based chunker
+        use crate::config::KbType;
+        // Unknown extension -> chunk_file should fall back to regex-based chunker
         let content = "some unknown content here that should be handled gracefully\n";
-        let chunks = chunk_file("src/Foo.unknownext", content, Some(&FolderType::Code));
+        let chunks = chunk_file("src/Foo.unknownext", content, Some(&KbType::Code));
         // Should not panic
         let _ = chunks;
     }

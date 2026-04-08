@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use crate::config::FolderType;
+use crate::config::KbType;
 
 /// Minimum chunk size in characters (avoid tiny fragments).
 pub const MIN_CHUNK_CHARS: usize = 30;
@@ -28,19 +28,19 @@ pub struct Chunk {
 
 /// Dispatcher: choose chunking strategy based on file extension.
 ///
-/// When `folder_type` is `Some(FolderType::Code)` and tree-sitter supports the
+/// When `kb_type` is `Some(KbType::Code)` and tree-sitter supports the
 /// file extension, uses AST-aware chunking. Otherwise falls back to the
 /// regex-based or text chunker.
-pub fn chunk_file(path: &str, content: &str, folder_type: Option<&FolderType>) -> Vec<Chunk> {
+pub fn chunk_file(path: &str, content: &str, kb_type: Option<&KbType>) -> Vec<Chunk> {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
 
-    // For code folders, prefer AST-aware chunking via tree-sitter
+    // For code KBs, prefer AST-aware chunking via tree-sitter
     #[cfg(feature = "tree-sitter")]
-    if matches!(folder_type, Some(FolderType::Code)) {
+    if matches!(kb_type, Some(KbType::Code)) {
         use crate::treesitter;
         if treesitter::get_language(&ext).is_some() {
             let ast_chunks = treesitter::chunk_code_ast(content, &ext);

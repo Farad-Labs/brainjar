@@ -10,6 +10,7 @@ pub fn make_config(config_dir: &Path, watch_path: &Path) -> Config {
     kbs.insert(
         "test".to_string(),
         KnowledgeBaseConfig {
+            kb_type: brainjar::config::KbType::Docs,
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
             folders: vec![],
             auto_sync: true,
