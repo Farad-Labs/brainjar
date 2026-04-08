@@ -401,6 +401,58 @@ brainjar's FTS5 + graph + fuzzy approach gives you:
 - You own the data — one `.db` file, portable forever
 - No surprise bills from cloud KB services
 
+## Docker
+
+brainjar ships a multi-stage `Dockerfile` (Rust builder → debian-slim runtime) and a `docker-compose.yml` for quick local deployment.
+
+### Build the image
+
+```bash
+docker build -t brainjar .
+```
+
+### Sync a knowledge base
+
+Mount your KB source files at `/kb` and a persistent data volume at `/data`.
+Place a `brainjar.toml` config in the KB directory (or at `/data/brainjar.toml`) that points `watch_paths` at `/kb`:
+
+```bash
+docker run --rm \
+  -v brainjar-data:/data \
+  -v ./my-kb:/kb \
+  -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
+  brainjar sync --config /kb/brainjar.toml
+```
+
+### Search
+
+```bash
+docker run --rm \
+  -v brainjar-data:/data \
+  -v ./my-kb:/kb \
+  brainjar search "query" --config /kb/brainjar.toml
+```
+
+### docker-compose
+
+Copy `.env.example` or export your API keys, then:
+
+```bash
+# Start and run a sync
+docker compose run --rm brainjar sync --config /kb/brainjar.toml
+
+# Search
+docker compose run --rm brainjar search "deployment workflow" --config /kb/brainjar.toml
+
+# MCP server (keep running for Claude Code / Cursor)
+docker compose up
+```
+
+The `brainjar-data` named volume persists your SQLite databases across container restarts.
+Edit `docker-compose.yml` to change the knowledge base path (default: `./my-knowledge`).
+
+---
+
 ## Development
 
 ```bash
