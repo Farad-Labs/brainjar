@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 // Internal config structures gathered from the wizard
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct FolderEntry {
     pub path: String,
     pub title: Option<String>,
@@ -67,8 +68,16 @@ impl WizardDefaults {
             .iter()
             .map(|(name, kb)| KbConfig {
                 name: name.clone(),
-                watch_paths: kb.watch_paths.clone(),
+                kb_type: kb.kb_type.clone(),
                 description: kb.description.clone(),
+                folders: kb.effective_folders().into_iter().map(|f| FolderEntry {
+                    path: f.path,
+                    title: f.title,
+                    weight_boost: f.weight_boost,
+                    horizon_days: f.decay.as_ref().map(|d| d.horizon_days),
+                    floor: f.decay.as_ref().map(|d| d.floor),
+                    shape: f.decay.as_ref().map(|d| d.shape),
+                }).collect(),
                 auto_sync: kb.auto_sync,
             })
             .collect();
@@ -922,8 +931,9 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                 .iter()
                 .map(|kb| KbConfig {
                     name: kb.name.clone(),
-                    watch_paths: kb.watch_paths.clone(),
+                    kb_type: kb.kb_type.clone(),
                     description: kb.description.clone(),
+                    folders: kb.folders.clone(),
                     auto_sync: kb.auto_sync,
                 })
                 .collect()
