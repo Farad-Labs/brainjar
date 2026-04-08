@@ -1,55 +1,27 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
-use rustyline::completion::{Completer, FilenameCompleter, Pair};
-use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
-use rustyline::{CompletionType, Config as RlConfig, Editor, Helper};
+use crate::config::KbType;
 use std::path::{Path, PathBuf};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Rustyline helper: filename completion only
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct PathHelper {
-    completer: FilenameCompleter,
-}
-
-impl Helper for PathHelper {}
-
-impl Completer for PathHelper {
-    type Candidate = Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        ctx: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        self.completer.complete(line, pos, ctx)
-    }
-}
-
-impl Hinter for PathHelper {
-    type Hint = String;
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<String> {
-        None
-    }
-}
-
-impl Highlighter for PathHelper {}
-impl Validator for PathHelper {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal config structures gathered from the wizard
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub struct FolderEntry {
+    pub path: String,
+    pub title: Option<String>,
+    pub weight_boost: f64,
+    pub horizon_days: Option<u32>,
+    pub floor: Option<f64>,
+    pub shape: Option<f64>,
+}
+
 pub struct KbConfig {
     name: String,
-    watch_paths: Vec<String>,
+    kb_type: KbType,
     description: Option<String>,
+    folders: Vec<FolderEntry>,
     auto_sync: bool,
 }
 
@@ -994,28 +966,199 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
             Some(desc_str.trim().to_string())
         };
 
-        println!("  {}", "Watch paths — tab-complete enabled, empty line to finish:".dimmed());
-        let watch_paths = prompt_watch_paths()?;
+        // Step 4a — KB Type
+        let kb_type_idx = Select::with_theme(&theme)
+            .with_prompt("  What type of knowledge base is this?")
+            .items(&[
+                "Documentation & notes     (markdown, text, journals, meeting notes)",
+                "Source code               (AST-aware parsing, code intelligence)",
+            ])
+            .default(0)
+            .interact()?;
+        let kb_type = if kb_type_idx == 1 { KbType::Code } else { KbType::Docs };
 
-        if watch_paths.is_empty() {
+        // Step 4b — Add Folders (contextual to KB type)
+        println!("  {}", "Add folders — empty path to finish:".dimmed());
+        let mut folders: Vec<FolderEntry> = Vec::new();
+
+        loop {
+            let folder_path: String = Input::with_theme(&theme)
+                .with_prompt("  Folder path (empty to finish)")
+                .default(String::new())
+                .allow_empty(true)
+                .interact_text()?;
+
+            let folder_path = folder_path.trim().to_string();
+            if folder_path.is_empty() {
+                break;
+            }
+
+            if !std::path::Path::new(&folder_path).exists() {
+                println!(
+                    "  {}",
+                    format!("Warning: '{}' does not exist (will be indexed when created).", folder_path).yellow()
+                );
+            }
+
+            let entry = if matches!(kb_type, KbType::Code) {
+                // Code KB: simple flow (path + title + boost)
+                let title_str: String = Input::with_theme(&theme)
+                    .with_prompt("  Title (optional)")
+                    .default(String::new())
+                    .allow_empty(true)
+                    .interact_text()?;
+                let title = if title_str.trim().is_empty() { None } else { Some(title_str.trim().to_string()) };
+
+                let boost_str: String = Input::with_theme(&theme)
+                    .with_prompt("  Weight boost (0.0-0.5) [0.1]")
+                    .default("0.1".to_string())
+                    .interact_text()?;
+                let weight_boost = boost_str.trim().parse::<f64>().unwrap_or(0.1).clamp(0.0, 1.0);
+
+                let label = title.clone().unwrap_or_else(|| folder_path.clone());
+                println!(
+                    "  {} Added: \"{}\" at {}, boost +{:.1}",
+                    "\u{2713}".green(), label.cyan(), folder_path.dimmed(), weight_boost
+                );
+
+                FolderEntry {
+                    path: folder_path,
+                    title,
+                    weight_boost,
+                    horizon_days: None,
+                    floor: None,
+                    shape: None,
+                }
+            } else {
+                // Docs KB: show decay presets
+                let preset_idx = Select::with_theme(&theme)
+                    .with_prompt("  What kind of documents are in this folder?")
+                    .items(&[
+                        "Daily notes, journals, logs        (fade over months)",
+                        "Reference docs, wikis              (stay relevant for years)",
+                        "Meeting notes, standups            (useful for weeks)",
+                        "Scratch files, temp notes          (stale in days)",
+                        "Source of truth, specs             (never decay)",
+                        "Custom                             (set your own values)",
+                    ])
+                    .default(0)
+                    .interact()?;
+
+                let (preset_name, horizon, floor, shape, boost): (&str, Option<u32>, Option<f64>, Option<f64>, f64) =
+                    match preset_idx {
+                        0 => ("Daily Notes",      Some(180), Some(0.3), Some(1.5), 0.1),
+                        1 => ("Reference Docs",   Some(730), Some(0.6), Some(1.0), 0.2),
+                        2 => ("Meeting Notes",    Some(90),  Some(0.2), Some(1.2), 0.1),
+                        3 => ("Scratch Files",    Some(30),  Some(0.0), Some(0.5), 0.0),
+                        4 => ("Source of Truth",  None,      None,      None,      0.3),
+                        _ => {
+                            // Custom
+                            let title_str: String = Input::with_theme(&theme)
+                                .with_prompt("  Title (optional)")
+                                .default(String::new())
+                                .allow_empty(true)
+                                .interact_text()?;
+                            let title_val = if title_str.trim().is_empty() { None } else { Some(title_str.trim().to_string()) };
+
+                            let enable_decay = Confirm::with_theme(&theme)
+                                .with_prompt("  Enable temporal decay?")
+                                .default(true)
+                                .interact()?;
+
+                            let (h, fl, sh) = if enable_decay {
+                                let h_str: String = Input::with_theme(&theme)
+                                    .with_prompt("  horizon_days [180]")
+                                    .default("180".to_string())
+                                    .interact_text()?;
+                                let h = h_str.trim().parse::<u32>().unwrap_or(180).max(1);
+
+                                let fl_str: String = Input::with_theme(&theme)
+                                    .with_prompt("  floor (0.0-1.0) [0.3]")
+                                    .default("0.3".to_string())
+                                    .interact_text()?;
+                                let fl = fl_str.trim().parse::<f64>().unwrap_or(0.3).clamp(0.0, 1.0);
+
+                                let sh_str: String = Input::with_theme(&theme)
+                                    .with_prompt("  shape (>0, 1.0=linear) [1.5]")
+                                    .default("1.5".to_string())
+                                    .interact_text()?;
+                                let sh = sh_str.trim().parse::<f64>().unwrap_or(1.5).max(0.01);
+
+                                (Some(h), Some(fl), Some(sh))
+                            } else {
+                                (None, None, None)
+                            };
+
+                            let boost_str: String = Input::with_theme(&theme)
+                                .with_prompt("  weight_boost (0.0-0.5) [0.1]")
+                                .default("0.1".to_string())
+                                .interact_text()?;
+                            let custom_boost = boost_str.trim().parse::<f64>().unwrap_or(0.1).clamp(0.0, 1.0);
+                            if custom_boost > 0.5 {
+                                println!("  {}", "Warning: weight_boost > 0.5 may dominate other signals.".yellow());
+                            }
+
+                            let label = title_val.clone().unwrap_or_else(|| folder_path.clone());
+                            println!(
+                                "  {} Custom folder \"{}\" at {}",
+                                "\u{2713}".green(), label.cyan(), folder_path.dimmed()
+                            );
+
+                            folders.push(FolderEntry {
+                                path: folder_path,
+                                title: title_val,
+                                weight_boost: custom_boost,
+                                horizon_days: h,
+                                floor: fl,
+                                shape: sh,
+                            });
+                            continue;
+                        }
+                    };
+
+                if preset_idx < 5 {
+                    let decay_desc = if let Some(h) = horizon {
+                        format!("decay over {} days, floor {}, shape {}", h, floor.unwrap_or(0.0), shape.unwrap_or(1.0))
+                    } else {
+                        "no decay".to_string()
+                    };
+                    println!(
+                        "  {} \"{}\" preset: {}, boost +{:.1}",
+                        "\u{2713}".green(), preset_name.cyan(), decay_desc.dimmed(), boost
+                    );
+                }
+
+                FolderEntry {
+                    path: folder_path,
+                    title: Some(preset_name.to_string()),
+                    weight_boost: boost,
+                    horizon_days: horizon,
+                    floor,
+                    shape,
+                }
+            };
+
+            folders.push(entry);
+        }
+
+        if folders.is_empty() {
             println!(
                 "  {}",
-                "Warning: no watch paths set. Add them manually to brainjar.toml.".yellow()
+                "Warning: no folders set. Add them manually to brainjar.toml.".yellow()
             );
         }
 
+        // Step 4c — Auto-sync
         let auto_sync = Confirm::with_theme(&theme)
-            .with_prompt(format!(
-                "  Enable auto_sync for '{}'?",
-                name
-            ))
+            .with_prompt(format!("  Enable auto_sync for '{}'?", name))
             .default(true)
             .interact()?;
 
         knowledge_bases.push(KbConfig {
             name: name.clone(),
-            watch_paths,
+            kb_type,
             description,
+            folders,
             auto_sync,
         });
 
@@ -1129,51 +1272,6 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Collect watch paths with rustyline tab completion
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn prompt_watch_paths() -> Result<Vec<String>> {
-    let rl_config = RlConfig::builder()
-        .completion_type(CompletionType::List)
-        .build();
-
-    let helper = PathHelper {
-        completer: FilenameCompleter::new(),
-    };
-
-    let mut rl = Editor::with_config(rl_config)?;
-    rl.set_helper(Some(helper));
-
-    let mut paths: Vec<String> = Vec::new();
-
-    loop {
-        let prompt = format!(
-            "  {}",
-            if paths.is_empty() {
-                "Watch path (empty to finish): "
-            } else {
-                "Next path  (empty to finish): "
-            }
-        );
-
-        match rl.readline(&prompt) {
-            Ok(line) => {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    break;
-                }
-                rl.add_history_entry(&trimmed).ok();
-                paths.push(trimmed);
-            }
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Ok(paths)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 /// Heuristic: env var names are ALL_CAPS_WITH_UNDERSCORES, raw keys are not.
 fn is_env_var_name(s: &str) -> bool {
     !s.is_empty()
@@ -1262,29 +1360,43 @@ pub fn generate_brainjar_toml(
 
     // Knowledge base sections
     for kb in kbs {
-        let watch_paths_toml = if kb.watch_paths.is_empty() {
-            "[]  # TODO: add paths to watch".to_string()
-        } else {
-            let entries: Vec<String> = kb
-                .watch_paths
-                .iter()
-                .map(|p| format!("\"{}\"", p.replace('"', "\\\"")))
-                .collect();
-            format!("[{}]", entries.join(", "))
+        let type_str = match kb.kb_type {
+            KbType::Code => "code",
+            KbType::Docs => "docs",
         };
-
-        toml.push_str(&format!(
-            "[knowledge_bases.{}]\n",
-            kb.name
-        ));
+        toml.push_str(&format!("[knowledge_bases.{}]\n", kb.name));
+        toml.push_str(&format!("type        = \"{}\"\n", type_str));
         if let Some(desc) = &kb.description {
             toml.push_str(&format!("description = \"{}\"\n", desc.replace('"', "\\\"")));
         }
-        toml.push_str(&format!(
-            "watch_paths = {}\n\
-             auto_sync   = {}\n\n",
-            watch_paths_toml, kb.auto_sync,
-        ));
+        toml.push_str(&format!("auto_sync   = {}\n", kb.auto_sync));
+
+        if kb.folders.is_empty() {
+            toml.push_str("# TODO: add [[knowledge_bases.");
+            toml.push_str(&kb.name);
+            toml.push_str(".folders]] entries\n");
+        }
+        toml.push('\n');
+
+        for folder in &kb.folders {
+            toml.push_str(&format!("[[knowledge_bases.{}.folders]]\n", kb.name));
+            toml.push_str(&format!("path         = \"{}\"\n", folder.path.replace('"', "\\\"")));
+            if let Some(title) = &folder.title {
+                toml.push_str(&format!("title        = \"{}\"\n", title.replace('"', "\\\"")));
+            }
+            if folder.weight_boost != 0.0 {
+                toml.push_str(&format!("weight_boost = {:.2}\n", folder.weight_boost));
+            }
+            if let (Some(horizon), Some(floor), Some(shape)) =
+                (folder.horizon_days, folder.floor, folder.shape)
+            {
+                toml.push_str(&format!("\n[knowledge_bases.{}.folders.decay]\n", kb.name));
+                toml.push_str(&format!("horizon_days = {}\n", horizon));
+                toml.push_str(&format!("floor        = {:.1}\n", floor));
+                toml.push_str(&format!("shape        = {:.1}\n", shape));
+            }
+            toml.push('\n');
+        }
     }
 
     if let Some(parent) = config_path.parent()
