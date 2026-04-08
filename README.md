@@ -221,6 +221,48 @@ watch_paths = [
 auto_sync = true    # included in `brainjar sync` without --kb flag
 ```
 
+### Folder Configuration
+
+For finer control, use `folders` instead of (or alongside) `watch_paths`. Each folder can have its own weight boost and temporal decay settings:
+
+```toml
+[knowledge_bases.my-notes]
+auto_sync = true
+
+[[knowledge_bases.my-notes.folders]]
+title = "Source of Truth"
+path = "docs/sot"
+weight_boost = 0.3              # additive boost to search score for results from this folder
+
+[[knowledge_bases.my-notes.folders]]
+title = "Daily Notes"
+path = "notes/daily"
+weight_boost = 0.1
+
+[knowledge_bases.my-notes.folders.decay]
+horizon_days = 180              # score bottoms out after 180 days
+floor = 0.3                     # minimum score multiplier (never below 30% of base score)
+shape = 1.5                     # curve: >1 = slow start, 1.0 = linear, <1 = fast start
+```
+
+**`weight_boost`** -- additive boost to the final search score for any result from this folder. Use this to prioritize certain folders (e.g. source-of-truth docs rank higher than scratch notes).
+
+**`decay`** -- temporal decay reduces search scores for older documents. The formula is:
+
+```
+score = floor + (1 - floor) * max(0, 1 - (age / horizon)^shape)
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `horizon_days` | Age in days when score reaches the floor | (required) |
+| `floor` | Minimum score multiplier, 0.0 to 1.0 | 0.3 |
+| `shape` | Curve steepness: 1.0 = linear, >1 = slow initial decay, <1 = fast initial decay | 1.0 |
+
+If `decay` is omitted, the folder has no temporal decay (documents always score at full weight).
+
+**Backward compatible:** plain `watch_paths` still works. Folders without decay or boost behave identically to the old format.
+
 ## Watch Mode
 
 Monitor knowledge bases for changes and auto-sync:
