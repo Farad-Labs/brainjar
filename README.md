@@ -399,9 +399,9 @@ Graph data lives in `~/.brainjar/<kb_name>_graph.db` (GraphQLite).
 ## Commands
 
 ```bash
-brainjar sync [kb_name] [--force] [--dry-run] [-H]
-brainjar search <query> [--kb <name>] [--limit N] [--text] [--graph] [--vector] [--local] [--smart] [--chunks] [--doc-score] [-H]
-brainjar status [kb_name] [-H]
+brainjar sync [--kb <name>] [--force] [--dry-run] [--json]
+brainjar search <query> [--kb <name>] [--limit N] [--text] [--graph] [--vector] [--local] [--smart] [--chunks] [--doc-score] [--json]
+brainjar status [--kb <name>] [--json]
 brainjar init
 brainjar mcp
 ```

@@ -25,7 +25,8 @@ enum Commands {
     /// Sync files to the local SQLite index
     Sync {
         /// Knowledge base name (default: all auto_sync KBs)
-        kb_name: Option<String>,
+        #[arg(long)]
+        kb: Option<String>,
         /// Force re-index of all files
         #[arg(long)]
         force: bool,
@@ -92,7 +93,8 @@ enum Commands {
     /// Show knowledge base status
     Status {
         /// Knowledge base name (default: all KBs)
-        kb_name: Option<String>,
+        #[arg(long)]
+        kb: Option<String>,
         /// JSON output (default: human-readable)
         #[arg(long)]
         json: bool,
@@ -275,7 +277,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Sync {
-            kb_name,
+            kb,
             force,
             dry_run,
             no_wait,
@@ -284,7 +286,7 @@ async fn main() -> Result<()> {
             reembed,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            brainjar::sync::run_sync(&config, kb_name.as_deref(), force, dry_run, no_wait, json, reembed)
+            brainjar::sync::run_sync(&config, kb.as_deref(), force, dry_run, no_wait, json, reembed)
                 .await?;
         }
         Commands::Search {
@@ -308,9 +310,9 @@ async fn main() -> Result<()> {
             brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score, smart)
                 .await?;
         }
-        Commands::Status { kb_name, json, human: _ } => {
+        Commands::Status { kb, json, human: _ } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            brainjar::status::run_status(&config, kb_name.as_deref(), json).await?;
+            brainjar::status::run_status(&config, kb.as_deref(), json).await?;
         }
         Commands::List { json, human: _ } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
