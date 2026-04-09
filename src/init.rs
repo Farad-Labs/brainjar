@@ -1370,6 +1370,24 @@ fn dimension_choices(model: &str) -> Vec<(usize, bool)> {
     }
 }
 
+fn default_embed_model(provider: &str) -> &'static str {
+    match provider {
+        "gemini" => "gemini-embedding-2-preview",
+        "openai" => "text-embedding-3-small",
+        "ollama" => "nomic-embed-text",
+        _ => "text-embedding-004",
+    }
+}
+
+fn default_extract_model(provider: &str) -> &'static str {
+    match provider {
+        "gemini" => "gemini-3.1-flash-lite-preview",
+        "openai" => "gpt-4o-mini",
+        "ollama" => "llama3",
+        _ => "gemini-3.1-flash-lite-preview",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1539,23 +1557,5 @@ mod tests {
         assert_ne!(dir1, dir2);
         assert_eq!(dir1, Path::new("/tmp/proj1/.brainjar"));
         assert_eq!(dir2, Path::new("/tmp/proj2/.brainjar"));
-    }
-}
-
-fn default_embed_model(provider: &str) -> &'static str {
-    match provider {
-        "gemini" => "gemini-embedding-2-preview",
-        "openai" => "text-embedding-3-small",
-        "ollama" => "nomic-embed-text",
-        _ => "text-embedding-004",
-    }
-}
-
-fn default_extract_model(provider: &str) -> &'static str {
-    match provider {
-        "gemini" => "gemini-3.1-flash-lite-preview",
-        "openai" => "gpt-4o-mini",
-        "ollama" => "llama3",
-        _ => "gemini-3.1-flash-lite-preview",
     }
 }

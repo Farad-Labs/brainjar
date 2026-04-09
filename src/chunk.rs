@@ -124,14 +124,16 @@ pub fn chunk_markdown(content: &str) -> Vec<Chunk> {
         flush_chunk(&mut chunks, &mut current, current_start, lines.len(), &chunk_type);
     }
 
+    let chunks = merge_short_chunks(chunks);
+
     // Fallback: whole file as one chunk if nothing was produced
     if chunks.is_empty() && !content.trim().is_empty() {
-        chunks.push(Chunk {
+        return vec![Chunk {
             content: content.to_string(),
             line_start: 1,
             line_end: lines.len().max(1),
             chunk_type: "paragraph".to_string(),
-        });
+        }];
     }
 
     chunks
@@ -146,7 +148,7 @@ fn extract_frontmatter(lines: &[&str]) -> (usize, Option<Chunk>) {
     for i in 1..lines.len() {
         if lines[i].trim() == "---" || lines[i].trim() == "..." {
             let content = lines[..=i].join("\n");
-            let chunk = if content.trim().len() >= MIN_CHUNK_CHARS {
+            let chunk = if !content.trim().is_empty() {
                 Some(Chunk {
                     content,
                     line_start: 1,
@@ -210,13 +212,15 @@ pub fn chunk_code(content: &str) -> Vec<Chunk> {
         flush_chunk(&mut chunks, &mut current, current_start, lines.len(), "function");
     }
 
+    let chunks = merge_short_chunks(chunks);
+
     if chunks.is_empty() && !content.trim().is_empty() {
-        chunks.push(Chunk {
+        return vec![Chunk {
             content: content.to_string(),
             line_start: 1,
             line_end: lines.len().max(1),
             chunk_type: "code_block".to_string(),
-        });
+        }];
     }
 
     chunks
@@ -309,13 +313,15 @@ pub fn chunk_text(content: &str) -> Vec<Chunk> {
         flush_chunk(&mut chunks, &mut current, current_start, lines.len(), "paragraph");
     }
 
+    let chunks = merge_short_chunks(chunks);
+
     if chunks.is_empty() && !content.trim().is_empty() {
-        chunks.push(Chunk {
+        return vec![Chunk {
             content: content.to_string(),
             line_start: 1,
             line_end: lines.len().max(1),
             chunk_type: "paragraph".to_string(),
-        });
+        }];
     }
 
     chunks
@@ -328,7 +334,8 @@ fn char_size(lines: &[&str]) -> usize {
     lines.iter().map(|l| l.len() + 1).sum()
 }
 
-/// Push a chunk if it meets the minimum size. Clears `lines` afterwards.
+/// Push a non-empty chunk unconditionally. Clears `lines` afterwards.
+/// Short chunks are handled later by `merge_short_chunks`.
 fn flush_chunk(
     chunks: &mut Vec<Chunk>,
     lines: &mut Vec<&str>,
@@ -340,7 +347,7 @@ fn flush_chunk(
         return;
     }
     let content = lines.join("\n");
-    if content.trim().len() >= MIN_CHUNK_CHARS {
+    if !content.trim().is_empty() {
         chunks.push(Chunk {
             content,
             line_start,
@@ -349,6 +356,63 @@ fn flush_chunk(
         });
     }
     lines.clear();
+}
+
+/// Merge any chunks below MIN_CHUNK_CHARS into adjacent chunks.
+/// Short chunks are prepended to the next chunk, or appended to the previous if no next exists.
+/// Truly empty (whitespace-only) chunks are discarded.
+fn merge_short_chunks(chunks: Vec<Chunk>) -> Vec<Chunk> {
+    if chunks.is_empty() {
+        return chunks;
+    }
+
+    let mut result: Vec<Chunk> = Vec::new();
+    let mut pending: Option<Chunk> = None;
+
+    for chunk in chunks {
+        if chunk.content.trim().is_empty() {
+            continue; // discard whitespace-only chunks
+        }
+
+        match pending.take() {
+            None => {
+                if chunk.content.trim().len() < MIN_CHUNK_CHARS {
+                    // Too short — hold as pending to prepend to the next chunk
+                    pending = Some(chunk);
+                } else {
+                    result.push(chunk);
+                }
+            }
+            Some(short) => {
+                // Prepend the short chunk to this one; adopt this chunk's type
+                let merged = Chunk {
+                    content: format!("{}\n{}", short.content, chunk.content),
+                    line_start: short.line_start,
+                    line_end: chunk.line_end,
+                    chunk_type: chunk.chunk_type.clone(),
+                };
+                if merged.content.trim().len() < MIN_CHUNK_CHARS {
+                    // Still short — keep accumulating
+                    pending = Some(merged);
+                } else {
+                    result.push(merged);
+                }
+            }
+        }
+    }
+
+    // Any leftover pending chunk: append to the previous chunk, or keep as sole output
+    if let Some(short) = pending {
+        if let Some(last) = result.last_mut() {
+            last.content = format!("{}\n{}", last.content, short.content);
+            last.line_end = short.line_end;
+        } else {
+            // Only chunk in the file — keep it regardless of size
+            result.push(short);
+        }
+    }
+
+    result
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -682,5 +746,77 @@ mod tests {
         assert!(!is_code_boundary("let x = 5;"));
         assert!(!is_code_boundary("  // comment"));
         assert!(!is_code_boundary("return value;"));
+    }
+
+    // ─── Content-loss regression tests ───────────────────────────────────────
+
+    fn assert_all_words_present(content: &str, chunks: &[Chunk]) {
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join(" ");
+        for word in content.split_whitespace() {
+            let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
+            if !clean.is_empty() {
+                assert!(all_text.contains(clean), "Word '{}' from source not found in any chunk", clean);
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_content_lost_markdown() {
+        let content = "# Short Title\n\n## Section One\n\nSome paragraph text here that is long enough to be its own chunk.\n";
+        let chunks = chunk_file("test.md", content);
+        assert_all_words_present(content, &chunks);
+    }
+
+    #[test]
+    fn test_no_content_lost_code() {
+        let content = "// Copyright\n\nfn first_function() {\n    // This function does something meaningful here.\n    let x = 42;\n    println!(\"{}\", x);\n}\n\nfn second_function() {\n    // This function also does something meaningful.\n    let y = 99;\n    println!(\"{}\", y);\n}\n";
+        let chunks = chunk_file("test.rs", content);
+        assert_all_words_present(content, &chunks);
+    }
+
+    #[test]
+    fn test_no_content_lost_text() {
+        let content = "Hi.\n\nThis is a longer paragraph with enough content to qualify as its own chunk.\nIt continues here with more words.\n\nAnother short one.\n\nAnd a final paragraph that is long enough to stand on its own as a proper chunk.\n";
+        let chunks = chunk_file("notes.txt", content);
+        assert_all_words_present(content, &chunks);
+    }
+
+    #[test]
+    fn test_short_h1_merged_into_first_section() {
+        let content = "# Atlas Architecture\n\n## Ingestion Layer\n\nSome content about the ingestion layer that is long enough.\n";
+        let chunks = chunk_file("architecture.md", content);
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(
+            all_text.contains("Architecture"),
+            "Expected 'Architecture' to appear in some chunk, but all_text was: {:?}",
+            all_text
+        );
+        assert!(
+            all_text.contains("Atlas"),
+            "Expected 'Atlas' to appear in some chunk"
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_line_numbers() {
+        // "# Short Title" is ~13 chars — well below MIN_CHUNK_CHARS (30).
+        // It must be merged into the next chunk, and line_start must be 1.
+        let content = "# Short Title\n\n## Section\n\nThis section has enough content to qualify on its own as a chunk.\n";
+        let chunks = chunk_file("test.md", content);
+        assert!(!chunks.is_empty(), "Expected at least one chunk");
+        // The merged chunk should start at line 1 (the H1 line)
+        let first = &chunks[0];
+        assert_eq!(first.line_start, 1, "Merged chunk should start at line 1");
+        assert!(first.line_end >= 3, "Merged chunk line_end should cover the section heading");
+    }
+
+    #[test]
+    fn test_single_short_chunk_not_discarded() {
+        // A file with only a short title — should still produce one chunk, not zero.
+        let content = "# Hi\n";
+        let chunks = chunk_file("test.md", content);
+        assert!(!chunks.is_empty(), "A file with only a short title must not produce zero chunks");
+        let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(all_text.contains("Hi"), "The title word must appear in output");
     }
 }
