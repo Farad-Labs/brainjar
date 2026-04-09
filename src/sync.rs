@@ -281,7 +281,7 @@ async fn sync_kb_human(
                     }
 
                     println!(
-                        "  {} AST entities ({} entities, {} relationships, {} files)",
+                        "  {} Extracted via tree-sitter: {} entities, {} relationships ({} files)",
                         "✓".green(),
                         ts_entities,
                         ts_rels,
@@ -390,18 +390,20 @@ async fn sync_kb_human(
 
                     if extraction_errors == 0 {
                         println!(
-                            "  {} Extracted entities ({} entities, {} relationships)",
+                            "  {} Extracted via LLM: {} entities, {} relationships ({} files)",
                             "✓".green(),
                             total_entities,
-                            total_rels
+                            total_rels,
+                            llm_docs_to_extract.len()
                         );
                     } else {
                         println!(
-                            "  {} Extracted entities ({} entities, {} relationships, {} errors)",
+                            "  {} Extracted via LLM: {} entities, {} relationships, {} errors ({} files)",
                             "\u{26a0}".yellow(),
                             total_entities,
                             total_rels,
-                            extraction_errors
+                            extraction_errors,
+                            llm_docs_to_extract.len()
                         );
                     }
                 }
