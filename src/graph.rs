@@ -129,6 +129,74 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Upsert code entities and relationships extracted by tree-sitter.
+    /// This is analogous to `ingest_entities` but works with `CodeEntity`/`CodeRelationship`
+    /// types from the `treesitter` module, enabling zero-LLM-cost graph construction.
+    #[cfg(feature = "tree-sitter")]
+    pub fn ingest_code_entities(
+        &self,
+        entities: &[crate::treesitter::CodeEntity],
+        relationships: &[crate::treesitter::CodeRelationship],
+        file_path: &str,
+    ) -> Result<()> {
+        let doc_id = sanitize_id(file_path);
+
+        self.graph
+            .upsert_node(&doc_id, [("path", file_path), ("type", "document")], "Document")
+            .with_context(|| format!("Failed to upsert document node: {file_path}"))?;
+
+        for entity in entities {
+            let node_id = sanitize_id(&format!("{}::{}", file_path, entity.name));
+            self.graph
+                .upsert_node(
+                    &node_id,
+                    [
+                        ("name", entity.name.as_str()),
+                        ("type", entity.entity_type.as_str()),
+                        ("description", entity.description.as_str()),
+                        ("file", entity.file_path.as_str()),
+                    ],
+                    "Entity",
+                )
+                .with_context(|| format!("Failed to upsert code entity: {}", entity.name))?;
+
+            self.graph
+                .upsert_edge(&doc_id, &node_id, [("source_doc", file_path)], "MENTIONS")
+                .with_context(|| {
+                    format!("Failed to upsert MENTIONS edge for: {}", entity.name)
+                })?;
+        }
+
+        for rel in relationships {
+            let source_id = sanitize_id(&format!("{}::{}", file_path, rel.source));
+            let target_id = sanitize_id(&rel.target);
+
+            self.graph
+                .upsert_node(&source_id, [("name", rel.source.as_str())], "Entity")
+                .with_context(|| format!("Failed to upsert source entity: {}", rel.source))?;
+            self.graph
+                .upsert_node(&target_id, [("name", rel.target.as_str())], "Entity")
+                .with_context(|| format!("Failed to upsert target entity: {}", rel.target))?;
+
+            let rel_type = graphqlite::sanitize_rel_type(&rel.relation);
+            self.graph
+                .upsert_edge(
+                    &source_id,
+                    &target_id,
+                    [("source_doc", file_path)],
+                    &rel_type,
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to upsert edge: {} -[{}]-> {}",
+                        rel.source, rel.relation, rel.target
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
     /// Search: find entities matching a query, then surface the documents that
     /// mention them (plus 1-hop neighbors for context).
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<GraphSearchResult>> {

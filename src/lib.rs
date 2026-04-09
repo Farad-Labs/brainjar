@@ -11,6 +11,8 @@ pub mod mcp;
 pub mod search;
 pub mod status;
 pub mod sync;
+#[cfg(feature = "tree-sitter")]
+pub mod treesitter;
 pub mod watch;
 
 pub use config::Config;

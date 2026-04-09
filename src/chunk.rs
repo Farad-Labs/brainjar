@@ -2,15 +2,17 @@
 //!
 //! Strategies:
 //! - Markdown (.md): headings, code blocks, frontmatter
-//! - Code (.rs, .py, .ts, …): function/class boundaries, fallback fixed-size
+//! - Code (.rs, .py, .ts, …): AST-aware (tree-sitter) or regex-based fallback
 //! - Text (everything else): paragraph-based, fallback fixed-size
 
 use std::path::Path;
 
+use crate::config::FolderType;
+
 /// Minimum chunk size in characters (avoid tiny fragments).
-const MIN_CHUNK_CHARS: usize = 30;
+pub const MIN_CHUNK_CHARS: usize = 30;
 /// Maximum chunk size in characters (~2000 tokens at ~4 chars/token).
-const MAX_CHUNK_CHARS: usize = 8_000;
+pub const MAX_CHUNK_CHARS: usize = 8_000;
 
 /// A single semantic chunk extracted from a document.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -25,12 +27,36 @@ pub struct Chunk {
 }
 
 /// Dispatcher: choose chunking strategy based on file extension.
-pub fn chunk_file(path: &str, content: &str) -> Vec<Chunk> {
+///
+/// When `folder_type` is `Some(FolderType::Code)` and tree-sitter supports the
+/// file extension, uses AST-aware chunking. Otherwise falls back to the
+/// regex-based or text chunker.
+pub fn chunk_file(path: &str, content: &str, folder_type: Option<&FolderType>) -> Vec<Chunk> {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+
+    // For code folders, prefer AST-aware chunking via tree-sitter
+    #[cfg(feature = "tree-sitter")]
+    if matches!(folder_type, Some(FolderType::Code)) {
+        use crate::treesitter;
+        if treesitter::get_language(&ext).is_some() {
+            let ast_chunks = treesitter::chunk_code_ast(content, &ext);
+            if !ast_chunks.is_empty() {
+                return ast_chunks
+                    .into_iter()
+                    .map(|c| Chunk {
+                        content: c.content,
+                        line_start: c.line_start,
+                        line_end: c.line_end,
+                        chunk_type: c.chunk_type,
+                    })
+                    .collect();
+            }
+        }
+    }
 
     match ext.as_str() {
         "md" | "markdown" => chunk_markdown(content),
@@ -659,7 +685,7 @@ mod tests {
     #[test]
     fn test_chunk_file_dispatches_markdown() {
         let content = "# Title\nThis is a markdown document with enough content to qualify as a chunk.\n";
-        let chunks = chunk_file("notes/hello.md", content);
+        let chunks = chunk_file("notes/hello.md", content, None);
         assert!(!chunks.is_empty());
         assert!(chunks.iter().any(|c| c.chunk_type == "heading_section" || c.chunk_type == "paragraph"));
     }
@@ -667,14 +693,14 @@ mod tests {
     #[test]
     fn test_chunk_file_dispatches_rust() {
         let content = "fn main() {\n    println!(\"hello world and more content here\");\n    let x = 42;\n    let y = x + 1;\n    println!(\"{}\", y);\n}\n";
-        let chunks = chunk_file("src/main.rs", content);
+        let chunks = chunk_file("src/main.rs", content, None);
         assert!(!chunks.is_empty());
     }
 
     #[test]
     fn test_chunk_file_dispatches_text() {
         let content = "This is a plain text file.\nIt has multiple lines of content.\nEnough to be a proper chunk.\n";
-        let chunks = chunk_file("notes/readme.txt", content);
+        let chunks = chunk_file("notes/readme.txt", content, None);
         assert!(!chunks.is_empty());
     }
 
@@ -682,7 +708,7 @@ mod tests {
     fn test_chunk_file_ts_uses_code_strategy() {
         let content = "function hello() {\n  console.log('hello world with enough content');\n  return 42;\n}\n\
                        function world() {\n  console.log('another function here');\n  return 99;\n}\n";
-        let chunks = chunk_file("app.ts", content);
+        let chunks = chunk_file("app.ts", content, None);
         assert!(!chunks.is_empty());
     }
 
@@ -763,28 +789,28 @@ mod tests {
     #[test]
     fn test_no_content_lost_markdown() {
         let content = "# Short Title\n\n## Section One\n\nSome paragraph text here that is long enough to be its own chunk.\n";
-        let chunks = chunk_file("test.md", content);
+        let chunks = chunk_file("test.md", content, None);
         assert_all_words_present(content, &chunks);
     }
 
     #[test]
     fn test_no_content_lost_code() {
         let content = "// Copyright\n\nfn first_function() {\n    // This function does something meaningful here.\n    let x = 42;\n    println!(\"{}\", x);\n}\n\nfn second_function() {\n    // This function also does something meaningful.\n    let y = 99;\n    println!(\"{}\", y);\n}\n";
-        let chunks = chunk_file("test.rs", content);
+        let chunks = chunk_file("test.rs", content, None);
         assert_all_words_present(content, &chunks);
     }
 
     #[test]
     fn test_no_content_lost_text() {
         let content = "Hi.\n\nThis is a longer paragraph with enough content to qualify as its own chunk.\nIt continues here with more words.\n\nAnother short one.\n\nAnd a final paragraph that is long enough to stand on its own as a proper chunk.\n";
-        let chunks = chunk_file("notes.txt", content);
+        let chunks = chunk_file("notes.txt", content, None);
         assert_all_words_present(content, &chunks);
     }
 
     #[test]
     fn test_short_h1_merged_into_first_section() {
         let content = "# Atlas Architecture\n\n## Ingestion Layer\n\nSome content about the ingestion layer that is long enough.\n";
-        let chunks = chunk_file("architecture.md", content);
+        let chunks = chunk_file("architecture.md", content, None);
         let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join(" ");
         assert!(
             all_text.contains("Architecture"),
@@ -802,7 +828,7 @@ mod tests {
         // "# Short Title" is ~13 chars — well below MIN_CHUNK_CHARS (30).
         // It must be merged into the next chunk, and line_start must be 1.
         let content = "# Short Title\n\n## Section\n\nThis section has enough content to qualify on its own as a chunk.\n";
-        let chunks = chunk_file("test.md", content);
+        let chunks = chunk_file("test.md", content, None);
         assert!(!chunks.is_empty(), "Expected at least one chunk");
         // The merged chunk should start at line 1 (the H1 line)
         let first = &chunks[0];
@@ -814,7 +840,7 @@ mod tests {
     fn test_single_short_chunk_not_discarded() {
         // A file with only a short title — should still produce one chunk, not zero.
         let content = "# Hi\n";
-        let chunks = chunk_file("test.md", content);
+        let chunks = chunk_file("test.md", content, None);
         assert!(!chunks.is_empty(), "A file with only a short title must not produce zero chunks");
         let all_text: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join(" ");
         assert!(all_text.contains("Hi"), "The title word must appear in output");
