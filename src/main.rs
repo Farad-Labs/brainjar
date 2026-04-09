@@ -709,7 +709,7 @@ async fn run_add_folder(
             // Docs KB: show decay presets
             let preset_idx = Select::with_theme(&theme)
                 .with_prompt("What kind of documents are in this folder?")
-                .items(&[
+                .items([
                     "Daily notes, journals, logs        (fade over months)",
                     "Reference docs, wikis              (stay relevant for years)",
                     "Meeting notes, standups            (useful for weeks)",
