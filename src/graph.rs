@@ -132,7 +132,7 @@ impl KnowledgeGraph {
     /// Upsert code entities and relationships extracted by tree-sitter.
     /// This is analogous to `ingest_entities` but works with `CodeEntity`/`CodeRelationship`
     /// types from the `treesitter` module, enabling zero-LLM-cost graph construction.
-    #[cfg(feature = "ts-core")]
+    #[cfg(feature = "tree-sitter")]
     pub fn ingest_code_entities(
         &self,
         entities: &[crate::treesitter::CodeEntity],

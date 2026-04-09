@@ -234,7 +234,7 @@ async fn sync_kb_human(
         )
         .collect();
 
-    #[cfg(feature = "ts-core")]
+    #[cfg(feature = "tree-sitter")]
     {
         use crate::config::FolderType;
         use crate::treesitter;
@@ -297,7 +297,7 @@ async fn sync_kb_human(
 
     // ── Optional: entity extraction via configured LLM ──────────────────────
     // Only for docs that weren't handled by tree-sitter above.
-    #[cfg(feature = "ts-core")]
+    #[cfg(feature = "tree-sitter")]
     let llm_docs_to_extract: HashMap<&String, &std::path::PathBuf> = {
         use crate::config::FolderType;
         use crate::treesitter;
@@ -316,7 +316,7 @@ async fn sync_kb_human(
             .map(|(k, (v, _))| (*k, *v))
             .collect()
     };
-    #[cfg(not(feature = "ts-core"))]
+    #[cfg(not(feature = "tree-sitter"))]
     let llm_docs_to_extract: HashMap<&String, &std::path::PathBuf> = docs_to_extract
         .iter()
         .map(|(k, (v, _))| (*k, *v))
@@ -706,7 +706,7 @@ async fn sync_kb_json(
             .collect();
 
         // Tree-sitter extraction for code folders (JSON mode)
-        #[cfg(feature = "ts-core")]
+        #[cfg(feature = "tree-sitter")]
         {
             use crate::config::FolderType;
             use crate::treesitter;
@@ -749,7 +749,7 @@ async fn sync_kb_json(
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
 
-        #[cfg(feature = "ts-core")]
+        #[cfg(feature = "tree-sitter")]
         let llm_docs_json: HashMap<&String, &std::path::PathBuf> = {
             use crate::config::FolderType;
             use crate::treesitter;
@@ -767,7 +767,7 @@ async fn sync_kb_json(
                 .map(|(k, (v, _))| (*k, *v))
                 .collect()
         };
-        #[cfg(not(feature = "ts-core"))]
+        #[cfg(not(feature = "tree-sitter"))]
         let llm_docs_json: HashMap<&String, &std::path::PathBuf> = docs_to_extract_json
             .iter()
             .map(|(k, (v, _))| (*k, *v))

@@ -11,7 +11,7 @@ pub mod mcp;
 pub mod search;
 pub mod status;
 pub mod sync;
-#[cfg(feature = "ts-core")]
+#[cfg(feature = "tree-sitter")]
 pub mod treesitter;
 pub mod watch;
 

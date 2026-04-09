@@ -72,10 +72,10 @@ tree-sitter-ocaml = { version = "0.24", optional = true }
 tree-sitter-dart = { version = "0.1", optional = true }
 
 [features]
-default = ["local-embed", "ts-core"]
+default = ["local-embed", "tree-sitter"]
 golden-corpus = []
 local-embed = ["fastembed"]
-ts-core = [
+tree-sitter = [
   "dep:tree-sitter",
   "dep:tree-sitter-rust",
   "dep:tree-sitter-python",

@@ -39,7 +39,7 @@ pub fn chunk_file(path: &str, content: &str, folder_type: Option<&FolderType>) -
         .to_lowercase();
 
     // For code folders, prefer AST-aware chunking via tree-sitter
-    #[cfg(feature = "ts-core")]
+    #[cfg(feature = "tree-sitter")]
     if matches!(folder_type, Some(FolderType::Code)) {
         use crate::treesitter;
         if treesitter::get_language(&ext).is_some() {
