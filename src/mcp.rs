@@ -505,7 +505,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 entries.push(serde_json::json!({
                     "name": name,
                     "description": kb.description,
-                    "watch_paths": kb.watch_paths,
+                    "watch_paths": kb.effective_folders().iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
                     "auto_sync": kb.auto_sync,
                     "document_count": doc_count,
                     "last_sync": last_sync,

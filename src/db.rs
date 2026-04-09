@@ -245,6 +245,25 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')", [])?;
     }
 
+    if version < 3 {
+        // v2 → v3: add per-folder scoring columns to documents
+        let has_weight_boost: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name='weight_boost'")
+            .and_then(|mut s| s.query_row([], |r| r.get::<_, i64>(0)))
+            .map(|count| count > 0)
+            .unwrap_or(false);
+        if !has_weight_boost {
+            conn.execute_batch(
+                "ALTER TABLE documents ADD COLUMN weight_boost REAL NOT NULL DEFAULT 0.0;
+                 ALTER TABLE documents ADD COLUMN decay_horizon INTEGER;
+                 ALTER TABLE documents ADD COLUMN decay_floor REAL;
+                 ALTER TABLE documents ADD COLUMN decay_shape REAL;
+                 ALTER TABLE documents ADD COLUMN folder_path TEXT;",
+            )?;
+        }
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')", [])?;
+    }
+
     Ok(())
 }
 
@@ -266,16 +285,44 @@ pub fn get_all_hashes(conn: &Connection) -> Result<std::collections::HashMap<Str
 
 /// Upsert a document into the documents table (triggers keep FTS in sync).
 /// Always resets `extracted = 0` on update so that re-synced docs are re-extracted.
-pub fn upsert_document(conn: &Connection, path: &str, content: &str, hash: &str) -> Result<()> {
+/// Pass `weight_boost = 0.0` and `decay_* = None` when no per-folder config applies.
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_document(
+    conn: &Connection,
+    path: &str,
+    content: &str,
+    hash: &str,
+    weight_boost: f64,
+    decay_horizon: Option<u32>,
+    decay_floor: Option<f64>,
+    decay_shape: Option<f64>,
+    folder_path: Option<&str>,
+) -> Result<()> {
     conn.execute(
-        r#"INSERT INTO documents (path, content, content_hash, extracted, updated_at)
-           VALUES (?1, ?2, ?3, 0, datetime('now'))
+        r#"INSERT INTO documents
+               (path, content, content_hash, extracted, updated_at,
+                weight_boost, decay_horizon, decay_floor, decay_shape, folder_path)
+           VALUES (?1, ?2, ?3, 0, datetime('now'), ?4, ?5, ?6, ?7, ?8)
            ON CONFLICT(path) DO UPDATE SET
-               content      = excluded.content,
-               content_hash = excluded.content_hash,
-               extracted    = 0,
-               updated_at   = excluded.updated_at"#,
-        rusqlite::params![path, content, hash],
+               content       = excluded.content,
+               content_hash  = excluded.content_hash,
+               extracted     = 0,
+               updated_at    = excluded.updated_at,
+               weight_boost  = excluded.weight_boost,
+               decay_horizon = excluded.decay_horizon,
+               decay_floor   = excluded.decay_floor,
+               decay_shape   = excluded.decay_shape,
+               folder_path   = excluded.folder_path"#,
+        rusqlite::params![
+            path,
+            content,
+            hash,
+            weight_boost,
+            decay_horizon.map(|v| v as i64),
+            decay_floor,
+            decay_shape,
+            folder_path,
+        ],
     )
     .with_context(|| format!("Failed to upsert document: {}", path))?;
     Ok(())
@@ -704,12 +751,17 @@ mod tests {
         // (we call it via a temp file round-trip — simpler to inline the DDL)
         conn.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS documents (
-                id           INTEGER PRIMARY KEY,
-                path         TEXT UNIQUE NOT NULL,
-                content      TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                extracted    INTEGER NOT NULL DEFAULT 0,
-                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                id            INTEGER PRIMARY KEY,
+                path          TEXT UNIQUE NOT NULL,
+                content       TEXT NOT NULL,
+                content_hash  TEXT NOT NULL,
+                extracted     INTEGER NOT NULL DEFAULT 0,
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                weight_boost  REAL NOT NULL DEFAULT 0.0,
+                decay_horizon INTEGER,
+                decay_floor   REAL,
+                decay_shape   REAL,
+                folder_path   TEXT
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
                 path,
@@ -764,7 +816,7 @@ mod tests {
     #[test]
     fn test_upsert_and_retrieve_document() {
         let conn = make_conn();
-        upsert_document(&conn, "notes/hello.md", "Hello world", "hash1").unwrap();
+        upsert_document(&conn, "notes/hello.md", "Hello world", "hash1", 0.0, None, None, None, None).unwrap();
         let count = count_documents(&conn).unwrap();
         assert_eq!(count, 1);
     }
@@ -772,8 +824,8 @@ mod tests {
     #[test]
     fn test_upsert_document_updates_existing() {
         let conn = make_conn();
-        upsert_document(&conn, "notes/hello.md", "Original content", "hash1").unwrap();
-        upsert_document(&conn, "notes/hello.md", "Updated content", "hash2").unwrap();
+        upsert_document(&conn, "notes/hello.md", "Original content", "hash1", 0.0, None, None, None, None).unwrap();
+        upsert_document(&conn, "notes/hello.md", "Updated content", "hash2", 0.0, None, None, None, None).unwrap();
 
         // Still only 1 document
         assert_eq!(count_documents(&conn).unwrap(), 1);
@@ -785,7 +837,7 @@ mod tests {
     #[test]
     fn test_delete_document() {
         let conn = make_conn();
-        upsert_document(&conn, "notes/delete_me.md", "Content", "hash1").unwrap();
+        upsert_document(&conn, "notes/delete_me.md", "Content", "hash1", 0.0, None, None, None, None).unwrap();
         assert_eq!(count_documents(&conn).unwrap(), 1);
 
         delete_document(&conn, "notes/delete_me.md").unwrap();
@@ -809,8 +861,8 @@ mod tests {
     #[test]
     fn test_get_all_hashes_multiple_docs() {
         let conn = make_conn();
-        upsert_document(&conn, "a.md", "AAA", "hash_a").unwrap();
-        upsert_document(&conn, "b.md", "BBB", "hash_b").unwrap();
+        upsert_document(&conn, "a.md", "AAA", "hash_a", 0.0, None, None, None, None).unwrap();
+        upsert_document(&conn, "b.md", "BBB", "hash_b", 0.0, None, None, None, None).unwrap();
 
         let hashes = get_all_hashes(&conn).unwrap();
         assert_eq!(hashes.len(), 2);
@@ -851,7 +903,7 @@ mod tests {
     #[test]
     fn test_get_document_id() {
         let conn = make_conn();
-        upsert_document(&conn, "foo/bar.md", "Content", "h1").unwrap();
+        upsert_document(&conn, "foo/bar.md", "Content", "h1", 0.0, None, None, None, None).unwrap();
         let id = get_document_id(&conn, "foo/bar.md").unwrap();
         assert!(id.is_some());
     }
@@ -870,12 +922,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = open_db("test", dir.path()).unwrap();
 
-        // schema_version should be 2 (latest)
+        // schema_version should be 3 (latest)
         let version = get_meta(&conn, "schema_version").unwrap();
-        assert_eq!(version.as_deref(), Some("2"));
+        assert_eq!(version.as_deref(), Some("3"));
 
         // extracted column should exist and default to 0
-        upsert_document(&conn, "a.md", "content", "h1").unwrap();
+        upsert_document(&conn, "a.md", "content", "h1", 0.0, None, None, None, None).unwrap();
         let unextracted = get_unextracted_paths(&conn).unwrap();
         assert_eq!(unextracted.len(), 1);
     }
@@ -921,9 +973,9 @@ mod tests {
         // Re-open via open_db — migration should fire
         let conn = open_db("legacy", dir.path()).unwrap();
 
-        // schema_version bumped to 2 (latest)
+        // schema_version bumped to 3 (latest)
         let version = get_meta(&conn, "schema_version").unwrap();
-        assert_eq!(version.as_deref(), Some("2"));
+        assert_eq!(version.as_deref(), Some("3"));
 
         // v2 migration sets extracted=0 for re-chunking; re-open won't have extracted=1 anymore
         // The existing doc should still be present
@@ -934,12 +986,116 @@ mod tests {
     #[test]
     fn test_already_migrated_db_reopens_without_error() {
         let dir = tempfile::tempdir().unwrap();
-        // First open migrates and sets schema_version = 2
+        // First open migrates and sets schema_version = 3
         open_db("test", dir.path()).unwrap();
-        // Second open should not error (migration is a no-op at v2)
+        // Second open should not error (migration is a no-op at v3)
         let conn = open_db("test", dir.path()).unwrap();
         let version = get_meta(&conn, "schema_version").unwrap();
-        assert_eq!(version.as_deref(), Some("2"));
+        assert_eq!(version.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_migration_v2_to_v3_adds_decay_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate a v2 database (no weight_boost/decay columns)
+        {
+            let db_path = dir.path().join("v2test.db");
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(r#"
+                CREATE TABLE documents (
+                    id           INTEGER PRIMARY KEY,
+                    path         TEXT UNIQUE NOT NULL,
+                    content      TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    extracted    INTEGER NOT NULL DEFAULT 0,
+                    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE VIRTUAL TABLE documents_fts USING fts5(
+                    path, content, content='documents', content_rowid='id'
+                );
+                CREATE TRIGGER documents_ai AFTER INSERT ON documents BEGIN
+                    INSERT INTO documents_fts(rowid, path, content)
+                    VALUES (new.id, new.path, new.content);
+                END;
+                CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                    VALUES ('delete', old.id, old.path, old.content);
+                END;
+                CREATE TRIGGER documents_au AFTER UPDATE ON documents BEGIN
+                    INSERT INTO documents_fts(documents_fts, rowid, path, content)
+                    VALUES ('delete', old.id, old.path, old.content);
+                    INSERT INTO documents_fts(rowid, path, content)
+                    VALUES (new.id, new.path, new.content);
+                END;
+                CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY,
+                    doc_id INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    chunk_type TEXT
+                );
+                CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                    content, content='chunks', content_rowid='id'
+                );
+                CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+                    INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+                END;
+                CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+                    INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES ('delete', old.id, old.content);
+                END;
+                CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+                    INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES ('delete', old.id, old.content);
+                    INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+                END;
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE vocabulary (word TEXT PRIMARY KEY, frequency INTEGER DEFAULT 1);
+                INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+                INSERT INTO documents (path, content, content_hash)
+                    VALUES ('old.md', 'old content', 'oldhash');
+            "#).unwrap();
+        }
+        // Re-open via open_db — v3 migration should fire
+        let conn = open_db("v2test", dir.path()).unwrap();
+        let version = get_meta(&conn, "schema_version").unwrap();
+        assert_eq!(version.as_deref(), Some("3"));
+
+        // New columns should exist and have sensible defaults
+        let weight_boost: f64 = conn.query_row(
+            "SELECT weight_boost FROM documents WHERE path = 'old.md'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert!((weight_boost - 0.0).abs() < f64::EPSILON);
+
+        let decay_horizon: Option<i64> = conn.query_row(
+            "SELECT decay_horizon FROM documents WHERE path = 'old.md'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(decay_horizon.is_none());
+    }
+
+    #[test]
+    fn test_upsert_document_stores_folder_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_db("folderparam", dir.path()).unwrap();
+        upsert_document(
+            &conn, "test.md", "content", "hash",
+            1.5, Some(30), Some(0.2), Some(2.0), Some("news"),
+        ).unwrap();
+        let (wb, dh, df, ds, fp): (f64, Option<i64>, Option<f64>, Option<f64>, Option<String>) =
+            conn.query_row(
+                "SELECT weight_boost, decay_horizon, decay_floor, decay_shape, folder_path
+                 FROM documents WHERE path = 'test.md'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            ).unwrap();
+        assert!((wb - 1.5).abs() < f64::EPSILON);
+        assert_eq!(dh, Some(30));
+        assert!((df.unwrap() - 0.2).abs() < 1e-9);
+        assert!((ds.unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(fp.as_deref(), Some("news"));
     }
 
     #[test]

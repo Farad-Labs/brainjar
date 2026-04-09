@@ -113,7 +113,7 @@ pub async fn run_status(config: &Config, kb_name: Option<&str>, json: bool) -> R
                 "vocab_count": vocab_count,
                 "last_sync": last_sync,
                 "auto_sync": kb.auto_sync,
-                "watch_paths": kb.watch_paths,
+                "watch_paths": kb.effective_folders().iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
                 "vector_db": vector_db,
                 "graph_db": graph_db,
             });
@@ -197,7 +197,7 @@ fn print_kb_status(
     println!(
         "  {:<20} {}",
         "Watch paths:".dimmed(),
-        kb.watch_paths.join(", ").dimmed()
+        kb.effective_folders().iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join(", ").dimmed()
     );
     println!(
         "  {:<20} {}",

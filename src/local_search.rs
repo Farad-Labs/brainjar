@@ -35,8 +35,8 @@ pub fn run_local_search(
     let mut all_results: Vec<LocalSearchResult> = Vec::new();
 
     for kb_config in config.knowledge_bases.values() {
-        let watch_paths = config.expand_watch_paths(kb_config);
-        for base_path in &watch_paths {
+        let folder_paths = config.expand_watch_paths(kb_config);
+        for (base_path, _folder_cfg) in &folder_paths {
             let results = search_path(base_path, query, limit, exact)?;
             all_results.extend(results);
         }

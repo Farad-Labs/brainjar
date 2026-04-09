@@ -9,7 +9,7 @@ use glob::Pattern;
 use walkdir::WalkDir;
 
 use crate::chunk;
-use crate::config::{Config, KnowledgeBaseConfig};
+use crate::config::{Config, FolderConfig, KnowledgeBaseConfig};
 use crate::db;
 use crate::embed::Embedder;
 use crate::extract::Extractor;
@@ -72,8 +72,8 @@ async fn sync_kb_human(
     let db_dir = config.effective_db_dir();
     let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
     let conn = db::open_db_with_dims(kb_name, &db_dir, vec_dims)?;
-    let watch_paths = config.expand_watch_paths(kb);
-    let local_files = collect_files(config, &watch_paths);
+    let folder_paths = config.expand_watch_paths(kb);
+    let local_files = collect_files(config, &folder_paths);
     let changes = compute_changes(&conn, &local_files, force)?;
 
     let total_upsert = changes.to_upsert.len();
@@ -90,7 +90,7 @@ async fn sync_kb_human(
         .into_iter()
         .filter(|p| !changes.to_upsert.contains_key(p)) // avoid double-counting
         .filter_map(|p| {
-            local_files.get(&p).cloned().map(|abs| (p, abs))
+            local_files.get(&p).map(|(abs, _)| (p, abs.clone()))
         })
         .collect();
 
@@ -148,7 +148,7 @@ async fn sync_kb_human(
         );
 
         let mut total_chunks = 0usize;
-        for (rel_path, abs_path) in &changes.to_upsert {
+        for (rel_path, (abs_path, folder_cfg)) in &changes.to_upsert {
             // Truncate long filenames for display
             let display_name = if rel_path.len() > 60 {
                 format!("...{}", &rel_path[rel_path.len() - 57..])
@@ -164,7 +164,17 @@ async fn sync_kb_human(
             } else {
                 new_count += 1;
             }
-            db::upsert_document(&conn, rel_path, &content, &hash)?;
+            db::upsert_document(
+                &conn,
+                rel_path,
+                &content,
+                &hash,
+                folder_cfg.weight_boost,
+                folder_cfg.decay.as_ref().map(|d| d.horizon_days),
+                folder_cfg.decay.as_ref().map(|d| d.floor),
+                folder_cfg.decay.as_ref().map(|d| d.shape),
+                Some(folder_cfg.path.as_str()),
+            )?;
             // Chunk the document and (re)insert chunks
             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                 let _ = db::delete_chunks_for_doc(&conn, doc_id);
@@ -208,6 +218,7 @@ async fn sync_kb_human(
     let docs_to_extract: HashMap<&String, &std::path::PathBuf> = changes
         .to_upsert
         .iter()
+        .map(|(k, (v, _))| (k, v))
         .chain(unextracted.iter())
         .collect();
 
@@ -519,8 +530,8 @@ async fn sync_kb_json(
     let db_dir = config.effective_db_dir();
     let vec_dims = config.embeddings.as_ref().map(|e| e.dimensions).unwrap_or(0);
     let conn = db::open_db_with_dims(kb_name, &db_dir, vec_dims)?;
-    let watch_paths = config.expand_watch_paths(kb);
-    let local_files = collect_files(config, &watch_paths);
+    let folder_paths = config.expand_watch_paths(kb);
+    let local_files = collect_files(config, &folder_paths);
     let changes = compute_changes(&conn, &local_files, force)?;
 
     let mut result = serde_json::json!({
@@ -531,10 +542,20 @@ async fn sync_kb_json(
     });
 
     if !dry_run {
-        for (rel_path, abs_path) in &changes.to_upsert {
+        for (rel_path, (abs_path, folder_cfg)) in &changes.to_upsert {
             let content = std::fs::read_to_string(abs_path)?;
             let hash = hash_content(content.as_bytes());
-            db::upsert_document(&conn, rel_path, &content, &hash)?;
+            db::upsert_document(
+                &conn,
+                rel_path,
+                &content,
+                &hash,
+                folder_cfg.weight_boost,
+                folder_cfg.decay.as_ref().map(|d| d.horizon_days),
+                folder_cfg.decay.as_ref().map(|d| d.floor),
+                folder_cfg.decay.as_ref().map(|d| d.shape),
+                Some(folder_cfg.path.as_str()),
+            )?;
             // Chunk the document
             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                 let _ = db::delete_chunks_for_doc(&conn, doc_id);
@@ -564,11 +585,12 @@ async fn sync_kb_json(
         let unextracted_json: HashMap<String, std::path::PathBuf> = unextracted_paths
             .into_iter()
             .filter(|p| !changes.to_upsert.contains_key(p))
-            .filter_map(|p| local_files.get(&p).cloned().map(|abs| (p, abs)))
+            .filter_map(|p| local_files.get(&p).map(|(abs, _)| (p, abs.clone())))
             .collect();
         let docs_to_extract_json: HashMap<&String, &std::path::PathBuf> = changes
             .to_upsert
             .iter()
+            .map(|(k, (v, _))| (k, v))
             .chain(unextracted_json.iter())
             .collect();
 
@@ -705,13 +727,14 @@ async fn sync_kb_json(
 }
 
 struct SyncChanges {
-    to_upsert: HashMap<String, std::path::PathBuf>, // rel_path → abs_path
-    to_delete: HashSet<String>,                      // rel_paths to remove
+    /// rel_path → (abs_path, folder_config)
+    to_upsert: HashMap<String, (std::path::PathBuf, FolderConfig)>,
+    to_delete: HashSet<String>, // rel_paths to remove
 }
 
 fn compute_changes(
     conn: &rusqlite::Connection,
-    local_files: &HashMap<String, std::path::PathBuf>,
+    local_files: &HashMap<String, (std::path::PathBuf, FolderConfig)>,
     force: bool,
 ) -> Result<SyncChanges> {
     let db_hashes = db::get_all_hashes(conn)?;
@@ -719,7 +742,7 @@ fn compute_changes(
     let mut to_upsert = HashMap::new();
     let mut to_delete = HashSet::new();
 
-    for (rel_path, abs_path) in local_files {
+    for (rel_path, (abs_path, folder_cfg)) in local_files {
         let needs_update = if force {
             true
         } else if let Some(db_hash) = db_hashes.get(rel_path) {
@@ -734,7 +757,7 @@ fn compute_changes(
         };
 
         if needs_update {
-            to_upsert.insert(rel_path.clone(), abs_path.clone());
+            to_upsert.insert(rel_path.clone(), (abs_path.clone(), folder_cfg.clone()));
         }
     }
 
@@ -777,18 +800,18 @@ fn load_ignore_patterns(config_dir: &std::path::Path) -> Vec<Pattern> {
 
 pub fn collect_files(
     config: &Config,
-    watch_paths: &[std::path::PathBuf],
-) -> HashMap<String, std::path::PathBuf> {
+    folder_paths: &[(std::path::PathBuf, FolderConfig)],
+) -> HashMap<String, (std::path::PathBuf, FolderConfig)> {
     let ignore_patterns = load_ignore_patterns(&config.config_dir);
     let mut files = HashMap::new();
-    for watch_path in watch_paths {
+    for (watch_path, folder_cfg) in folder_paths {
         if watch_path.is_file() {
             let rel = watch_path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            files.insert(rel, watch_path.clone());
+            files.insert(rel, (watch_path.clone(), folder_cfg.clone()));
         } else if watch_path.is_dir() {
             for entry in WalkDir::new(watch_path)
                 .into_iter()
@@ -828,7 +851,7 @@ pub fn collect_files(
                 } else {
                     abs.to_string_lossy().to_string()
                 };
-                files.insert(rel, abs);
+                files.insert(rel, (abs, folder_cfg.clone()));
             }
         } else {
             // Glob pattern
@@ -841,7 +864,7 @@ pub fn collect_files(
                         } else {
                             path.to_string_lossy().to_string()
                         };
-                        files.insert(rel, path);
+                        files.insert(rel, (path, folder_cfg.clone()));
                     }
                 }
             }
@@ -870,6 +893,7 @@ mod tests {
             "test".to_string(),
             KnowledgeBaseConfig {
                 watch_paths: vec![watch_path.to_string_lossy().to_string()],
+                folders: vec![],
                 auto_sync: true,
                 description: None,
             },

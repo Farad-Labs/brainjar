@@ -163,7 +163,11 @@ pub async fn run_watch(
         );
         for name in &kb_names {
             let kb = &config.knowledge_bases[*name];
-            let paths = kb.watch_paths.join(", ");
+            let paths = kb.effective_folders()
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             if let Some(desc) = &kb.description {
                 println!("   {}: {} ({})", name, paths, desc);
             } else {

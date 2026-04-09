@@ -9,6 +9,21 @@ use crate::db;
 use crate::embed::Embedder;
 use zerocopy::IntoBytes;
 
+/// Compute temporal decay multiplier for a document given its age.
+///
+/// Returns a value in `[floor, 1.0]`:
+/// - Age ≤ 0 → 1.0 (no decay)
+/// - Age = horizon → floor
+/// - Age > horizon → floor (clamped)
+/// - `shape` controls the curve: 1.0 = linear, 2.0 = quadratic, etc.
+pub fn calc_decay(age_days: f64, horizon: u32, floor: f64, shape: f64) -> f64 {
+    if age_days <= 0.0 {
+        return 1.0;
+    }
+    let raw = 1.0 - (age_days / horizon as f64).powf(shape);
+    floor + (1.0 - floor) * raw.max(0.0)
+}
+
 /// Sanitize a query string for FTS5 MATCH syntax.
 /// Removes special characters that FTS5 interprets as operators.
 fn sanitize_fts_query(query: &str) -> String {
@@ -334,6 +349,7 @@ pub async fn run_search(
                 &all_graph,
                 &all_vector,
                 &all_filename,
+                None,
                 &mode,
                 limit,
                 chunks,
@@ -540,8 +556,14 @@ pub async fn run_search(
         Vec::new()
     };
 
+    // Open a connection for decay scoring (best-effort; None disables decay)
+    let decay_conn = kb_name.and_then(|n| db::open_db(n, &db_dir).ok());
+
     if json {
         let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query);
+        if let Some(ref conn) = decay_conn {
+            apply_folder_scoring(conn, &mut unified);
+        }
         enrich_graph_only_results(config, &mut unified);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
@@ -562,6 +584,7 @@ pub async fn run_search(
             &graph_results,
             &vector_results,
             &filename_results,
+            decay_conn.as_ref(),
             &mode,
             limit,
             chunks,
@@ -1276,6 +1299,99 @@ fn build_unified_results(
     results
 }
 
+/// Pre-fetch per-document decay parameters and apply folder-based scoring.
+///
+/// For each result:
+/// 1. Look up the document's weight_boost, decay config, and updated_at timestamp.
+/// 2. Compute a decay multiplier from the document's age.
+/// 3. Adjust: `score = score * decay_multiplier + weight_boost`
+///
+/// Results are re-sorted by score after adjustment.
+fn apply_folder_scoring(conn: &Connection, results: &mut [UnifiedResult]) {
+    // Collect unique file paths from results
+    let unique_files: HashSet<&str> = results.iter().map(|r| r.file.as_str()).collect();
+    if unique_files.is_empty() {
+        return;
+    }
+
+    // Fetch decay params for all relevant documents in one pass
+    struct DocDecayParams {
+        weight_boost: f64,
+        decay_horizon: Option<u32>,
+        decay_floor: Option<f64>,
+        decay_shape: Option<f64>,
+        updated_at: String,
+    }
+
+    let mut params_map: HashMap<String, DocDecayParams> = HashMap::new();
+
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT path, weight_boost, decay_horizon, decay_floor, decay_shape, updated_at
+         FROM documents",
+    )
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1).unwrap_or(0.0),
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+                row.get::<_, Option<f64>>(4)?,
+                row.get::<_, String>(5).unwrap_or_default(),
+            ))
+        })
+    {
+        for row in rows.flatten() {
+            let (path, wb, dh, df, ds, ua) = row;
+            if unique_files.contains(path.as_str()) {
+                params_map.insert(
+                    path,
+                    DocDecayParams {
+                        weight_boost: wb,
+                        decay_horizon: dh.map(|v| v as u32),
+                        decay_floor: df,
+                        decay_shape: ds,
+                        updated_at: ua,
+                    },
+                );
+            }
+        }
+    }
+
+    if params_map.is_empty() {
+        return;
+    }
+
+    let now = chrono::Utc::now();
+
+    for result in results.iter_mut() {
+        if let Some(p) = params_map.get(&result.file) {
+            // Compute age in days
+            let decay_multiplier = if let (Some(horizon), Some(floor), Some(shape)) =
+                (p.decay_horizon, p.decay_floor, p.decay_shape)
+            {
+                let age_days = if let Ok(dt) =
+                    chrono::DateTime::parse_from_rfc3339(&p.updated_at)
+                {
+                    (now - dt.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(0) as f64
+                        / 86400.0
+                } else {
+                    0.0
+                };
+                calc_decay(age_days, horizon, floor, shape)
+            } else {
+                1.0
+            };
+
+            result.score = result.score * decay_multiplier + p.weight_boost;
+        }
+    }
+
+    // Re-sort after score adjustment
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+}
+
 /// Enrich graph-only results (no FTS/vector match) with content from the chunks table.
 fn enrich_graph_only_results(config: &Config, results: &mut [UnifiedResult]) {
     let db_dir = config.effective_db_dir();
@@ -1311,6 +1427,7 @@ fn print_results(
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
     filename_results: &[(String, f64)],
+    conn: Option<&Connection>,
     mode: &SearchMode,
     limit: usize,
     include_content: bool,
@@ -1357,7 +1474,10 @@ fn print_results(
     let single_local = mode.run_local();
     if !single_text && !single_local {
         // Merged RRF view (default for any engine combination)
-        let unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query);
+        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query);
+        if let Some(db_conn) = conn {
+            apply_folder_scoring(db_conn, &mut unified);
+        }
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");
@@ -1443,12 +1563,17 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS documents (
-                id           INTEGER PRIMARY KEY,
-                path         TEXT UNIQUE NOT NULL,
-                content      TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                extracted    INTEGER NOT NULL DEFAULT 0,
-                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                id            INTEGER PRIMARY KEY,
+                path          TEXT UNIQUE NOT NULL,
+                content       TEXT NOT NULL,
+                content_hash  TEXT NOT NULL,
+                extracted     INTEGER NOT NULL DEFAULT 0,
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                weight_boost  REAL NOT NULL DEFAULT 0.0,
+                decay_horizon INTEGER,
+                decay_floor   REAL,
+                decay_shape   REAL,
+                folder_path   TEXT
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
                 path,
@@ -1462,7 +1587,7 @@ mod tests {
             END;
         "#).unwrap();
         for (path, content) in docs {
-            db::upsert_document(&conn, path, content, "hash").unwrap();
+            db::upsert_document(&conn, path, content, "hash", 0.0, None, None, None, None).unwrap();
         }
         conn
     }
@@ -1981,5 +2106,59 @@ mod tests {
         for i in 0..merged.len() - 1 {
             assert!(merged[i].1 >= merged[i + 1].1);
         }
+    }
+
+    // ─── calc_decay ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_calc_decay_age_zero_returns_one() {
+        assert!((calc_decay(0.0, 30, 0.3, 1.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_calc_decay_negative_age_returns_one() {
+        assert!((calc_decay(-5.0, 30, 0.3, 1.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_calc_decay_at_horizon_returns_floor() {
+        let floor = 0.3;
+        let result = calc_decay(30.0, 30, floor, 1.0);
+        assert!((result - floor).abs() < 1e-9, "Expected floor {floor}, got {result}");
+    }
+
+    #[test]
+    fn test_calc_decay_beyond_horizon_returns_floor() {
+        let floor = 0.2;
+        let result = calc_decay(100.0, 30, floor, 1.0);
+        assert!((result - floor).abs() < 1e-9, "Expected floor {floor}, got {result}");
+    }
+
+    #[test]
+    fn test_calc_decay_shape_2_gives_quadratic_curve() {
+        // At half the horizon with shape=2: raw = 1 - (0.5)^2 = 0.75
+        // decay = floor + (1-floor) * 0.75
+        let floor = 0.0;
+        let shape = 2.0;
+        let horizon = 100u32;
+        let age = 50.0; // half horizon
+        let result = calc_decay(age, horizon, floor, shape);
+        let expected = 0.0 + (1.0 - 0.0) * 0.75;
+        assert!((result - expected).abs() < 1e-9, "Expected {expected}, got {result}");
+    }
+
+    #[test]
+    fn test_calc_decay_halfway_linear() {
+        // Linear: age=15, horizon=30, floor=0 → raw = 1 - 0.5 = 0.5
+        let result = calc_decay(15.0, 30, 0.0, 1.0);
+        assert!((result - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_calc_decay_default_floor_and_shape() {
+        // Default floor=0.3, shape=1.0
+        // At horizon, should return floor=0.3
+        let result = calc_decay(30.0, 30, 0.3, 1.0);
+        assert!((result - 0.3).abs() < 1e-9);
     }
 }

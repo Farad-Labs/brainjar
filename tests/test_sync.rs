@@ -10,6 +10,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         "test".to_string(),
         KnowledgeBaseConfig {
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
+            folders: vec![],
             auto_sync: true,
             description: None,
         },
@@ -308,7 +309,7 @@ async fn test_interrupted_extraction_detected_on_resync() {
 fn test_mark_extracted_sets_flag() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open_db("test", dir.path()).unwrap();
-    db::upsert_document(&conn, "notes/a.md", "content", "h1").unwrap();
+    db::upsert_document(&conn, "notes/a.md", "content", "h1", 0.0, None, None, None, None).unwrap();
 
     // Initially unextracted
     let unextracted = db::get_unextracted_paths(&conn).unwrap();
@@ -326,7 +327,7 @@ fn test_mark_extracted_sets_flag() {
 fn test_content_change_resets_extracted_flag() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open_db("test", dir.path()).unwrap();
-    db::upsert_document(&conn, "notes/a.md", "v1 content", "hash1").unwrap();
+    db::upsert_document(&conn, "notes/a.md", "v1 content", "hash1", 0.0, None, None, None, None).unwrap();
     db::mark_extracted(&conn, "notes/a.md").unwrap();
 
     // Confirm it's marked
@@ -334,7 +335,7 @@ fn test_content_change_resets_extracted_flag() {
     assert!(unextracted.is_empty());
 
     // Simulate content change
-    db::upsert_document(&conn, "notes/a.md", "v2 content", "hash2").unwrap();
+    db::upsert_document(&conn, "notes/a.md", "v2 content", "hash2", 0.0, None, None, None, None).unwrap();
 
     // extracted should be reset to 0
     let unextracted_after = db::get_unextracted_paths(&conn).unwrap();
@@ -346,9 +347,9 @@ fn test_content_change_resets_extracted_flag() {
 fn test_get_unextracted_returns_only_unextracted() {
     let dir = tempfile::tempdir().unwrap();
     let conn = db::open_db("test", dir.path()).unwrap();
-    db::upsert_document(&conn, "a.md", "aaa", "h_a").unwrap();
-    db::upsert_document(&conn, "b.md", "bbb", "h_b").unwrap();
-    db::upsert_document(&conn, "c.md", "ccc", "h_c").unwrap();
+    db::upsert_document(&conn, "a.md", "aaa", "h_a", 0.0, None, None, None, None).unwrap();
+    db::upsert_document(&conn, "b.md", "bbb", "h_b", 0.0, None, None, None, None).unwrap();
+    db::upsert_document(&conn, "c.md", "ccc", "h_c", 0.0, None, None, None, None).unwrap();
 
     db::mark_extracted(&conn, "a.md").unwrap();
     db::mark_extracted(&conn, "c.md").unwrap();
@@ -440,7 +441,7 @@ fn test_migration_adds_extracted_column() {
     let conn = db::open_db("legacy", dir.path()).unwrap();
     // schema_version bumped
     let version = db::get_meta(&conn, "schema_version").unwrap();
-    assert_eq!(version.as_deref(), Some("2"));
+    assert_eq!(version.as_deref(), Some("3"));
     // v2 migration sets extracted=0 for re-chunking; doc should still exist
     let paths = db::get_all_paths(&conn).unwrap();
     assert!(paths.contains(&"old.md".to_string()));
