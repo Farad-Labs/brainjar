@@ -73,6 +73,9 @@ enum Commands {
         /// Vector similarity search — combinable with --text, --graph
         #[arg(long, conflicts_with = "local")]
         vector: bool,
+        /// Filename stem search — combinable with --text, --graph, --vector
+        #[arg(long, conflicts_with = "local")]
+        filename: bool,
         /// Use exact (case-insensitive substring) matching for local search
         #[arg(long)]
         exact: bool,
@@ -294,13 +297,14 @@ async fn main() -> Result<()> {
             text,
             graph,
             vector,
+            filename,
             exact,
             chunks,
             doc_score,
             smart,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
-            let mode = brainjar::search::SearchMode::from_flags(text, graph, vector, local);
+            let mode = brainjar::search::SearchMode::from_flags(text, graph, vector, local, filename);
             brainjar::search::run_search(&config, &query, kb.as_deref(), limit, !human, mode, exact, chunks, doc_score, smart)
                 .await?;
         }
