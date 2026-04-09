@@ -1,0 +1,917 @@
+{
+  "description": "Canonical dates for the memories test corpus. Each entry specifies the ground-truth date and where date signals are embedded. Use this to grade date extraction accuracy.",
+  "generated": "2026-04-06",
+  "total_files": 77,
+  "date_range": {
+    "earliest": "2025-11-03",
+    "latest": "2026-03-28"
+  },
+  "format_counts": {
+    "markdown": 37,
+    "pdf": 15,
+    "pdf_scanned": 1,
+    "docx": 12,
+    "jpeg": 12
+  },
+  "date_signal_legend": {
+    "filename": "ISO date embedded in the filename (e.g. 2025-11-03_daily-standup.md)",
+    "content_header": "Date appears in a text header or front-matter field inside the document",
+    "content_body": "Date(s) referenced in the body text (may include cross-reference dates from other events)",
+    "content_text": "Date in the rendered PDF text content",
+    "metadata_created": "Document creation date set in file metadata (docx core_properties.created, PDF CreationDate)",
+    "metadata_modified": "Document modification date set in file metadata",
+    "metadata_author": "Author name set in file metadata",
+    "metadata_subject": "Subject field containing the date in file metadata",
+    "exif_DateTimeOriginal": "EXIF DateTimeOriginal tag (JPEG)",
+    "exif_CreateDate": "EXIF CreateDate tag (JPEG)",
+    "exif_ModifyDate": "EXIF ModifyDate tag (JPEG)",
+    "exif_Artist": "EXIF Artist tag (JPEG)",
+    "embedded_text_watermark": "Date rendered as visible text in the image pixels",
+    "embedded_image_text": "All content is rasterized text (scanned PDF, no text layer)"
+  },
+  "entries": [
+    {
+      "path": "docs/memories/consolidated/consolidated_2025-11-03_dashboard.jpg",
+      "canonical_date": "2025-11-03",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2025-11-18_project-health.docx",
+      "canonical_date": "2025-11-18",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2025-12-01_insights.md",
+      "canonical_date": "2025-12-01",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2025-12-01_metrics.pdf",
+      "canonical_date": "2025-12-01",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2025-12-01_weekly.md",
+      "canonical_date": "2025-12-01",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-01-06_dashboard.jpg",
+      "canonical_date": "2026-01-06",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-01-06_metrics.pdf",
+      "canonical_date": "2026-01-06",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-01-06_project-health.docx",
+      "canonical_date": "2026-01-06",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-01-28_insights.md",
+      "canonical_date": "2026-01-28",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-01-28_weekly.md",
+      "canonical_date": "2026-01-28",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-02-05_metrics.pdf",
+      "canonical_date": "2026-02-05",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-02-17_project-health.docx",
+      "canonical_date": "2026-02-17",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-03-01_dashboard.jpg",
+      "canonical_date": "2026-03-01",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-03-10_metrics.pdf",
+      "canonical_date": "2026-03-10",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-03-15_insights.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-03-15_weekly.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-03-22_project-health.docx",
+      "canonical_date": "2026-03-22",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/consolidated/consolidated_2026-03-28_metrics.pdf",
+      "canonical_date": "2026-03-28",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-11-03_architecture-diagram.jpg",
+      "canonical_date": "2025-11-03",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-11-03_daily-standup.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-11-03_debug-session.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-11-03_meeting-photo.jpg",
+      "canonical_date": "2025-11-03",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-11-03_session-log.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-11-18_incident-debrief.docx",
+      "canonical_date": "2025-11-18",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-12-01_search-quality-report.pdf",
+      "canonical_date": "2025-12-01",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-12-15_daily-standup.md",
+      "canonical_date": "2025-12-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-12-15_debug-session.md",
+      "canonical_date": "2025-12-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2025-12-15_session-log.md",
+      "canonical_date": "2025-12-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-06_architecture-diagram.jpg",
+      "canonical_date": "2026-01-06",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-06_incident-debrief.docx",
+      "canonical_date": "2026-01-06",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-06_meeting-photo.jpg",
+      "canonical_date": "2026-01-06",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-06_search-quality-report.pdf",
+      "canonical_date": "2026-01-06",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-14_daily-standup.md",
+      "canonical_date": "2026-01-14",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-14_debug-session.md",
+      "canonical_date": "2026-01-14",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-01-14_session-log.md",
+      "canonical_date": "2026-01-14",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-02-05_search-quality-report.pdf",
+      "canonical_date": "2026-02-05",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-02-17_daily-standup.md",
+      "canonical_date": "2026-02-17",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-02-17_debug-session.md",
+      "canonical_date": "2026-02-17",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-02-17_incident-debrief.docx",
+      "canonical_date": "2026-02-17",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-02-17_session-log.md",
+      "canonical_date": "2026-02-17",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-01_architecture-diagram.jpg",
+      "canonical_date": "2026-03-01",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-01_meeting-photo.jpg",
+      "canonical_date": "2026-03-01",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-10_search-quality-report.pdf",
+      "canonical_date": "2026-03-10",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-15_daily-standup.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-15_debug-session.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-15_session-log.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-22_incident-debrief.docx",
+      "canonical_date": "2026-03-22",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/2026-03-28_search-quality-report.pdf",
+      "canonical_date": "2026-03-28",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/episodic/scanned-meeting-notes_2026-01-14.pdf",
+      "canonical_date": "2026-01-14",
+      "format": "pdf_scanned",
+      "date_signals": [
+        "filename",
+        "embedded_image_text"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/architecture-preferences_2025-11-18.docx",
+      "canonical_date": "2025-11-18",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/architecture-preferences_2026-01-06.docx",
+      "canonical_date": "2026-01-06",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/architecture-preferences_2026-02-17.docx",
+      "canonical_date": "2026-02-17",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/architecture-preferences_2026-03-22.docx",
+      "canonical_date": "2026-03-22",
+      "format": "docx",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body",
+        "metadata_created",
+        "metadata_modified",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/codebase-preference_2025-11-03.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/codebase-preference_2025-12-22.md",
+      "canonical_date": "2025-12-22",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/codebase-preference_2026-02-05.md",
+      "canonical_date": "2026-02-05",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/codebase-preference_2026-03-15.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/domain-terminology_2025-11-03.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/domain-terminology_2025-12-22.md",
+      "canonical_date": "2025-12-22",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/domain-terminology_2026-02-05.md",
+      "canonical_date": "2026-02-05",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/domain-terminology_2026-03-15.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/scoring-analysis_2025-12-01.pdf",
+      "canonical_date": "2025-12-01",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/scoring-analysis_2026-01-06.pdf",
+      "canonical_date": "2026-01-06",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/scoring-analysis_2026-02-05.pdf",
+      "canonical_date": "2026-02-05",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/scoring-analysis_2026-03-10.pdf",
+      "canonical_date": "2026-03-10",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/scoring-analysis_2026-03-28.pdf",
+      "canonical_date": "2026-03-28",
+      "format": "pdf",
+      "date_signals": [
+        "filename",
+        "content_text",
+        "metadata_created",
+        "metadata_author",
+        "metadata_subject"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/search-relevance-feedback_2025-11-03.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/search-relevance-feedback_2025-12-22.md",
+      "canonical_date": "2025-12-22",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/search-relevance-feedback_2026-02-05.md",
+      "canonical_date": "2026-02-05",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/search-relevance-feedback_2026-03-15.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/user-intent-patterns_2025-11-03.md",
+      "canonical_date": "2025-11-03",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/user-intent-patterns_2025-12-22.md",
+      "canonical_date": "2025-12-22",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/user-intent-patterns_2026-02-05.md",
+      "canonical_date": "2026-02-05",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/user-intent-patterns_2026-03-15.md",
+      "canonical_date": "2026-03-15",
+      "format": "markdown",
+      "date_signals": [
+        "filename",
+        "content_header",
+        "content_body"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/whiteboard-capture_2025-11-03.jpg",
+      "canonical_date": "2025-11-03",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/whiteboard-capture_2026-01-06.jpg",
+      "canonical_date": "2026-01-06",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    },
+    {
+      "path": "docs/memories/semantic/whiteboard-capture_2026-03-01.jpg",
+      "canonical_date": "2026-03-01",
+      "format": "jpeg",
+      "date_signals": [
+        "filename",
+        "exif_DateTimeOriginal",
+        "exif_CreateDate",
+        "exif_ModifyDate",
+        "exif_Artist",
+        "embedded_text_watermark"
+      ]
+    }
+  ]
+}
