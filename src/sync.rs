@@ -178,7 +178,7 @@ async fn sync_kb_human(
             // Chunk the document and (re)insert chunks
             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                 let _ = db::delete_chunks_for_doc(&conn, doc_id);
-                let file_chunks = chunk::chunk_file(rel_path, &content, Some(&folder_cfg.folder_type));
+                let file_chunks = chunk::chunk_file(rel_path, &content, Some(&kb.kb_type));
                 for c in &file_chunks {
                     let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
                 }
@@ -236,14 +236,14 @@ async fn sync_kb_human(
 
     #[cfg(feature = "tree-sitter")]
     {
-        use crate::config::FolderType;
+        use crate::config::KbType;
         use crate::treesitter;
 
         // Partition: code docs that tree-sitter can handle
         let ts_docs: Vec<(&String, &std::path::PathBuf)> = docs_to_extract
             .iter()
-            .filter(|(rel_path, (_, fc))| {
-                fc.folder_type == FolderType::Code && {
+            .filter(|(rel_path, (_, _fc))| {
+                kb.kb_type == KbType::Code && {
                     let ext = std::path::Path::new(rel_path.as_str())
                         .extension()
                         .and_then(|e| e.to_str())
@@ -299,13 +299,13 @@ async fn sync_kb_human(
     // Only for docs that weren't handled by tree-sitter above.
     #[cfg(feature = "tree-sitter")]
     let llm_docs_to_extract: HashMap<&String, &std::path::PathBuf> = {
-        use crate::config::FolderType;
+        use crate::config::KbType;
         use crate::treesitter;
         docs_to_extract
             .iter()
-            .filter(|(rel_path, (_, fc))| {
-                // Skip code folders where tree-sitter handled it
-                !(fc.folder_type == FolderType::Code && {
+            .filter(|(rel_path, (_, _fc))| {
+                // Skip code KBs where tree-sitter handled it
+                !(kb.kb_type == KbType::Code && {
                     let ext = std::path::Path::new(rel_path.as_str())
                         .extension()
                         .and_then(|e| e.to_str())
@@ -661,7 +661,7 @@ async fn sync_kb_json(
             // Chunk the document
             if let Ok(Some(doc_id)) = db::get_document_id(&conn, rel_path) {
                 let _ = db::delete_chunks_for_doc(&conn, doc_id);
-                let file_chunks = chunk::chunk_file(rel_path, &content, Some(&folder_cfg.folder_type));
+                let file_chunks = chunk::chunk_file(rel_path, &content, Some(&kb.kb_type));
                 for c in &file_chunks {
                     let _ = db::insert_chunk(&conn, doc_id, &c.content, c.line_start, c.line_end, &c.chunk_type);
                 }
@@ -707,16 +707,16 @@ async fn sync_kb_json(
             )
             .collect();
 
-        // Tree-sitter extraction for code folders (JSON mode)
+        // Tree-sitter extraction for code KBs (JSON mode)
         #[cfg(feature = "tree-sitter")]
         {
-            use crate::config::FolderType;
+            use crate::config::KbType;
             use crate::treesitter;
 
             let ts_docs_json: Vec<(&String, &std::path::PathBuf)> = docs_to_extract_json
                 .iter()
-                .filter(|(rel_path, (_, fc))| {
-                    fc.folder_type == FolderType::Code && {
+                .filter(|(rel_path, (_, _fc))| {
+                    kb.kb_type == KbType::Code && {
                         let ext = std::path::Path::new(rel_path.as_str())
                             .extension()
                             .and_then(|e| e.to_str())
@@ -747,18 +747,18 @@ async fn sync_kb_json(
                 }
         }
 
-        // Optional LLM entity extraction for non-code (or unsupported) folders
+        // Optional LLM entity extraction for non-code (or unsupported) KBs
         let mut entities_extracted = 0usize;
         let mut rels_extracted = 0usize;
 
         #[cfg(feature = "tree-sitter")]
         let llm_docs_json: HashMap<&String, &std::path::PathBuf> = {
-            use crate::config::FolderType;
+            use crate::config::KbType;
             use crate::treesitter;
             docs_to_extract_json
                 .iter()
-                .filter(|(rel_path, (_, fc))| {
-                    !(fc.folder_type == FolderType::Code && {
+                .filter(|(rel_path, (_, _fc))| {
+                    !(kb.kb_type == KbType::Code && {
                         let ext = std::path::Path::new(rel_path.as_str())
                             .extension()
                             .and_then(|e| e.to_str())
@@ -952,8 +952,13 @@ fn compute_changes(
 /// Collect all files from watch paths, returning (relative_path, absolute_path) pairs.
 /// Default file extensions to include when no .brainjarignore exists
 const DEFAULT_TEXT_EXTENSIONS: &[&str] = &[
-    "md", "txt", "rs", "toml", "yaml", "yml", "json", "py", "js", "ts", "tsx", "jsx",
-    "sh", "css", "html", "xml", "csv", "sql", "tf", "hcl", "conf", "ini", "cfg", "env",
+    // Docs & data
+    "md", "txt", "toml", "yaml", "yml", "json", "xml", "csv", "sql", "html", "css",
+    "tf", "hcl", "conf", "ini", "cfg", "env",
+    // Languages (matches tree-sitter support)
+    "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
+    "cs", "java", "rb", "php", "sh", "bash", "kt", "kts", "swift", "ex", "exs", "lua",
+    "hs", "scala", "zig", "dart", "ml", "mli", "r", "pl", "pm", "el", "clj", "erl",
 ];
 
 /// Default directories to always skip
@@ -1070,6 +1075,7 @@ mod tests {
         kbs.insert(
             "test".to_string(),
             KnowledgeBaseConfig {
+                kb_type: crate::config::KbType::Docs,
                 watch_paths: vec![watch_path.to_string_lossy().to_string()],
                 folders: vec![],
                 auto_sync: true,

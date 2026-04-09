@@ -43,7 +43,7 @@ fn default_shape() -> f64 { 1.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum FolderType {
+pub enum KbType {
     #[default]
     Docs,
     Code,
@@ -54,8 +54,6 @@ pub struct FolderConfig {
     pub path: String,
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default, rename = "type")]
-    pub folder_type: FolderType,
     #[serde(default)]
     pub weight_boost: f64,
     #[serde(default)]
@@ -64,6 +62,8 @@ pub struct FolderConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeBaseConfig {
+    #[serde(default, rename = "type")]
+    pub kb_type: KbType,
     #[serde(default)]
     pub watch_paths: Vec<String>,
     #[serde(default)]
@@ -87,7 +87,6 @@ impl KnowledgeBaseConfig {
                 .map(|p| FolderConfig {
                     path: p.clone(),
                     title: None,
-                    folder_type: FolderType::Docs,
                     weight_boost: 0.0,
                     decay: None,
                 })
@@ -484,12 +483,10 @@ auto_sync = false
 
 [[knowledge_bases.test.folders]]
 path = "docs"
-type = "docs"
 weight_boost = 0.5
 
 [[knowledge_bases.test.folders]]
 path = "src"
-type = "code"
 weight_boost = 1.0
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -499,7 +496,7 @@ weight_boost = 1.0
         assert_eq!(folders[0].path, "docs");
         assert!((folders[0].weight_boost - 0.5).abs() < f64::EPSILON);
         assert_eq!(folders[1].path, "src");
-        assert_eq!(folders[1].folder_type, FolderType::Code);
+        assert!((folders[1].weight_boost - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -514,7 +511,6 @@ auto_sync = true
         let folders = kb.effective_folders();
         assert_eq!(folders.len(), 2);
         assert_eq!(folders[0].path, "notes");
-        assert_eq!(folders[0].folder_type, FolderType::Docs);
         assert!((folders[0].weight_boost).abs() < f64::EPSILON);
         assert!(folders[0].decay.is_none());
     }

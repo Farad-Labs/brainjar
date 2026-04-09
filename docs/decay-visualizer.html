@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BrainJar Decay Curve Simulator</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --surface: #1a1a2e;
+    --surface2: #22223a;
+    --border: #2a2a44;
+    --text: #e0e0ec;
+    --text-dim: #8888a8;
+    --accent: #6c63ff;
+    --accent2: #ff6b9d;
+    --accent3: #4ecdc4;
+    --accent4: #f7b731;
+    --accent5: #a29bfe;
+    --accent6: #fd79a8;
+    --green: #00b894;
+    --red: #e74c3c;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+
+  header {
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+  }
+
+  header .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    height: calc(100vh - 65px);
+  }
+
+  .sidebar {
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px;
+  }
+
+  .main {
+    overflow-y: auto;
+    padding: 24px;
+  }
+
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+
+  .folder-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+    position: relative;
+  }
+
+  .folder-card.active {
+    border-color: var(--accent);
+  }
+
+  .folder-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+
+  .folder-name {
+    font-weight: 600;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .folder-color {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .folder-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn-icon {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    transition: all 0.15s;
+  }
+
+  .btn-icon:hover {
+    border-color: var(--text-dim);
+    color: var(--text);
+  }
+
+  .btn-icon.delete:hover {
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .control-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .control-row label {
+    font-size: 12px;
+    color: var(--text-dim);
+    min-width: 90px;
+    flex-shrink: 0;
+  }
+
+  .control-row input[type="range"] {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+
+  .control-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+
+  .control-row .value {
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    min-width: 42px;
+    text-align: right;
+    color: var(--text);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .toggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+
+  .toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--border);
+    border-radius: 10px;
+    transition: 0.2s;
+  }
+
+  .toggle-slider:before {
+    content: "";
+    position: absolute;
+    height: 14px;
+    width: 14px;
+    left: 3px;
+    bottom: 3px;
+    background: var(--text-dim);
+    border-radius: 50%;
+    transition: 0.2s;
+  }
+
+  .toggle input:checked + .toggle-slider {
+    background: var(--accent);
+  }
+
+  .toggle input:checked + .toggle-slider:before {
+    transform: translateX(16px);
+    background: white;
+  }
+
+  .toggle-label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .decay-controls {
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .presets {
+    margin-bottom: 20px;
+  }
+
+  .preset-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .preset-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s;
+  }
+
+  .preset-btn:hover {
+    border-color: var(--accent);
+    background: var(--surface2);
+  }
+
+  .preset-btn .preset-name {
+    font-weight: 600;
+    display: block;
+    margin-bottom: 2px;
+  }
+
+  .preset-btn .preset-desc {
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+
+  .add-folder-btn {
+    width: 100%;
+    padding: 10px;
+    background: none;
+    border: 1px dashed var(--border);
+    color: var(--text-dim);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+    margin-bottom: 20px;
+  }
+
+  .add-folder-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+
+  .chart-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .chart-subtitle {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .chart-wrap {
+    position: relative;
+    height: 280px;
+  }
+
+  .results-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+
+  .search-bar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .search-bar input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .search-bar input:focus {
+    border-color: var(--accent);
+  }
+
+  .search-bar input::placeholder {
+    color: var(--text-dim);
+  }
+
+  .result-row {
+    display: grid;
+    grid-template-columns: 1fr 100px 70px 80px 80px 80px;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    transition: background 0.1s;
+  }
+
+  .result-row:hover {
+    background: var(--surface2);
+  }
+
+  .result-row.header {
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  .result-row.header:hover {
+    background: none;
+  }
+
+  .result-doc {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .result-folder {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .result-folder .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .result-num {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    text-align: right;
+  }
+
+  .result-num.highlight {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .result-rank {
+    font-size: 10px;
+    color: var(--text-dim);
+    width: 20px;
+    text-align: center;
+  }
+
+  .shape-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+  }
+
+  .tab {
+    padding: 8px 16px;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.15s;
+  }
+
+  .tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
+
+  .tab:hover:not(.active) {
+    border-color: var(--text-dim);
+    color: var(--text);
+  }
+
+  .tab-content {
+    display: none;
+  }
+
+  .tab-content.active {
+    display: block;
+  }
+
+  .formula-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    color: var(--accent3);
+    margin-bottom: 20px;
+  }
+
+  .toml-preview {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-top: 16px;
+  }
+
+  .toml-preview pre {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
+
+  .toml-preview .key { color: var(--accent3); }
+  .toml-preview .str { color: var(--accent4); }
+  .toml-preview .num { color: var(--accent2); }
+  .toml-preview .header { color: var(--accent5); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>BrainJar Decay Simulator</h1>
+  <span class="subtitle">Configure per-folder decay curves and see how they affect search ranking</span>
+</header>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="presets">
+      <div class="section-title">Quick Add Preset</div>
+      <div class="preset-grid">
+        <button class="preset-btn" onclick="addPreset('daily')">
+          <span class="preset-name">Daily Notes</span>
+          <span class="preset-desc">Fade over months</span>
+        </button>
+        <button class="preset-btn" onclick="addPreset('reference')">
+          <span class="preset-name">Reference Docs</span>
+          <span class="preset-desc">Relevant for years</span>
+        </button>
+        <button class="preset-btn" onclick="addPreset('meetings')">
+          <span class="preset-name">Meeting Notes</span>
+          <span class="preset-desc">Useful for weeks</span>
+        </button>
+        <button class="preset-btn" onclick="addPreset('ephemeral')">
+          <span class="preset-name">Ephemeral</span>
+          <span class="preset-desc">Stale in days</span>
+        </button>
+        <button class="preset-btn" onclick="addPreset('sot')">
+          <span class="preset-name">Source of Truth</span>
+          <span class="preset-desc">Never decays</span>
+        </button>
+        <button class="preset-btn" onclick="addPreset('code')">
+          <span class="preset-name">Source Code</span>
+          <span class="preset-desc">No decay, code type</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="section-title">Configured Folders</div>
+    <div id="folder-list"></div>
+    <button class="add-folder-btn" onclick="addPreset('daily')">+ Add Folder</button>
+
+    <div class="section-title">TOML Config Preview</div>
+    <div class="toml-preview">
+      <pre id="toml-output"></pre>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('curves')">Decay Curves</button>
+      <button class="tab" onclick="switchTab('results')">Search Simulator</button>
+      <button class="tab" onclick="switchTab('shapes')">Shape Explorer</button>
+    </div>
+
+    <div id="tab-curves" class="tab-content active">
+      <div class="formula-box">
+        score = floor + (1 - floor) &times; max(0, 1 - (age / horizon)<sup>shape</sup>)
+      </div>
+      <div class="chart-container">
+        <div class="chart-title">Decay Curves by Folder</div>
+        <div class="chart-subtitle">Score multiplier over time for each configured folder</div>
+        <div class="chart-wrap">
+          <canvas id="decay-chart"></canvas>
+        </div>
+      </div>
+      <div class="chart-container">
+        <div class="chart-title">Effective Score Over Time</div>
+        <div class="chart-subtitle">Base relevance (0.7) &times; decay + weight_boost -- shows how a doc from each folder would score as it ages</div>
+        <div class="chart-wrap">
+          <canvas id="effective-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-results" class="tab-content">
+      <div class="results-container">
+        <div class="chart-title">Simulated Search Results</div>
+        <div class="chart-subtitle">Mock documents ranked by final score. Adjust folder configs to see results reorder in real-time.</div>
+        <div class="search-bar">
+          <input type="text" placeholder="architecture refactor deploy..." value="architecture refactor" id="search-query">
+        </div>
+        <div class="result-row header">
+          <span>Document</span>
+          <span>Folder</span>
+          <span style="text-align:right">Age</span>
+          <span style="text-align:right">Base</span>
+          <span style="text-align:right">Decay</span>
+          <span style="text-align:right">Final</span>
+        </div>
+        <div id="results-list"></div>
+      </div>
+    </div>
+
+    <div id="tab-shapes" class="tab-content">
+      <div class="formula-box">
+        All curves: horizon=180, floor=0.3 -- only <b>shape</b> varies
+      </div>
+      <div class="chart-container">
+        <div class="chart-title">Shape Parameter Explained</div>
+        <div class="chart-subtitle">How different shape values affect the decay curve. shape=1 is linear, &gt;1 is slow start, &lt;1 is fast start.</div>
+        <div class="chart-wrap">
+          <canvas id="shape-chart"></canvas>
+        </div>
+      </div>
+      <div class="chart-container">
+        <div class="chart-title">Practical Interpretation</div>
+        <div class="chart-subtitle" style="line-height:1.8; font-size:12px; color: var(--text);">
+          <b style="color:var(--accent)">shape = 0.3</b> -- Aggressive early decay. "Yesterday matters, last week doesn't."<br>
+          <b style="color:var(--accent2)">shape = 0.5</b> -- Fast initial drop, long tail. Chat logs, ephemeral notes.<br>
+          <b style="color:var(--accent3)">shape = 1.0</b> -- Linear. Steady, predictable decline.<br>
+          <b style="color:var(--accent4)">shape = 1.5</b> -- Slow start, accelerates. "Still fresh for a while." Daily notes sweet spot.<br>
+          <b style="color:var(--accent5)">shape = 2.0</b> -- Quadratic. Stays very relevant, then drops off a cliff.<br>
+          <b style="color:var(--accent6)">shape = 3.0</b> -- Cubic. Almost no decay for a long time, then crashes. Reference docs.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const COLORS = ['#6c63ff', '#ff6b9d', '#4ecdc4', '#f7b731', '#a29bfe', '#fd79a8', '#00b894', '#e17055'];
+
+const PRESETS = {
+  daily:     { name: 'Daily Notes',     decay: true, horizon: 180, floor: 0.3, shape: 1.5, boost: 0.1 },
+  reference: { name: 'Reference Docs',  decay: true, horizon: 730, floor: 0.6, shape: 1.0, boost: 0.2 },
+  meetings:  { name: 'Meeting Notes',   decay: true, horizon: 90,  floor: 0.2, shape: 1.2, boost: 0.1 },
+  ephemeral: { name: 'Ephemeral',       decay: true, horizon: 30,  floor: 0.0, shape: 0.5, boost: 0.0 },
+  sot:       { name: 'Source of Truth',  decay: false, horizon: 180, floor: 0.3, shape: 1.0, boost: 0.3 },
+  code:      { name: 'Source Code',      decay: false, horizon: 180, floor: 0.3, shape: 1.0, boost: 0.2 },
+};
+
+const MOCK_DOCS = [
+  { name: 'standup-2026-04-08.md',         baseScore: 0.82, ageDays: 0 },
+  { name: 'architecture-decisions.md',      baseScore: 0.91, ageDays: 200 },
+  { name: 'api-refactor-notes.md',          baseScore: 0.78, ageDays: 45 },
+  { name: 'deploy-checklist.md',            baseScore: 0.65, ageDays: 120 },
+  { name: 'standup-2026-03-25.md',          baseScore: 0.74, ageDays: 14 },
+  { name: 'q1-planning-session.md',         baseScore: 0.88, ageDays: 95 },
+  { name: 'database-schema.md',             baseScore: 0.85, ageDays: 310 },
+  { name: 'onboarding-guide.md',            baseScore: 0.72, ageDays: 400 },
+  { name: 'sprint-retro-march.md',          baseScore: 0.69, ageDays: 30 },
+  { name: 'auth-service-design.md',         baseScore: 0.93, ageDays: 160 },
+  { name: 'scratch-notes-apr7.md',          baseScore: 0.45, ageDays: 1 },
+  { name: 'search.rs',                      baseScore: 0.87, ageDays: 5 },
+  { name: 'config.rs',                      baseScore: 0.76, ageDays: 22 },
+  { name: 'vendor-evaluation.md',           baseScore: 0.58, ageDays: 250 },
+  { name: 'incident-postmortem-feb.md',     baseScore: 0.80, ageDays: 60 },
+  { name: 'standup-2025-12-01.md',          baseScore: 0.71, ageDays: 128 },
+  { name: 'chunk.rs',                       baseScore: 0.68, ageDays: 15 },
+  { name: 'migration-plan-v3.md',           baseScore: 0.62, ageDays: 350 },
+];
+
+let folders = [];
+let folderIdCounter = 0;
+
+// Assign mock docs to folders round-robin
+function assignDocsToFolders() {
+  if (folders.length === 0) return;
+  MOCK_DOCS.forEach((doc, i) => {
+    doc.folderId = folders[i % folders.length].id;
+  });
+}
+
+function calcDecay(age, horizon, floor, shape) {
+  if (age <= 0) return 1.0;
+  const raw = 1 - Math.pow(age / horizon, shape);
+  return floor + (1 - floor) * Math.max(0, raw);
+}
+
+function addPreset(key) {
+  const p = PRESETS[key];
+  const id = ++folderIdCounter;
+  folders.push({
+    id,
+    name: p.name,
+    decay: p.decay,
+    horizon: p.horizon,
+    floor: p.floor,
+    shape: p.shape,
+    boost: p.boost,
+    color: COLORS[(folders.length) % COLORS.length],
+  });
+  assignDocsToFolders();
+  renderAll();
+}
+
+function removeFolder(id) {
+  folders = folders.filter(f => f.id !== id);
+  assignDocsToFolders();
+  renderAll();
+}
+
+function updateFolder(id, key, value) {
+  const f = folders.find(f => f.id === id);
+  if (f) {
+    f[key] = value;
+    renderAll();
+  }
+}
+
+function renderFolderList() {
+  const el = document.getElementById('folder-list');
+  el.innerHTML = folders.map(f => `
+    <div class="folder-card" id="card-${f.id}">
+      <div class="folder-header">
+        <span class="folder-name">
+          <span class="folder-color" style="background:${f.color}"></span>
+          ${f.name}
+        </span>
+        <div class="folder-actions">
+          <button class="btn-icon delete" onclick="removeFolder(${f.id})" title="Remove">&times;</button>
+        </div>
+      </div>
+      <div class="control-row">
+        <label>weight_boost</label>
+        <input type="range" min="0" max="0.5" step="0.05" value="${f.boost}"
+          oninput="updateFolder(${f.id},'boost',parseFloat(this.value))">
+        <span class="value">${f.boost.toFixed(2)}</span>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle">
+          <input type="checkbox" ${f.decay ? 'checked' : ''}
+            onchange="updateFolder(${f.id},'decay',this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+        <span class="toggle-label">Temporal decay</span>
+      </div>
+      ${f.decay ? `
+      <div class="decay-controls">
+        <div class="control-row">
+          <label>horizon_days</label>
+          <input type="range" min="7" max="730" step="1" value="${f.horizon}"
+            oninput="updateFolder(${f.id},'horizon',parseInt(this.value))">
+          <span class="value">${f.horizon}</span>
+        </div>
+        <div class="control-row">
+          <label>floor</label>
+          <input type="range" min="0" max="1" step="0.05" value="${f.floor}"
+            oninput="updateFolder(${f.id},'floor',parseFloat(this.value))">
+          <span class="value">${f.floor.toFixed(2)}</span>
+        </div>
+        <div class="control-row">
+          <label>shape</label>
+          <input type="range" min="0.1" max="4" step="0.1" value="${f.shape}"
+            oninput="updateFolder(${f.id},'shape',parseFloat(this.value))">
+          <span class="value">${f.shape.toFixed(1)}</span>
+        </div>
+      </div>
+      ` : ''}
+    </div>
+  `).join('');
+}
+
+function renderToml() {
+  const el = document.getElementById('toml-output');
+  if (folders.length === 0) {
+    el.innerHTML = '<span style="color:var(--text-dim)"># Add folders above to see config</span>';
+    return;
+  }
+  let lines = [];
+  folders.forEach(f => {
+    const slug = f.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    lines.push(`<span class="header">[[knowledgebases.my-kb.folders]]</span>`);
+    lines.push(`<span class="key">title</span> = <span class="str">"${f.name}"</span>`);
+    lines.push(`<span class="key">path</span> = <span class="str">"${slug}"</span>`);
+    lines.push(`<span class="key">weight_boost</span> = <span class="num">${f.boost.toFixed(2)}</span>`);
+    if (f.decay) {
+      lines.push('');
+      lines.push(`<span class="header">[knowledgebases.my-kb.folders.decay]</span>`);
+      lines.push(`<span class="key">horizon_days</span> = <span class="num">${f.horizon}</span>`);
+      lines.push(`<span class="key">floor</span> = <span class="num">${f.floor.toFixed(2)}</span>`);
+      lines.push(`<span class="key">shape</span> = <span class="num">${f.shape.toFixed(1)}</span>`);
+    }
+    lines.push('');
+  });
+  el.innerHTML = lines.join('\n');
+}
+
+// Charts
+let decayChart, effectiveChart, shapeChart;
+
+function renderDecayChart() {
+  const ctx = document.getElementById('decay-chart').getContext('2d');
+  const maxDays = 730;
+  const days = Array.from({length: maxDays + 1}, (_, i) => i);
+
+  const datasets = folders.filter(f => f.decay).map(f => ({
+    label: f.name,
+    data: days.map(d => calcDecay(d, f.horizon, f.floor, f.shape)),
+    borderColor: f.color,
+    backgroundColor: f.color + '15',
+    fill: true,
+    tension: 0.3,
+    pointRadius: 0,
+    borderWidth: 2,
+  }));
+
+  // Add flat line for non-decay folders
+  folders.filter(f => !f.decay).forEach(f => {
+    datasets.push({
+      label: f.name + ' (no decay)',
+      data: days.map(() => 1.0),
+      borderColor: f.color,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      borderWidth: 1.5,
+      fill: false,
+    });
+  });
+
+  if (decayChart) decayChart.destroy();
+  decayChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: days, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { color: '#8888a8', boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: '#1a1a2e',
+          borderColor: '#2a2a44',
+          borderWidth: 1,
+          titleColor: '#e0e0ec',
+          bodyColor: '#e0e0ec',
+          callbacks: {
+            title: (items) => `Day ${items[0].label}`,
+            label: (item) => `${item.dataset.label}: ${item.raw.toFixed(3)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'Age (days)', color: '#8888a8', font: { size: 11 } },
+          ticks: { color: '#8888a8', maxTicksLimit: 12, font: { size: 10 } },
+          grid: { color: '#2a2a4422' },
+        },
+        y: {
+          title: { display: true, text: 'Score Multiplier', color: '#8888a8', font: { size: 11 } },
+          min: 0, max: 1.05,
+          ticks: { color: '#8888a8', font: { size: 10 } },
+          grid: { color: '#2a2a4433' },
+        }
+      }
+    }
+  });
+}
+
+function renderEffectiveChart() {
+  const ctx = document.getElementById('effective-chart').getContext('2d');
+  const maxDays = 730;
+  const days = Array.from({length: maxDays + 1}, (_, i) => i);
+  const baseRelevance = 0.7;
+
+  const datasets = folders.map(f => ({
+    label: f.name,
+    data: days.map(d => {
+      const decay = f.decay ? calcDecay(d, f.horizon, f.floor, f.shape) : 1.0;
+      return baseRelevance * decay + f.boost;
+    }),
+    borderColor: f.color,
+    backgroundColor: f.color + '15',
+    fill: true,
+    tension: 0.3,
+    pointRadius: 0,
+    borderWidth: 2,
+  }));
+
+  if (effectiveChart) effectiveChart.destroy();
+  effectiveChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: days, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { color: '#8888a8', boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: '#1a1a2e',
+          borderColor: '#2a2a44',
+          borderWidth: 1,
+          titleColor: '#e0e0ec',
+          bodyColor: '#e0e0ec',
+          callbacks: {
+            title: (items) => `Day ${items[0].label}`,
+            label: (item) => `${item.dataset.label}: ${item.raw.toFixed(3)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'Age (days)', color: '#8888a8', font: { size: 11 } },
+          ticks: { color: '#8888a8', maxTicksLimit: 12, font: { size: 10 } },
+          grid: { color: '#2a2a4422' },
+        },
+        y: {
+          title: { display: true, text: 'Effective Score', color: '#8888a8', font: { size: 11 } },
+          min: 0,
+          ticks: { color: '#8888a8', font: { size: 10 } },
+          grid: { color: '#2a2a4433' },
+        }
+      }
+    }
+  });
+}
+
+function renderShapeChart() {
+  const ctx = document.getElementById('shape-chart').getContext('2d');
+  const maxDays = 365;
+  const days = Array.from({length: maxDays + 1}, (_, i) => i);
+  const shapes = [0.3, 0.5, 1.0, 1.5, 2.0, 3.0];
+  const colors = ['#6c63ff', '#ff6b9d', '#4ecdc4', '#f7b731', '#a29bfe', '#fd79a8'];
+
+  const datasets = shapes.map((s, i) => ({
+    label: `shape = ${s}`,
+    data: days.map(d => calcDecay(d, 180, 0.3, s)),
+    borderColor: colors[i],
+    pointRadius: 0,
+    borderWidth: 2,
+    tension: 0.3,
+    fill: false,
+  }));
+
+  if (shapeChart) shapeChart.destroy();
+  shapeChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: days, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { color: '#8888a8', boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: '#1a1a2e',
+          borderColor: '#2a2a44',
+          borderWidth: 1,
+          titleColor: '#e0e0ec',
+          bodyColor: '#e0e0ec',
+          callbacks: {
+            title: (items) => `Day ${items[0].label}`,
+            label: (item) => `${item.dataset.label}: ${item.raw.toFixed(3)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'Age (days)', color: '#8888a8', font: { size: 11 } },
+          ticks: { color: '#8888a8', maxTicksLimit: 12, font: { size: 10 } },
+          grid: { color: '#2a2a4422' },
+        },
+        y: {
+          title: { display: true, text: 'Score Multiplier', color: '#8888a8', font: { size: 11 } },
+          min: 0, max: 1.05,
+          ticks: { color: '#8888a8', font: { size: 10 } },
+          grid: { color: '#2a2a4433' },
+        }
+      }
+    }
+  });
+}
+
+function renderResults() {
+  const el = document.getElementById('results-list');
+  if (folders.length === 0) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim)">Add folders to see simulated results</div>';
+    return;
+  }
+
+  const results = MOCK_DOCS.map(doc => {
+    const folder = folders.find(f => f.id === doc.folderId);
+    if (!folder) return null;
+    const decayMult = folder.decay ? calcDecay(doc.ageDays, folder.horizon, folder.floor, folder.shape) : 1.0;
+    const finalScore = doc.baseScore * decayMult + folder.boost;
+    return { ...doc, folder, decayMult, finalScore };
+  }).filter(Boolean).sort((a, b) => b.finalScore - a.finalScore);
+
+  el.innerHTML = results.map((r, i) => {
+    const ageStr = r.ageDays === 0 ? 'today' : r.ageDays === 1 ? '1 day' : `${r.ageDays}d`;
+    return `
+    <div class="result-row">
+      <span class="result-doc">${r.name}</span>
+      <span class="result-folder"><span class="dot" style="background:${r.folder.color}"></span>${r.folder.name}</span>
+      <span class="result-num">${ageStr}</span>
+      <span class="result-num">${r.baseScore.toFixed(2)}</span>
+      <span class="result-num">&times;${r.decayMult.toFixed(2)}</span>
+      <span class="result-num highlight">${r.finalScore.toFixed(3)}</span>
+    </div>`;
+  }).join('');
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab-content#tab-${name}`).classList.add('active');
+  event.target.classList.add('active');
+
+  // Render charts on tab switch (canvas sizing)
+  requestAnimationFrame(() => {
+    if (name === 'curves') { renderDecayChart(); renderEffectiveChart(); }
+    if (name === 'shapes') renderShapeChart();
+  });
+}
+
+function renderAll() {
+  renderFolderList();
+  renderToml();
+  renderDecayChart();
+  renderEffectiveChart();
+  renderResults();
+}
+
+// Initialize with a useful default
+addPreset('sot');
+addPreset('daily');
+addPreset('code');
+
+// Also render shape chart on load
+setTimeout(() => renderShapeChart(), 100);
+</script>
+</body>
+</html>

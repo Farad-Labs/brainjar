@@ -21,7 +21,7 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from fpdf import FPDF
 
-BASE = Path(__file__).parent / "memories"
+BASE = Path(__file__).parent / "docs" / "memories"
 
 # macOS system font — used by ImageMagick for annotated images
 FONT = "/System/Library/Fonts/Supplemental/Courier New Bold.ttf"

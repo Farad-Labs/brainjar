@@ -6,13 +6,15 @@ Golden corpus for testing brainjar's search, indexing, and scoring algorithms.
 
 ```
 test-corpus/
-├── *.md, *.toml              # Original golden corpus (project docs, semantic traps, etc.)
-├── memories/                  # Date-rich multi-format corpus for temporal scoring
-│   ├── semantic/              # Extracted signals from conversations
-│   ├── episodic/              # Daily memory captures (standups, sessions, debug notes)
-│   ├── consolidated/          # Deduplicated, sorted, refined entries from episodic
-│   └── canonical_dates.json   # Ground-truth dates for grading date extraction
-├── generate_memories_corpus.py  # Script to regenerate the memories/ directory
+├── docs/                        # Docs KB -- markdown, meetings, memories
+│   ├── *.md                     # Golden corpus (project docs, semantic traps, etc.)
+│   └── memories/                # Date-rich multi-format corpus for temporal scoring
+│       ├── semantic/            # Extracted signals from conversations
+│       ├── episodic/            # Daily memory captures (standups, sessions, debug notes)
+│       ├── consolidated/        # Deduplicated, sorted, refined entries from episodic
+│       └── canonical_dates.json # Ground-truth dates for grading date extraction
+├── code/                        # Code KB -- multi-language source files for tree-sitter
+├── generate_memories_corpus.py  # Script to regenerate docs/memories/
 └── README.md
 ```
 

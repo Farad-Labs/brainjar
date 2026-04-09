@@ -9,6 +9,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
     kbs.insert(
         "test".to_string(),
         KnowledgeBaseConfig {
+            kb_type: brainjar::config::KbType::Docs,
             watch_paths: vec![watch_path.to_string_lossy().to_string()],
             folders: vec![],
             auto_sync: true,
