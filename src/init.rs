@@ -979,7 +979,7 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
         // Step 4a — KB Type
         let kb_type_idx = Select::with_theme(&theme)
             .with_prompt("  What type of knowledge base is this?")
-            .items(&[
+            .items([
                 "Documentation & notes     (markdown, text, journals, meeting notes)",
                 "Source code               (AST-aware parsing, code intelligence)",
             ])
@@ -1043,7 +1043,7 @@ pub async fn run_init(config_path: Option<&str>) -> Result<()> {
                 // Docs KB: show decay presets
                 let preset_idx = Select::with_theme(&theme)
                     .with_prompt("  What kind of documents are in this folder?")
-                    .items(&[
+                    .items([
                         "Daily notes, journals, logs        (fade over months)",
                         "Reference docs, wikis              (stay relevant for years)",
                         "Meeting notes, standups            (useful for weeks)",
