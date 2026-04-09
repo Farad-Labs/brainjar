@@ -80,6 +80,8 @@ pub fn get_language(file_ext: &str) -> Option<Language> {
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
         "ml" | "mli" => Some(tree_sitter_ocaml::LANGUAGE_OCAML.into()),
         "dart" => Some(tree_sitter_dart::LANGUAGE.into()),
+        "scala" => Some(tree_sitter_scala::LANGUAGE.into()),
+        "zig" => Some(tree_sitter_zig::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -223,6 +225,22 @@ fn top_level_kinds(file_ext: &str) -> &'static [&'static str] {
             "import_or_export",
             "enum_declaration",
         ],
+        "scala" => &[
+            "function_definition",
+            "class_definition",
+            "object_definition",
+            "trait_definition",
+            "val_definition",
+            "var_definition",
+            "import_declaration",
+            "package_clause",
+        ],
+        "zig" => &[
+            "FnProto",
+            "TestDecl",
+            "ContainerDecl",
+            "VarDecl",
+        ],
         _ => &[],
     }
 }
@@ -240,6 +258,7 @@ fn is_import_kind(kind: &str) -> bool {
             | "import_header"
             | "import_or_export"
             | "open_statement"
+            | "package_clause"
     )
 }
 
@@ -485,7 +504,7 @@ pub fn extract_code_entities(
         "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "java" | "rb" | "php"
         | "sh" | "bash" | "kt" | "kts" | "swift" | "ex" | "exs" | "lua" | "hs"
         | "html" | "htm" | "css" | "toml" | "yml" | "yaml" | "json" | "ml" | "mli"
-        | "dart" => extract_generic(root, source, &lines, file_ext, file_path),
+        | "dart" | "scala" | "zig" => extract_generic(root, source, &lines, file_ext, file_path),
         _ => (Vec::new(), Vec::new()),
     }
 }
