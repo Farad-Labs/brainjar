@@ -50,14 +50,63 @@ tree-sitter-rust = { version = "0.24", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
+# ts-core languages
 tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-ruby = { version = "0.23", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+# ts-extended languages
+tree-sitter-kotlin = { version = "0.3", optional = true }
+tree-sitter-swift = { version = "0.7", optional = true }
+tree-sitter-elixir = { version = "0.3", optional = true }
+tree-sitter-lua = { version = "0.5", optional = true }
+tree-sitter-haskell = { version = "0.23", optional = true }
+tree-sitter-html = { version = "0.23", optional = true }
+tree-sitter-css = { version = "0.25", optional = true }
+tree-sitter-toml-ng = { version = "0.7", optional = true }
+tree-sitter-yaml = { version = "0.7", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-ocaml = { version = "0.24", optional = true }
+tree-sitter-dart = { version = "0.1", optional = true }
 
 [features]
 default = ["local-embed", "ts-core"]
 golden-corpus = []
 local-embed = ["fastembed"]
-ts-core = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript"]
-ts-extended = ["ts-core", "dep:tree-sitter-go"]
+ts-core = [
+  "dep:tree-sitter",
+  "dep:tree-sitter-rust",
+  "dep:tree-sitter-python",
+  "dep:tree-sitter-javascript",
+  "dep:tree-sitter-typescript",
+  "dep:tree-sitter-go",
+  "dep:tree-sitter-c",
+  "dep:tree-sitter-cpp",
+  "dep:tree-sitter-c-sharp",
+  "dep:tree-sitter-java",
+  "dep:tree-sitter-ruby",
+  "dep:tree-sitter-php",
+  "dep:tree-sitter-bash",
+]
+ts-extended = [
+  "ts-core",
+  "dep:tree-sitter-kotlin",
+  "dep:tree-sitter-swift",
+  "dep:tree-sitter-elixir",
+  "dep:tree-sitter-lua",
+  "dep:tree-sitter-haskell",
+  "dep:tree-sitter-html",
+  "dep:tree-sitter-css",
+  "dep:tree-sitter-toml-ng",
+  "dep:tree-sitter-yaml",
+  "dep:tree-sitter-json",
+  "dep:tree-sitter-ocaml",
+  "dep:tree-sitter-dart",
+]
 
 [dev-dependencies]
 tempfile = "3"

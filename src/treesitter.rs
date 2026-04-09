@@ -55,12 +55,44 @@ pub struct CodeRelationship {
 /// if the extension is not supported by the active feature flags.
 pub fn get_language(file_ext: &str) -> Option<Language> {
     match file_ext {
+        // ts-core languages
         "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
         "py" => Some(tree_sitter_python::LANGUAGE.into()),
         "js" | "jsx" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "ts" | "tsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        #[cfg(feature = "ts-extended")]
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "cs" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "rb" => Some(tree_sitter_ruby::LANGUAGE.into()),
+        "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        "sh" | "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
+        // ts-extended languages
+        #[cfg(feature = "ts-extended")]
+        "kt" | "kts" => Some(tree_sitter_kotlin::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "ex" | "exs" => Some(tree_sitter_elixir::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "lua" => Some(tree_sitter_lua::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "hs" => Some(tree_sitter_haskell::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "html" | "htm" => Some(tree_sitter_html::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "css" => Some(tree_sitter_css::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "toml" => Some(tree_sitter_toml_ng::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "yml" | "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "json" => Some(tree_sitter_json::LANGUAGE.into()),
+        #[cfg(feature = "ts-extended")]
+        "ml" | "mli" => Some(tree_sitter_ocaml::LANGUAGE_OCAML.into()),
+        #[cfg(feature = "ts-extended")]
+        "dart" => Some(tree_sitter_dart::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -118,6 +150,92 @@ fn top_level_kinds(file_ext: &str) -> &'static [&'static str] {
             "const_declaration",
             "var_declaration",
         ],
+        "c" | "h" => &[
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+            "preproc_include",
+            "declaration",
+        ],
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => &[
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+            "preproc_include",
+            "declaration",
+            "class_specifier",
+            "namespace_definition",
+            "template_declaration",
+        ],
+        "cs" => &[
+            "class_declaration",
+            "method_declaration",
+            "namespace_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "struct_declaration",
+            "using_directive",
+        ],
+        "java" => &[
+            "class_declaration",
+            "method_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "import_declaration",
+            "package_declaration",
+        ],
+        "rb" => &["method", "class", "module", "assignment"],
+        "php" => &[
+            "function_definition",
+            "class_declaration",
+            "method_declaration",
+            "namespace_definition",
+            "use_declaration",
+        ],
+        "sh" | "bash" => &["function_definition", "command"],
+        "kt" | "kts" => &[
+            "function_declaration",
+            "class_declaration",
+            "object_declaration",
+            "interface_declaration",
+            "import_header",
+        ],
+        "swift" => &[
+            "function_declaration",
+            "class_declaration",
+            "struct_declaration",
+            "enum_declaration",
+            "protocol_declaration",
+            "import_declaration",
+        ],
+        "ex" | "exs" => &[
+            "call",  // def, defp, defmodule, alias, import, use are all "call" nodes in Elixir
+        ],
+        "lua" => &["function_declaration", "local_function", "variable_declaration"],
+        "hs" => &[
+            "function",
+            "type_synonym",
+            "data_declaration",
+            "class_declaration",
+            "instance_declaration",
+            "import_declaration",
+        ],
+        "html" | "htm" | "css" | "toml" | "yml" | "yaml" | "json" => &[],
+        "ml" | "mli" => &[
+            "let_binding",
+            "type_definition",
+            "module_definition",
+            "open_statement",
+        ],
+        "dart" => &[
+            "function_signature",
+            "class_declaration",
+            "method_signature",
+            "import_or_export",
+            "enum_declaration",
+        ],
         _ => &[],
     }
 }
@@ -129,6 +247,12 @@ fn is_import_kind(kind: &str) -> bool {
             | "import_statement"
             | "import_from_statement"
             | "import_declaration"
+            | "using_directive"
+            | "preproc_include"
+            | "package_declaration"
+            | "import_header"
+            | "import_or_export"
+            | "open_statement"
     )
 }
 
@@ -364,12 +488,21 @@ pub fn extract_code_entities(
     let root = tree.root_node();
 
     match file_ext {
+        // Full per-language extractors
         "rs" => extract_rust(root, source, &lines, file_path),
         "py" => extract_python(root, source, &lines, file_path),
         "js" | "jsx" => extract_js(root, source, &lines, file_path),
         "ts" | "tsx" => extract_ts(root, source, &lines, file_path),
-        #[cfg(feature = "ts-extended")]
         "go" => extract_go(root, source, &lines, file_path),
+        // Generic extractor for ts-core languages
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "java" | "rb" | "php"
+        | "sh" | "bash" => extract_generic(root, source, &lines, file_ext, file_path),
+        // Generic extractor for ts-extended languages
+        #[cfg(feature = "ts-extended")]
+        "kt" | "kts" | "swift" | "ex" | "exs" | "lua" | "hs" | "html" | "htm" | "css"
+        | "toml" | "yml" | "yaml" | "json" | "ml" | "mli" | "dart" => {
+            extract_generic(root, source, &lines, file_ext, file_path)
+        }
         _ => (Vec::new(), Vec::new()),
     }
 }
@@ -942,7 +1075,6 @@ fn extract_js_calls(
 
 // ─── Go extraction ────────────────────────────────────────────────────────────
 
-#[cfg(feature = "ts-extended")]
 fn extract_go<'a>(
     root: Node<'a>,
     source: &[u8],
@@ -974,15 +1106,15 @@ fn extract_go<'a>(
                     });
                     // Extract calls
                     visit_all(child, &mut |n| {
-                        if n.kind() == "call_expression" {
-                            if let Some(callee) = get_call_callee(n, source) {
-                                rels.push(CodeRelationship {
-                                    source: name.clone(),
-                                    target: callee,
-                                    relation: "calls".to_string(),
-                                    file_path: file_path.to_string(),
-                                });
-                            }
+                        if n.kind() == "call_expression"
+                            && let Some(callee) = get_call_callee(n, source)
+                        {
+                            rels.push(CodeRelationship {
+                                source: name.clone(),
+                                target: callee,
+                                relation: "calls".to_string(),
+                                file_path: file_path.to_string(),
+                            });
                         }
                     });
                 }
@@ -990,19 +1122,18 @@ fn extract_go<'a>(
             "type_declaration" => {
                 // Walk named children to find type_spec
                 for i in 0..child.named_child_count() {
-                    if let Some(spec) = child.named_child(i) {
-                        if spec.kind() == "type_spec" {
-                            if let Some(name) = get_child_text(spec, "name", source) {
-                                entities.push(CodeEntity {
-                                    name,
-                                    entity_type: "type_alias".to_string(),
-                                    description: first_line(lines, start),
-                                    file_path: file_path.to_string(),
-                                    line_start: start,
-                                    line_end: end,
-                                });
-                            }
-                        }
+                    if let Some(spec) = child.named_child(i)
+                        && spec.kind() == "type_spec"
+                        && let Some(name) = get_child_text(spec, "name", source)
+                    {
+                        entities.push(CodeEntity {
+                            name,
+                            entity_type: "type_alias".to_string(),
+                            description: first_line(lines, start),
+                            file_path: file_path.to_string(),
+                            line_start: start,
+                            line_end: end,
+                        });
                     }
                 }
             }
@@ -1021,6 +1152,110 @@ fn extract_go<'a>(
     }
 
     (entities, rels)
+}
+
+// ─── Generic extraction ───────────────────────────────────────────────────────
+
+/// Generic entity extractor for languages without a hand-written extractor.
+///
+/// Walks the top-level nodes matching `top_level_kinds()` for the given
+/// extension, pulls out the identifier via the "name" field (or first
+/// identifier child), maps the node kind to an entity type, and records
+/// import relationships from import-like nodes.
+fn extract_generic<'a>(
+    root: Node<'a>,
+    source: &[u8],
+    lines: &[&str],
+    file_ext: &str,
+    file_path: &str,
+) -> (Vec<CodeEntity>, Vec<CodeRelationship>) {
+    let mut entities = Vec::new();
+    let mut rels = Vec::new();
+    let top_kinds = top_level_kinds(file_ext);
+
+    for i in 0..root.named_child_count() {
+        let child = match root.named_child(i) {
+            Some(c) => c,
+            None => continue,
+        };
+        let kind = child.kind();
+        if !top_kinds.contains(&kind) {
+            continue;
+        }
+
+        let start = child.start_position().row + 1;
+        let end = child.end_position().row + 1;
+
+        // Emit import relationships for import-like nodes
+        if is_import_kind(kind) {
+            if let Ok(text) = child.utf8_text(source) {
+                let t = text.trim().to_string();
+                if !t.is_empty() {
+                    rels.push(CodeRelationship {
+                        source: file_path.to_string(),
+                        target: t,
+                        relation: "imports".to_string(),
+                        file_path: file_path.to_string(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        // Try to find the entity name:
+        // 1. "name" field directly on the node (Java, C#, Go, Ruby, etc.)
+        // 2. Recursively follow "declarator" fields (C, C++ style)
+        // 3. First named child whose kind ends with "identifier"
+        let name = get_child_text(child, "name", source)
+            .or_else(|| find_name_in_declarator(child, source))
+            .or_else(|| {
+                (0..child.named_child_count()).find_map(|j| {
+                    let nc = child.named_child(j)?;
+                    if nc.kind().ends_with("identifier") {
+                        nc.utf8_text(source)
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        if let Some(name) = name {
+            let entity_type = generic_kind_to_entity_type(kind);
+            entities.push(CodeEntity {
+                name,
+                entity_type,
+                description: first_line(lines, start),
+                file_path: file_path.to_string(),
+                line_start: start,
+                line_end: end,
+            });
+        }
+    }
+
+    (entities, rels)
+}
+
+/// Map a tree-sitter node kind to a simple entity type string for the generic extractor.
+fn generic_kind_to_entity_type(kind: &str) -> String {
+    match kind {
+        k if k.contains("function") || k.contains("method") || k == "def" || k == "defp" => {
+            "function"
+        }
+        k if k.contains("class") => "class",
+        k if k.contains("interface") => "interface",
+        k if k.contains("struct") => "struct",
+        k if k.contains("enum") => "enum",
+        k if k.contains("namespace") || k.contains("module") || k == "defmodule" => "module",
+        k if k.contains("template") => "template",
+        k if k.contains("type") => "type_alias",
+        k if k.contains("protocol") => "protocol",
+        k if k.contains("object") => "object",
+        _ => "declaration",
+    }
+    .to_string()
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1143,6 +1378,29 @@ fn first_line(lines: &[&str], line_1indexed: usize) -> String {
         .unwrap_or_default()
 }
 
+/// Recursively follow "declarator" fields to find an identifier name.
+///
+/// Used for C/C++ function definitions where the name is nested:
+/// `function_definition → declarator (function_declarator) → declarator (identifier)`
+fn find_name_in_declarator(node: Node, source: &[u8]) -> Option<String> {
+    let mut current = node.child_by_field_name("declarator")?;
+    // Descend through up to 4 levels of declarator nesting
+    for _ in 0..4 {
+        if current.kind() == "identifier" || current.kind() == "field_identifier" {
+            return current
+                .utf8_text(source)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        match current.child_by_field_name("declarator") {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    None
+}
+
 /// Try to extract an identifier from a node (best-effort for import grouping).
 fn extract_identifier(node: Node, source: &[u8]) -> Option<String> {
     // Try field "name" first
@@ -1159,23 +1417,51 @@ fn extract_identifier(node: Node, source: &[u8]) -> Option<String> {
 /// Map a tree-sitter node kind to a human-readable chunk_type string.
 fn kind_to_chunk_type(kind: &str) -> String {
     match kind {
-        "function_item" | "function_definition" | "function_declaration"
-        | "method_declaration" => "function",
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "method_declaration"
+        | "method"
+        | "local_function"
+        | "function_signature"
+        | "method_signature" => "function",
         "impl_item" => "impl",
-        "struct_item" => "struct",
-        "enum_item" | "enum_declaration" => "enum",
+        "struct_item" | "struct_specifier" | "struct_declaration" => "struct",
+        "enum_item" | "enum_declaration" | "enum_specifier" => "enum",
         "trait_item" => "trait",
-        "mod_item" => "module",
-        "class_definition" | "class_declaration" => "class",
-        "type_item" | "type_alias_declaration" | "type_declaration" | "interface_declaration" => {
-            "type_alias"
+        "mod_item" | "module" | "namespace_definition" | "namespace_declaration" => "module",
+        "class_definition" | "class_declaration" | "class_specifier" | "object_declaration" => {
+            "class"
         }
-        "const_item" | "static_item" | "const_declaration" | "var_declaration"
-        | "lexical_declaration" | "variable_declaration" => "constant",
+        "type_item"
+        | "type_alias_declaration"
+        | "type_declaration"
+        | "interface_declaration"
+        | "type_definition"
+        | "type_synonym"
+        | "data_declaration"
+        | "protocol_declaration" => "type_alias",
+        "const_item"
+        | "static_item"
+        | "const_declaration"
+        | "var_declaration"
+        | "lexical_declaration"
+        | "variable_declaration"
+        | "assignment"
+        | "local_variable_declaration" => "constant",
         "macro_definition" => "macro",
         "export_statement" => "export",
-        "use_declaration" | "import_statement" | "import_from_statement"
-        | "import_declaration" => "import",
+        "template_declaration" => "template",
+        "use_declaration"
+        | "import_statement"
+        | "import_from_statement"
+        | "import_declaration"
+        | "using_directive"
+        | "preproc_include"
+        | "package_declaration"
+        | "import_header"
+        | "import_or_export"
+        | "open_statement" => "import",
         _ => "module_level",
     }
     .to_string()
@@ -1212,8 +1498,34 @@ mod tests {
     #[test]
     fn test_get_language_unsupported() {
         assert!(get_language("xyz").is_none());
-        assert!(get_language("java").is_none());
         assert!(get_language("").is_none());
+    }
+
+    #[test]
+    fn test_get_language_c() {
+        assert!(get_language("c").is_some());
+        assert!(get_language("h").is_some());
+    }
+
+    #[test]
+    fn test_get_language_cpp() {
+        assert!(get_language("cpp").is_some());
+        assert!(get_language("hpp").is_some());
+    }
+
+    #[test]
+    fn test_get_language_java() {
+        assert!(get_language("java").is_some());
+    }
+
+    #[test]
+    fn test_get_language_ruby() {
+        assert!(get_language("rb").is_some());
+    }
+
+    #[test]
+    fn test_get_language_go() {
+        assert!(get_language("go").is_some());
     }
 
     // ─── Rust AST chunking ────────────────────────────────────────────────────
@@ -1436,11 +1748,11 @@ CONSTANT = 42
 
     #[test]
     fn test_unsupported_extension_returns_empty() {
-        let (entities, rels) = extract_code_entities("x = 1\n", "java", "src/Main.java");
+        let (entities, rels) = extract_code_entities("x = 1\n", "xyz", "src/Main.xyz");
         assert!(entities.is_empty());
         assert!(rels.is_empty());
 
-        let chunks = chunk_code_ast("x = 1\n", "java");
+        let chunks = chunk_code_ast("x = 1\n", "xyz");
         assert!(chunks.is_empty());
     }
 
@@ -1448,11 +1760,147 @@ CONSTANT = 42
     fn test_chunk_fallback_for_unsupported_ext() {
         use crate::chunk::chunk_file;
         use crate::config::FolderType;
-        // Java not in ts-core, so chunk_file should fall back to regex-based chunker
-        let content = "public class Foo { public void bar() { System.out.println(\"hi\"); } }\n";
-        let chunks = chunk_file("src/Foo.java", content, Some(&FolderType::Code));
-        // Should not panic and should produce something
-        // (either empty for short content or the fallback chunk)
+        // Unknown extension → chunk_file should fall back to regex-based chunker
+        let content = "some unknown content here that should be handled gracefully\n";
+        let chunks = chunk_file("src/Foo.unknownext", content, Some(&FolderType::Code));
+        // Should not panic
         let _ = chunks;
+    }
+
+    // ─── C language tests ─────────────────────────────────────────────────────
+
+    const C_SAMPLE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+int add(int a, int b) {
+    return a + b;
+}
+
+void greet(const char *name) {
+    printf("Hello, %s!\n", name);
+}
+"#;
+
+    #[test]
+    fn test_c_language_detected() {
+        assert!(get_language("c").is_some());
+        assert!(get_language("h").is_some());
+    }
+
+    #[test]
+    fn test_c_chunking_produces_chunks() {
+        let chunks = chunk_code_ast(C_SAMPLE, "c");
+        assert!(!chunks.is_empty(), "Expected non-empty chunks for C sample");
+    }
+
+    #[test]
+    fn test_c_entity_extraction_finds_function() {
+        let (entities, _) = extract_code_entities(C_SAMPLE, "c", "src/main.c");
+        let fn_names: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == "function")
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            fn_names.contains(&"add") || fn_names.contains(&"greet"),
+            "Expected 'add' or 'greet' function entity, got: {:?}",
+            fn_names
+        );
+    }
+
+    // ─── Java language tests ──────────────────────────────────────────────────
+
+    const JAVA_SAMPLE: &str = r#"package com.example;
+
+import java.util.List;
+import java.util.ArrayList;
+
+public class Greeter {
+    private String name;
+
+    public Greeter(String name) {
+        this.name = name;
+    }
+
+    public String greet() {
+        return "Hello, " + name + "!";
+    }
+}
+"#;
+
+    #[test]
+    fn test_java_language_detected() {
+        assert!(get_language("java").is_some());
+    }
+
+    #[test]
+    fn test_java_chunking_produces_chunks() {
+        let chunks = chunk_code_ast(JAVA_SAMPLE, "java");
+        assert!(!chunks.is_empty(), "Expected non-empty chunks for Java sample");
+    }
+
+    #[test]
+    fn test_java_entity_extraction_finds_class() {
+        let (entities, _) = extract_code_entities(JAVA_SAMPLE, "java", "src/Greeter.java");
+        let class_names: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == "class")
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            class_names.contains(&"Greeter"),
+            "Expected 'Greeter' class entity, got: {:?}",
+            class_names
+        );
+    }
+
+    // ─── Ruby language tests ──────────────────────────────────────────────────
+
+    const RUBY_SAMPLE: &str = r#"require 'json'
+
+class Greeter
+  def initialize(name)
+    @name = name
+  end
+
+  def greet
+    "Hello, #{@name}!"
+  end
+end
+
+def standalone_hello(name)
+  puts "Hello, #{name}!"
+end
+"#;
+
+    #[test]
+    fn test_ruby_language_detected() {
+        assert!(get_language("rb").is_some());
+    }
+
+    #[test]
+    fn test_ruby_chunking_produces_chunks() {
+        let chunks = chunk_code_ast(RUBY_SAMPLE, "rb");
+        assert!(!chunks.is_empty(), "Expected non-empty chunks for Ruby sample");
+    }
+
+    #[test]
+    fn test_ruby_entity_extraction_finds_class() {
+        let (entities, _) = extract_code_entities(RUBY_SAMPLE, "rb", "src/greeter.rb");
+        let class_names: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == "class")
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            class_names.contains(&"Greeter"),
+            "Expected 'Greeter' class entity, got: {:?}",
+            class_names
+        );
     }
 }
