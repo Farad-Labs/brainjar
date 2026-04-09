@@ -272,10 +272,11 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let mode_str = args.get("mode").and_then(|v| v.as_str()).unwrap_or("all");
 
             let mode = match mode_str {
-                "local" => crate::search::SearchMode::from_flags(false, false, false, true),
-                "text" => crate::search::SearchMode::from_flags(true, false, false, false),
-                "graph" => crate::search::SearchMode::from_flags(false, true, false, false),
-                "vector" => crate::search::SearchMode::from_flags(false, false, true, false),
+                "local" => crate::search::SearchMode::from_flags(false, false, false, true, false),
+                "text" => crate::search::SearchMode::from_flags(true, false, false, false, false),
+                "graph" => crate::search::SearchMode::from_flags(false, true, false, false, false),
+                "vector" => crate::search::SearchMode::from_flags(false, false, true, false, false),
+                "filename" => crate::search::SearchMode::from_flags(false, false, false, false, true),
                 _ => crate::search::SearchMode::default_mode(),
             };
 

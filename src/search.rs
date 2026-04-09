@@ -67,26 +67,28 @@ pub enum SearchEngine {
     Vector,
     /// Local nucleo file scanner
     Local,
+    /// Filename stem matching
+    Filename,
 }
 
-/// Set of search engines to run. Default: Fuzzy + Graph + Vector.
+/// Set of search engines to run. Default: Fuzzy + Graph + Vector + Filename.
 #[derive(Debug, Clone)]
 pub struct SearchMode {
     pub engines: std::collections::HashSet<SearchEngine>,
 }
 
 impl SearchMode {
-    /// Default: fuzzy + graph + vector
+    /// Default: fuzzy + graph + vector + filename
     pub fn default_mode() -> Self {
         Self {
-            engines: [SearchEngine::Fuzzy, SearchEngine::Graph, SearchEngine::Vector]
+            engines: [SearchEngine::Fuzzy, SearchEngine::Graph, SearchEngine::Vector, SearchEngine::Filename]
                 .into_iter()
                 .collect(),
         }
     }
 
     /// Build from explicit flags. If none set, use default.
-    pub fn from_flags(text: bool, graph: bool, vector: bool, local: bool) -> Self {
+    pub fn from_flags(text: bool, graph: bool, vector: bool, local: bool, filename: bool) -> Self {
         if local {
             return Self {
                 engines: [SearchEngine::Local].into_iter().collect(),
@@ -96,6 +98,7 @@ impl SearchMode {
         if text { engines.insert(SearchEngine::Text); }
         if graph { engines.insert(SearchEngine::Graph); }
         if vector { engines.insert(SearchEngine::Vector); }
+        if filename { engines.insert(SearchEngine::Filename); }
         if engines.is_empty() {
             return Self::default_mode();
         }
@@ -126,6 +129,10 @@ impl SearchMode {
 
     pub fn run_local(&self) -> bool {
         self.has(SearchEngine::Local)
+    }
+
+    pub fn run_filename(&self) -> bool {
+        self.has(SearchEngine::Filename)
     }
 }
 
@@ -285,8 +292,35 @@ pub async fn run_search(
         all_graph = dedup_graph_results(all_graph);
         all_vector = dedup_vector_results(all_vector);
 
+        // Collect filename results for the original query
+        let all_filename: Vec<(String, f64)> = if mode.run_filename() {
+            let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+                let kb = config
+                    .knowledge_bases
+                    .get(name)
+                    .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+                vec![(name, kb)]
+            } else {
+                config
+                    .knowledge_bases
+                    .iter()
+                    .map(|(n, kb): (&String, _)| (n.as_str(), kb))
+                    .collect()
+            };
+            let db_dir_smart = config.effective_db_dir();
+            let mut fn_results: Vec<(String, f64)> = Vec::new();
+            for (name, _kb) in &kbs {
+                if let Ok(conn) = db::open_db(name, &db_dir_smart) {
+                    fn_results.extend(search_filename(&conn, query));
+                }
+            }
+            fn_results
+        } else {
+            Vec::new()
+        };
+
         if json {
-            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, limit, chunks, doc_score, query);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query);
             enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -299,6 +333,7 @@ pub async fn run_search(
                 &all_local,
                 &all_graph,
                 &all_vector,
+                &all_filename,
                 &mode,
                 limit,
                 chunks,
@@ -312,6 +347,7 @@ pub async fn run_search(
     let run_local = mode.run_local();
     let run_graph = mode.run_graph();
     let run_vector = mode.run_vector();
+    let run_filename = mode.run_filename();
 
     // Fuzzy mode: correct the query via vocabulary before FTS/graph search
     let (effective_query, query_corrections) = if mode.run_fuzzy() {
@@ -478,8 +514,34 @@ pub async fn run_search(
         Vec::new()
     };
 
+    // Filename search results
+    let filename_results: Vec<(String, f64)> = if run_filename {
+        let kbs: Vec<(&str, &crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb_name {
+            let kb = config
+                .knowledge_bases
+                .get(name)
+                .with_context(|| format!("Knowledge base '{}' not found in config", name))?;
+            vec![(name, kb)]
+        } else {
+            config
+                .knowledge_bases
+                .iter()
+                .map(|(n, kb): (&String, _)| (n.as_str(), kb))
+                .collect()
+        };
+        let mut all_fn: Vec<(String, f64)> = Vec::new();
+        for (name, _kb) in &kbs {
+            if let Ok(conn) = db::open_db(name, &db_dir) {
+                all_fn.extend(search_filename(&conn, search_query));
+            }
+        }
+        all_fn
+    } else {
+        Vec::new()
+    };
+
     if json {
-        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, limit, chunks, doc_score, query);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query);
         enrich_graph_only_results(config, &mut unified);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
@@ -499,6 +561,7 @@ pub async fn run_search(
             &local_results,
             &graph_results,
             &vector_results,
+            &filename_results,
             &mode,
             limit,
             chunks,
@@ -876,6 +939,60 @@ pub fn search_vector(
     }
 }
 
+/// Filename stem search engine.
+///
+/// Scores each document's filename (stem without extension) against the query words:
+/// - Exact stem match (query word == stem): score 1.0
+/// - Substring match (query word contained in stem): score 0.5
+/// - Case-insensitive; multiple words: sum, capped at 1.0
+///
+/// Returns Vec of (file_path, score) for files with score > 0.
+pub fn search_filename(conn: &Connection, query: &str) -> Vec<(String, f64)> {
+    let words: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+    if words.is_empty() {
+        return vec![];
+    }
+
+    let paths: Vec<String> = {
+        let mut stmt = match conn.prepare("SELECT path FROM documents") {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut results = Vec::new();
+    for path in &paths {
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let mut score = 0.0f64;
+        for word in &words {
+            if stem == *word {
+                score += 1.0;
+            } else if stem.contains(word.as_str()) {
+                score += 0.5;
+            }
+        }
+        if score > 0.0 {
+            results.push((path.clone(), score.min(1.0)));
+        }
+    }
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results
+}
+
 /// Weighted Normalized Score Fusion over multiple ranked result sets.
 /// For each engine's result set, scores are normalized to [0.0, 1.0] via min-max,
 /// then combined as: final_score = sum(weight × normalized_score).
@@ -941,10 +1058,11 @@ fn build_unified_results(
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
+    filename_results: &[(String, f64)],
     limit: usize,
     _include_content: bool, // deprecated: content always included now
     doc_score: bool,
-    query: &str,
+    _query: &str,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
     // We use chunk-keyed ranking: each chunk is its own ranked item
@@ -965,14 +1083,16 @@ fn build_unified_results(
             .unwrap_or_else(|| r.path.clone());
         (key, r.score)
     }).collect();
+    let filename_ranked: Vec<(String, f64)> = filename_results.to_vec();
 
     // Weighted Normalized Score Fusion:
-    // FTS5=0.4, Vector=0.3, Graph=0.2, Local/fuzzy=0.1
+    // FTS5=0.35, Vector=0.25, Graph=0.2, Filename=0.1, Local/fuzzy=0.1
     // Scores within each engine are min-max normalized before weighting.
     let merged = weighted_score_fusion(vec![
-        (fts_ranked, 0.4),
-        (vector_ranked, 0.3),
+        (fts_ranked, 0.35),
+        (vector_ranked, 0.25),
         (graph_ranked, 0.2),
+        (filename_ranked, 0.1),
         (local_ranked, 0.1),
     ]);
 
@@ -985,6 +1105,8 @@ fn build_unified_results(
         local.iter().map(|r| (r.file.as_str(), r)).collect();
     let graph_map: HashMap<&str, &crate::graph::GraphSearchResult> =
         graph.iter().map(|r| (r.file.as_str(), r)).collect();
+    let filename_map: HashMap<&str, f64> =
+        filename_results.iter().map(|(p, s)| (p.as_str(), *s)).collect();
     let vector_by_chunk: HashMap<i64, &VectorResult> =
         vector.iter().filter_map(|r| r.chunk_id.map(|id| (id, r))).collect();
     let vector_by_path: HashMap<&str, &VectorResult> =
@@ -1060,29 +1182,13 @@ fn build_unified_results(
             if graph_map.contains_key(file.as_str()) && !sources.contains(&"graph".to_string()) {
                 sources.push("graph".to_string());
             }
-
-            // Filename boost: if any query word appears in the filename (without extension),
-            // add a flat +0.15 to the final score.
-            let boosted_score = {
-                let fname = std::path::Path::new(&file)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let boost: f64 = if query
-                    .split_whitespace()
-                    .any(|word| fname.contains(&word.to_lowercase()))
-                {
-                    0.15
-                } else {
-                    0.0
-                };
-                score + boost
-            };
+            if filename_map.contains_key(file.as_str()) && !sources.contains(&"filename".to_string()) {
+                sources.push("filename".to_string());
+            }
 
             UnifiedResult {
                 file,
-                score: boosted_score,
+                score,
                 sources,
                 content: excerpt.clone(),
                 chunk_id: chunk_id_out,
@@ -1204,6 +1310,7 @@ fn print_results(
     local: &[LocalSearchResult],
     graph: &[crate::graph::GraphSearchResult],
     vector: &[VectorResult],
+    filename_results: &[(String, f64)],
     mode: &SearchMode,
     limit: usize,
     include_content: bool,
@@ -1213,8 +1320,9 @@ fn print_results(
     let has_local = !local.is_empty();
     let has_graph = !graph.is_empty();
     let has_vector = !vector.is_empty();
+    let has_filename = !filename_results.is_empty();
 
-    if !has_fts && !has_local && !has_graph && !has_vector {
+    if !has_fts && !has_local && !has_graph && !has_vector && !has_filename {
         println!("{}", "🔍 No results found".yellow());
         return;
     }
@@ -1249,7 +1357,7 @@ fn print_results(
     let single_local = mode.run_local();
     if !single_text && !single_local {
         // Merged RRF view (default for any engine combination)
-        let unified = build_unified_results(fts, local, graph, vector, limit, include_content, doc_score, query);
+        let unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");
@@ -1374,25 +1482,31 @@ mod tests {
     #[test]
     fn test_search_mode_from_flags() {
         // No flags → default
-        let mode = SearchMode::from_flags(false, false, false, false);
+        let mode = SearchMode::from_flags(false, false, false, false, false);
         assert!(mode.run_fuzzy());
         assert!(mode.run_graph());
         assert!(mode.run_vector());
+        assert!(mode.run_filename());
 
         // Single flag
-        let mode = SearchMode::from_flags(true, false, false, false);
+        let mode = SearchMode::from_flags(true, false, false, false, false);
         assert!(mode.has(SearchEngine::Text));
         assert!(!mode.run_graph());
 
         // Combination
-        let mode = SearchMode::from_flags(false, true, true, false);
+        let mode = SearchMode::from_flags(false, true, true, false, false);
         assert!(mode.run_graph());
         assert!(mode.run_vector());
         assert!(!mode.run_fts());
 
         // Local is exclusive
-        let mode = SearchMode::from_flags(false, false, false, true);
+        let mode = SearchMode::from_flags(false, false, false, true, false);
         assert!(mode.run_local());
+        assert!(!mode.run_fts());
+
+        // Filename flag alone
+        let mode = SearchMode::from_flags(false, false, false, false, true);
+        assert!(mode.run_filename());
         assert!(!mode.run_fts());
     }
 
@@ -1537,13 +1651,101 @@ mod tests {
         }
     }
 
-    // ─── filename boost ──────────────────────────────────────────────────────
+    // ─── search_filename unit tests ──────────────────────────────────────────
+
+    fn make_test_db_with_docs(paths: &[&str]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                content TEXT,
+                content_hash TEXT,
+                extracted INTEGER DEFAULT 0,
+                updated_at TEXT
+            );",
+        )
+        .unwrap();
+        for path in paths {
+            conn.execute(
+                "INSERT INTO documents (path) VALUES (?1)",
+                rusqlite::params![path],
+            )
+            .unwrap();
+        }
+        conn
+    }
 
     #[test]
-    fn test_filename_boost_applies_when_query_matches() {
+    fn test_filename_search_exact_match() {
+        let conn = make_test_db_with_docs(&["docs/architecture.md", "docs/other.md"]);
+        let results = search_filename(&conn, "architecture");
+        let arch = results.iter().find(|(p, _)| p.contains("architecture.md"));
+        assert!(arch.is_some(), "architecture.md should match");
+        assert!(
+            (arch.unwrap().1 - 1.0).abs() < 1e-9,
+            "exact match should score 1.0, got {}",
+            arch.unwrap().1
+        );
+        // other.md should not appear
+        let other = results.iter().find(|(p, _)| p.contains("other.md"));
+        assert!(other.is_none(), "other.md should not match query 'architecture'");
+    }
+
+    #[test]
+    fn test_filename_search_substring_match() {
+        let conn = make_test_db_with_docs(&["docs/architecture.md", "docs/arch-notes.md"]);
+        let results = search_filename(&conn, "arch");
+        let arch_md = results.iter().find(|(p, _)| p.ends_with("architecture.md"));
+        let arch_notes = results.iter().find(|(p, _)| p.ends_with("arch-notes.md"));
+        assert!(arch_md.is_some(), "architecture.md should match 'arch'");
+        assert_eq!(arch_md.unwrap().1, 0.5, "substring match should score 0.5");
+        assert!(arch_notes.is_some(), "arch-notes.md should match 'arch'");
+        // arch-notes has stem "arch-notes"; "arch" is a substring → 0.5
+        assert_eq!(arch_notes.unwrap().1, 0.5);
+    }
+
+    #[test]
+    fn test_filename_search_no_match() {
+        let conn = make_test_db_with_docs(&["docs/architecture.md", "docs/overview.md"]);
+        let results = search_filename(&conn, "zebra");
+        assert!(results.is_empty(), "no files should match 'zebra'");
+    }
+
+    #[test]
+    fn test_filename_search_multiple_words() {
+        let conn = make_test_db_with_docs(&[
+            "docs/architecture-overview.md",
+            "docs/architecture.md",
+            "docs/overview.md",
+        ]);
+        let results = search_filename(&conn, "architecture overview");
+        let arch_ov = results.iter().find(|(p, _)| p.ends_with("architecture-overview.md"));
+        let arch = results.iter().find(|(p, _)| p.ends_with("architecture.md") && !p.ends_with("architecture-overview.md"));
+        assert!(arch_ov.is_some(), "architecture-overview.md should match");
+        assert!(arch.is_some(), "architecture.md should match");
+        // architecture-overview.md: "architecture" is substring → 0.5, "overview" is substring → 0.5, sum = 1.0 (capped)
+        assert!(
+            (arch_ov.unwrap().1 - 1.0).abs() < 1e-9,
+            "architecture-overview.md should score 1.0 (capped), got {}",
+            arch_ov.unwrap().1
+        );
+        // architecture.md: "architecture" exact → 1.0, "overview" no match → 0, capped at 1.0
+        assert!(
+            (arch.unwrap().1 - 1.0).abs() < 1e-9,
+            "architecture.md should score 1.0 for exact 'architecture' match, got {}",
+            arch.unwrap().1
+        );
+        // architecture-overview.md should rank >= architecture.md (both capped at 1.0)
+        assert!(arch_ov.unwrap().1 >= arch.unwrap().1);
+    }
+
+    // ─── filename engine in fusion ────────────────────────────────────────────
+
+    #[test]
+    fn test_filename_in_fusion_sources() {
         // pricing.md and old-blog.md have identical raw FTS scores.
-        // After min-max normalization both get 1.0 (range == 0 edge case).
-        // The filename boost (+0.15) applied only to pricing.md should be the tiebreaker.
+        // Provide filename results: pricing.md scores 1.0, old-blog.md has no filename score.
         let fts_results = vec![
             FtsResult {
                 path: "docs/pricing.md".to_string(),
@@ -1558,7 +1760,7 @@ mod tests {
             FtsResult {
                 path: "archive/old-blog.md".to_string(),
                 excerpt: "We changed our pricing last year.".to_string(),
-                score: 3.0, // same raw FTS score — only filename boost differs
+                score: 3.0,
                 chunk_id: None,
                 line_start: None,
                 line_end: None,
@@ -1566,43 +1768,54 @@ mod tests {
                 content: Some("We changed our pricing last year.".to_string()),
             },
         ];
-        let local_results = vec![];
-        let graph_results = vec![];
-        let vector_results = vec![];
+        let filename_results = vec![
+            ("docs/pricing.md".to_string(), 1.0),
+        ];
 
         let unified = build_unified_results(
             &fts_results,
-            &local_results,
-            &graph_results,
-            &vector_results,
+            &[],
+            &[],
+            &[],
+            &filename_results,
             10,
             true,
             false,
             "pricing",
         );
 
-        // pricing.md should appear in results
         let pricing_result = unified.iter().find(|r| r.file.contains("pricing.md"));
         let archive_result = unified.iter().find(|r| r.file.contains("old-blog.md"));
 
         assert!(pricing_result.is_some(), "pricing.md should be in results");
         assert!(archive_result.is_some(), "old-blog.md should be in results");
 
-        // After filename boost, pricing.md should outrank old-blog.md
-        // Both normalized to 1.0 (equal scores), pricing.md gets +0.15 boost
+        // pricing.md should outrank old-blog.md (it has filename engine contribution)
         let pricing_score = pricing_result.unwrap().score;
         let archive_score = archive_result.unwrap().score;
         assert!(
             pricing_score > archive_score,
-            "pricing.md (score {:.4}) should outrank archive/old-blog.md (score {:.4}) due to filename boost",
+            "pricing.md (score {:.4}) should outrank archive/old-blog.md (score {:.4}) via filename engine",
             pricing_score,
             archive_score
+        );
+
+        // pricing.md should have "filename" in sources
+        assert!(
+            pricing_result.unwrap().sources.contains(&"filename".to_string()),
+            "pricing.md should have 'filename' in sources: {:?}",
+            pricing_result.unwrap().sources
+        );
+        // old-blog.md should NOT have "filename" in sources
+        assert!(
+            !archive_result.unwrap().sources.contains(&"filename".to_string()),
+            "old-blog.md should NOT have 'filename' in sources"
         );
     }
 
     #[test]
     fn test_filename_boost_case_insensitive() {
-        // PRICING.md (uppercase) should still get the boost for query "pricing"
+        // PRICING.md (uppercase) should still get filename engine contribution for query "pricing"
         let fts_results = vec![
             FtsResult {
                 path: "docs/PRICING.md".to_string(),
@@ -1617,7 +1830,7 @@ mod tests {
             FtsResult {
                 path: "docs/other.md".to_string(),
                 excerpt: "Also mentions pricing.".to_string(),
-                score: 2.0, // same raw score, so only boost makes the difference
+                score: 2.0, // same raw FTS score
                 chunk_id: None,
                 line_start: None,
                 line_end: None,
@@ -1625,12 +1838,17 @@ mod tests {
                 content: Some("Also mentions pricing.".to_string()),
             },
         ];
+        // Provide filename results simulating case-insensitive match
+        let filename_results = vec![
+            ("docs/PRICING.md".to_string(), 1.0),
+        ];
 
         let unified = build_unified_results(
             &fts_results,
             &[],
             &[],
             &[],
+            &filename_results,
             10,
             true,
             false,
@@ -1643,16 +1861,16 @@ mod tests {
         assert!(pricing_result.is_some());
         assert!(other_result.is_some());
 
-        // PRICING.md should score higher (0.15 boost for case-insensitive filename match)
+        // PRICING.md should score higher (filename engine contribution)
         assert!(
             pricing_result.unwrap().score > other_result.unwrap().score,
-            "PRICING.md should get filename boost for query 'pricing'"
+            "PRICING.md should rank higher via filename engine for query 'pricing'"
         );
     }
 
     #[test]
     fn test_filename_boost_no_match_no_boost() {
-        // A file whose name doesn't match the query should not get boosted
+        // A file whose name doesn't match the query should not gain filename engine score
         let fts_results = vec![
             FtsResult {
                 path: "docs/readme.md".to_string(),
@@ -1671,6 +1889,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             10,
             true,
             false,
@@ -1678,11 +1897,11 @@ mod tests {
         );
 
         assert_eq!(unified.len(), 1);
-        // Score should be the normalized FTS score (1.0 × 0.4 weight) + 0 boost = 0.4
-        // No filename boost since "readme" doesn't contain "pricing"
+        // Score should be the normalized FTS score (1.0 × 0.35 weight) = 0.35
+        // No filename contribution since filename_results is empty
         assert!(
-            (unified[0].score - 0.4).abs() < 1e-9,
-            "readme.md should not get filename boost; expected 0.4, got {:.4}",
+            (unified[0].score - 0.35).abs() < 1e-9,
+            "readme.md should have score 0.35 (FTS weight only); expected 0.35, got {:.4}",
             unified[0].score
         );
     }
