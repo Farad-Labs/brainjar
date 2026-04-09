@@ -50,7 +50,6 @@ tree-sitter-rust = { version = "0.24", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
-# ts-core languages
 tree-sitter-go = { version = "0.25", optional = true }
 tree-sitter-c = { version = "0.24", optional = true }
 tree-sitter-cpp = { version = "0.23", optional = true }
@@ -59,8 +58,7 @@ tree-sitter-java = { version = "0.23", optional = true }
 tree-sitter-ruby = { version = "0.23", optional = true }
 tree-sitter-php = { version = "0.24", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
-# ts-extended languages
-tree-sitter-kotlin = { version = "0.3", optional = true }
+tree-sitter-kotlin-ng = { version = "1.1", optional = true }
 tree-sitter-swift = { version = "0.7", optional = true }
 tree-sitter-elixir = { version = "0.3", optional = true }
 tree-sitter-lua = { version = "0.5", optional = true }
@@ -91,10 +89,7 @@ ts-core = [
   "dep:tree-sitter-ruby",
   "dep:tree-sitter-php",
   "dep:tree-sitter-bash",
-]
-ts-extended = [
-  "ts-core",
-  "dep:tree-sitter-kotlin",
+  "dep:tree-sitter-kotlin-ng",
   "dep:tree-sitter-swift",
   "dep:tree-sitter-elixir",
   "dep:tree-sitter-lua",

@@ -68,30 +68,17 @@ pub fn get_language(file_ext: &str) -> Option<Language> {
         "rb" => Some(tree_sitter_ruby::LANGUAGE.into()),
         "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
         "sh" | "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
-        // ts-extended languages
-        #[cfg(feature = "ts-extended")]
-        "kt" | "kts" => Some(tree_sitter_kotlin::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
+        "kt" | "kts" => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
         "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "ex" | "exs" => Some(tree_sitter_elixir::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "lua" => Some(tree_sitter_lua::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "hs" => Some(tree_sitter_haskell::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "html" | "htm" => Some(tree_sitter_html::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "css" => Some(tree_sitter_css::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "toml" => Some(tree_sitter_toml_ng::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "yml" | "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
-        #[cfg(feature = "ts-extended")]
         "ml" | "mli" => Some(tree_sitter_ocaml::LANGUAGE_OCAML.into()),
-        #[cfg(feature = "ts-extended")]
         "dart" => Some(tree_sitter_dart::LANGUAGE.into()),
         _ => None,
     }
@@ -496,13 +483,9 @@ pub fn extract_code_entities(
         "go" => extract_go(root, source, &lines, file_path),
         // Generic extractor for ts-core languages
         "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "java" | "rb" | "php"
-        | "sh" | "bash" => extract_generic(root, source, &lines, file_ext, file_path),
-        // Generic extractor for ts-extended languages
-        #[cfg(feature = "ts-extended")]
-        "kt" | "kts" | "swift" | "ex" | "exs" | "lua" | "hs" | "html" | "htm" | "css"
-        | "toml" | "yml" | "yaml" | "json" | "ml" | "mli" | "dart" => {
-            extract_generic(root, source, &lines, file_ext, file_path)
-        }
+        | "sh" | "bash" | "kt" | "kts" | "swift" | "ex" | "exs" | "lua" | "hs"
+        | "html" | "htm" | "css" | "toml" | "yml" | "yaml" | "json" | "ml" | "mli"
+        | "dart" => extract_generic(root, source, &lines, file_ext, file_path),
         _ => (Vec::new(), Vec::new()),
     }
 }
