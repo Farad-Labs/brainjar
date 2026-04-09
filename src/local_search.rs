@@ -93,8 +93,13 @@ fn search_path(
 
     /// Text file extensions to include (matches sync.rs DEFAULT_TEXT_EXTENSIONS)
     const TEXT_EXTS: &[&str] = &[
-        "md", "txt", "rs", "toml", "yaml", "yml", "json", "py", "js", "ts", "tsx", "jsx",
-        "sh", "css", "html", "xml", "csv", "sql", "tf", "hcl", "conf", "ini", "cfg", "env",
+        // Docs & data
+        "md", "txt", "toml", "yaml", "yml", "json", "xml", "csv", "sql", "html", "css",
+        "tf", "hcl", "conf", "ini", "cfg", "env",
+        // Languages (matches tree-sitter support)
+        "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
+        "cs", "java", "rb", "php", "sh", "bash", "kt", "kts", "swift", "ex", "exs", "lua",
+        "hs", "scala", "zig", "dart", "ml", "mli", "r", "pl", "pm", "el", "clj", "erl",
     ];
 
     for entry in WalkDir::new(base)
