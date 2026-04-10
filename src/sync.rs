@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::Colorize;
+use futures::StreamExt;
 use hex;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use glob::Pattern;
 use walkdir::WalkDir;
 
@@ -12,7 +14,7 @@ use crate::chunk;
 use crate::config::{Config, FolderConfig, KnowledgeBaseConfig};
 use crate::db;
 use crate::embed::Embedder;
-use crate::extract::Extractor;
+use crate::extract::{ExtractionResult, Extractor};
 use crate::fuzzy;
 use crate::graph::KnowledgeGraph;
 
@@ -57,6 +59,45 @@ pub async fn run_sync(
     }
 
     Ok(())
+}
+
+/// One LLM extraction result (success or error), keyed by rel_path.
+struct LlmExtractionOutcome {
+    rel_path: String,
+    result: Result<ExtractionResult>,
+}
+
+/// Run LLM entity extraction over `docs` with `concurrency` parallel calls.
+///
+/// Returns a Vec of outcomes in completion order. The caller is responsible
+/// for all DB/graph writes so that SQLite access stays on a single thread.
+async fn parallel_llm_extract(
+    extractor: Arc<Extractor>,
+    docs: Vec<(String, std::path::PathBuf)>,
+    concurrency: usize,
+    epb: &ProgressBar,
+) -> Vec<LlmExtractionOutcome> {
+    futures::stream::iter(docs)
+        .map(|(rel_path, abs_path)| {
+            let extractor = Arc::clone(&extractor);
+            async move {
+                let content = match std::fs::read_to_string(&abs_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return LlmExtractionOutcome {
+                            rel_path,
+                            result: Err(anyhow::anyhow!("read error: {}", e)),
+                        };
+                    }
+                };
+                let result = extractor.extract(&content, &rel_path).await;
+                LlmExtractionOutcome { rel_path, result }
+            }
+        })
+        .buffer_unordered(concurrency)
+        .inspect(|_| epb.inc(1))
+        .collect()
+        .await
 }
 
 async fn sync_kb_human(
@@ -326,42 +367,40 @@ async fn sync_kb_human(
         && extraction_cfg.enabled && !llm_docs_to_extract.is_empty() {
             let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
             let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
-            let extractor = Extractor::new(extraction_cfg, api_key, base_url);
+            let extractor = Arc::new(Extractor::new(extraction_cfg, api_key, base_url));
+            let concurrency = extraction_cfg.concurrency.max(1);
             match KnowledgeGraph::open(&db_dir, kb_name) {
                 Ok(kg) => {
                     let extract_total = llm_docs_to_extract.len() as u64;
                     let epb = ProgressBar::new(extract_total);
                     epb.set_style(
                         ProgressStyle::default_bar()
-                            .template("  Entities: {pos}/{len} docs [{bar:38.green/white}] {percent}%\n  {msg}")
+                            .template("  Entities: {pos}/{len} docs [{bar:38.green/white}] {percent}%")
                             .unwrap()
                             .progress_chars("\u{2588}\u{2588}\u{2591}"),
                     );
 
+                    // Phase 1: concurrent LLM calls — collect all results first.
+                    let docs_vec: Vec<(String, std::path::PathBuf)> = llm_docs_to_extract
+                        .iter()
+                        .map(|(k, v)| ((*k).clone(), (*v).clone()))
+                        .collect();
+                    let outcomes = parallel_llm_extract(Arc::clone(&extractor), docs_vec, concurrency, &epb).await;
+                    epb.finish_and_clear();
+
+                    // Phase 2: serialized DB / graph writes.
                     let mut total_entities = 0usize;
                     let mut total_rels = 0usize;
                     let mut extraction_errors = 0usize;
 
-                    for (rel_path, abs_path) in &llm_docs_to_extract {
-                        let display_name = if rel_path.len() > 60 {
-                            format!("...{}", &rel_path[rel_path.len() - 57..])
-                        } else {
-                            rel_path.to_string()
-                        };
-                        epb.set_message(display_name);
-                        let content = match std::fs::read_to_string(abs_path) {
-                            Ok(c) => c,
-                            Err(_) => { epb.inc(1); continue; }
-                        };
-
-                        // Remove stale graph data for this document
-                        if let Err(e) = kg.remove_document(rel_path) {
-                            eprintln!("  ⚠ Graph remove failed for {}: {}", rel_path, e);
-                        }
-
-                        // Extract entities
-                        match extractor.extract(&content, rel_path).await {
+                    for outcome in outcomes {
+                        let rel_path = &outcome.rel_path;
+                        match outcome.result {
                             Ok(result) => {
+                                // Remove stale graph data for this document
+                                if let Err(e) = kg.remove_document(rel_path) {
+                                    eprintln!("  ⚠ Graph remove failed for {}: {}", rel_path, e);
+                                }
                                 total_entities += result.entities.len();
                                 total_rels += result.relationships.len();
                                 let ingest_ok = kg.ingest_entities(
@@ -372,11 +411,8 @@ async fn sync_kb_human(
                                 if let Err(e) = ingest_ok {
                                     eprintln!("  ⚠ Graph ingest failed for {}: {}", rel_path, e);
                                     extraction_errors += 1;
-                                } else {
-                                    // Mark as extracted only on full success
-                                    if let Err(e) = db::mark_extracted(&conn, rel_path) {
-                                        eprintln!("  ⚠ mark_extracted failed for {}: {}", rel_path, e);
-                                    }
+                                } else if let Err(e) = db::mark_extracted(&conn, rel_path) {
+                                    eprintln!("  ⚠ mark_extracted failed for {}: {}", rel_path, e);
                                 }
                             }
                             Err(e) => {
@@ -384,9 +420,7 @@ async fn sync_kb_human(
                                 extraction_errors += 1;
                             }
                         }
-                        epb.inc(1);
                     }
-                    epb.finish_and_clear();
 
                     if extraction_errors == 0 {
                         println!(
@@ -779,15 +813,22 @@ async fn sync_kb_json(
             && extraction_cfg.enabled && !llm_docs_json.is_empty() {
                 let api_key = config.resolve_api_key(&extraction_cfg.provider, extraction_cfg.api_key.as_deref());
                 let base_url = config.resolve_base_url(&extraction_cfg.provider, extraction_cfg.base_url.as_deref());
-                let extractor = Extractor::new(extraction_cfg, api_key, base_url);
+                let extractor = Arc::new(Extractor::new(extraction_cfg, api_key, base_url));
+                let concurrency = extraction_cfg.concurrency.max(1);
                 if let Ok(kg) = KnowledgeGraph::open(&db_dir, kb_name) {
-                    for (rel_path, abs_path) in &llm_docs_json {
-                        let content = match std::fs::read_to_string(abs_path) {
-                            Ok(c) => c,
-                            Err(_) => continue,
-                        };
-                        let _ = kg.remove_document(rel_path);
-                        if let Ok(res) = extractor.extract(&content, rel_path).await {
+                    // Phase 1: concurrent LLM calls — use a hidden progress bar.
+                    let docs_vec: Vec<(String, std::path::PathBuf)> = llm_docs_json
+                        .iter()
+                        .map(|(k, v)| ((*k).clone(), (*v).clone()))
+                        .collect();
+                    let silent_pb = ProgressBar::hidden();
+                    let outcomes = parallel_llm_extract(Arc::clone(&extractor), docs_vec, concurrency, &silent_pb).await;
+
+                    // Phase 2: serialized DB / graph writes.
+                    for outcome in outcomes {
+                        let rel_path = &outcome.rel_path;
+                        if let Ok(res) = outcome.result {
+                            let _ = kg.remove_document(rel_path);
                             entities_extracted += res.entities.len();
                             rels_extracted += res.relationships.len();
                             if kg.ingest_entities(rel_path, &res.entities, &res.relationships).is_ok() {
