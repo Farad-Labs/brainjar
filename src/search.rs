@@ -67,6 +67,9 @@ pub struct UnifiedResult {
     pub line_end: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_type: Option<String>,
+    /// Files containing near-identical content (collapsed during dedup pass).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also_in: Vec<String>,
 }
 
 /// Individual search engines that can be combined.
@@ -337,6 +340,7 @@ pub async fn run_search(
         if json {
             let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query);
             enrich_graph_only_results(config, &mut unified);
+            let unified = dedup_unified_results(unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
@@ -565,6 +569,7 @@ pub async fn run_search(
             apply_folder_scoring(conn, &mut unified);
         }
         enrich_graph_only_results(config, &mut unified);
+        let unified = dedup_unified_results(unified);
         let mut output = serde_json::json!({ "results": unified });
         if !query_corrections.is_empty() {
             let corrections_json: Vec<serde_json::Value> = query_corrections
@@ -1218,6 +1223,7 @@ fn build_unified_results(
                 line_start,
                 line_end,
                 chunk_type,
+                also_in: Vec::new(),
             }
         })
         .collect();
@@ -1297,6 +1303,119 @@ fn build_unified_results(
     }
 
     results
+}
+
+/// Compute word-level Jaccard similarity between two strings.
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let words_a: HashSet<&str> = a.split_whitespace().collect();
+    let words_b: HashSet<&str> = b.split_whitespace().collect();
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Normalize content for comparison: trim and collapse whitespace.
+fn normalize_content(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Dedup near-identical chunks in search results.
+///
+/// Two passes:
+/// 1. Exact dedup: group by normalized content, keep highest-scoring entry, add others to `also_in`.
+/// 2. Near dedup: Jaccard similarity > 0.85 between remaining results collapses into higher-scoring.
+///
+/// Empty content strings are never considered duplicates.
+fn dedup_unified_results(results: Vec<UnifiedResult>) -> Vec<UnifiedResult> {
+    // --- Pass 1: Exact dedup by normalized content ---
+    let normalized: Vec<String> = results.iter().map(|r| normalize_content(&r.content)).collect();
+
+    let n = results.len();
+    let mut absorbed = vec![false; n];
+    // Map from normalized content → index of the winner (highest score)
+    let mut content_to_winner: HashMap<String, usize> = HashMap::new();
+
+    // Find winners (highest score per normalized content, skipping empty)
+    for (i, norm) in normalized.iter().enumerate() {
+        if norm.is_empty() {
+            continue;
+        }
+        content_to_winner
+            .entry(norm.clone())
+            .and_modify(|winner_idx| {
+                if results[i].score > results[*winner_idx].score {
+                    *winner_idx = i;
+                }
+            })
+            .or_insert(i);
+    }
+
+    // Mark non-winners as absorbed; collect their files into the winner's also_in
+    let mut also_in_map: HashMap<usize, Vec<String>> = HashMap::new();
+    for (i, norm) in normalized.iter().enumerate() {
+        if norm.is_empty() {
+            continue;
+        }
+        if let Some(&winner_idx) = content_to_winner.get(norm.as_str())
+            && winner_idx != i
+        {
+            absorbed[i] = true;
+            also_in_map
+                .entry(winner_idx)
+                .or_default()
+                .push(results[i].file.clone());
+        }
+    }
+
+    // Build the post-exact-dedup results with also_in populated
+    let mut deduped: Vec<UnifiedResult> = results
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !absorbed[*i])
+        .map(|(i, mut r)| {
+            if let Some(extra) = also_in_map.remove(&i) {
+                r.also_in.extend(extra);
+            }
+            r
+        })
+        .collect();
+
+    // Re-sort in case winners were not already highest-score first
+    deduped.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // --- Pass 2: Near dedup by Jaccard similarity (threshold 0.85) ---
+    let m = deduped.len();
+    let mut near_absorbed = vec![false; m];
+
+    for i in 0..m {
+        if near_absorbed[i] || deduped[i].content.is_empty() {
+            continue;
+        }
+        let norm_i = normalize_content(&deduped[i].content);
+        for j in (i + 1)..m {
+            if near_absorbed[j] || deduped[j].content.is_empty() {
+                continue;
+            }
+            let norm_j = normalize_content(&deduped[j].content);
+            if jaccard_similarity(&norm_i, &norm_j) > 0.85 {
+                // i has higher or equal score (list is sorted); absorb j into i
+                near_absorbed[j] = true;
+                let file_j = deduped[j].file.clone();
+                deduped[i].also_in.push(file_j);
+            }
+        }
+    }
+
+    deduped
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !near_absorbed[*i])
+        .map(|(_, r)| r)
+        .collect()
 }
 
 /// Pre-fetch per-document decay parameters and apply folder-based scoring.
@@ -1478,6 +1597,7 @@ fn print_results(
         if let Some(db_conn) = conn {
             apply_folder_scoring(db_conn, &mut unified);
         }
+        let unified = dedup_unified_results(unified);
         println!("{}", "── Merged results ────────────────────────────────".dimmed());
         for (i, result) in unified.iter().enumerate() {
             let sources = result.sources.join(", ");
@@ -1491,6 +1611,9 @@ fn print_results(
             if !result.content.is_empty() {
                 let content_preview = result.content.chars().take(200).collect::<String>().replace('\n', " ");
                 println!("     {}", format!("...{}...", content_preview).dimmed());
+            }
+            if !result.also_in.is_empty() {
+                println!("     {}", format!("Also in: {}", result.also_in.join(", ")).dimmed());
             }
             println!();
         }
@@ -2160,5 +2283,111 @@ mod tests {
         // At horizon, should return floor=0.3
         let result = calc_decay(30.0, 30, 0.3, 1.0);
         assert!((result - 0.3).abs() < 1e-9);
+    }
+
+    // ─── dedup_unified_results ───────────────────────────────────────────────
+
+    fn make_unified(file: &str, score: f64, content: &str) -> UnifiedResult {
+        UnifiedResult {
+            file: file.to_string(),
+            score,
+            sources: vec!["fts".to_string()],
+            content: content.to_string(),
+            chunk_id: None,
+            line_start: None,
+            line_end: None,
+            chunk_type: None,
+            also_in: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_dedup_exact_duplicates_collapsed() {
+        let content = "This is a shared codebase preference snippet.";
+        let results = vec![
+            make_unified("pref_2025-11-03.md", 0.9, content),
+            make_unified("pref_2026-01-10.md", 0.7, content),
+            make_unified("pref_2026-02-05.md", 0.5, content),
+        ];
+        let deduped = dedup_unified_results(results);
+        // Only one result should remain (highest score)
+        assert_eq!(deduped.len(), 1, "Exact duplicates should collapse to 1");
+        assert_eq!(deduped[0].file, "pref_2025-11-03.md");
+        assert_eq!(deduped[0].score, 0.9);
+        // The other two files should appear in also_in
+        assert_eq!(deduped[0].also_in.len(), 2);
+        assert!(deduped[0].also_in.contains(&"pref_2026-01-10.md".to_string()));
+        assert!(deduped[0].also_in.contains(&"pref_2026-02-05.md".to_string()));
+    }
+
+    #[test]
+    fn test_dedup_distinct_content_not_collapsed() {
+        let results = vec![
+            make_unified("doc_a.md", 0.9, "Rust is a systems language with memory safety."),
+            make_unified("doc_b.md", 0.7, "Python is great for scripting and data science."),
+        ];
+        let deduped = dedup_unified_results(results);
+        assert_eq!(deduped.len(), 2, "Distinct content should not be collapsed");
+        assert!(deduped[0].also_in.is_empty());
+        assert!(deduped[1].also_in.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_empty_content_not_deduplicated() {
+        // Two results with empty content should NOT be collapsed
+        let results = vec![
+            make_unified("doc_a.md", 0.9, ""),
+            make_unified("doc_b.md", 0.7, ""),
+        ];
+        let deduped = dedup_unified_results(results);
+        assert_eq!(deduped.len(), 2, "Empty content should not be treated as duplicates");
+    }
+
+    #[test]
+    fn test_dedup_near_duplicate_jaccard() {
+        // Two chunks with >0.85 Jaccard similarity
+        let base = "the quick brown fox jumps over the lazy dog and runs away quickly";
+        // One word changed — both strings share most words, Jaccard should be high
+        let near = "the quick brown fox jumps over the lazy dog and runs away fast";
+        let results = vec![
+            make_unified("doc_a.md", 0.8, base),
+            make_unified("doc_b.md", 0.6, near),
+        ];
+        let deduped = dedup_unified_results(results);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].file, "doc_a.md");
+        assert!(deduped[0].also_in.contains(&"doc_b.md".to_string()));
+    }
+
+    #[test]
+    fn test_jaccard_similarity_identical() {
+        let s = "hello world foo bar";
+        assert!((jaccard_similarity(s, s) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_jaccard_similarity_disjoint() {
+        assert!(jaccard_similarity("hello world", "foo bar").abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_jaccard_similarity_empty() {
+        assert!(jaccard_similarity("", "").abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_dedup_preserves_highest_score() {
+        // Even if the highest-score item is not first in input, it should win
+        let content = "identical content here";
+        let results = vec![
+            make_unified("low.md", 0.3, content),
+            make_unified("high.md", 0.95, content),
+            make_unified("mid.md", 0.6, content),
+        ];
+        let deduped = dedup_unified_results(results);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].file, "high.md");
+        assert_eq!(deduped[0].score, 0.95);
+        assert_eq!(deduped[0].also_in.len(), 2);
     }
 }
