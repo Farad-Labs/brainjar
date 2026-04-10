@@ -2345,10 +2345,11 @@ mod tests {
 
     #[test]
     fn test_dedup_near_duplicate_jaccard() {
-        // Two chunks with >0.85 Jaccard similarity
-        let base = "the quick brown fox jumps over the lazy dog and runs away quickly";
-        // One word changed — both strings share most words, Jaccard should be high
-        let near = "the quick brown fox jumps over the lazy dog and runs away fast";
+        // Two chunks with >0.85 Jaccard similarity.
+        // base has 15 unique words; near has the same 15 words plus one extra.
+        // Jaccard = 15 / 16 = 0.9375 > 0.85, so they should collapse.
+        let base = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron";
+        let near = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron rho";
         let results = vec![
             make_unified("doc_a.md", 0.8, base),
             make_unified("doc_b.md", 0.6, near),
