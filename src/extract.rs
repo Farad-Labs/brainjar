@@ -191,6 +191,7 @@ mod tests {
             api_key: None,
             base_url: None,
             enabled: true,
+            concurrency: 4,
         }
     }
 
