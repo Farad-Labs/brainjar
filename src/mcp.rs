@@ -168,8 +168,13 @@ fn handle_tools_list() -> Result<Value> {
                         },
                         "smart": {
                             "type": "boolean",
-                            "description": "Use LLM to extract targeted search queries from conversational text before searching. Requires [extraction] config.",
+                            "description": "Use LLM to extract targeted search queries from conversational text before searching. Provide context for even better extraction. Requires [extraction] config.",
                             "default": false
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Conversation context for smart search (plain text, any format). When provided with smart=true, the LLM uses this context to extract better search terms.",
+                            "default": null
                         }
                     },
                     "required": ["query"]
@@ -283,6 +288,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let include_content = args.get("include_content").and_then(|v| v.as_bool()).unwrap_or(false);
             let doc_score = args.get("doc_score").and_then(|v| v.as_bool()).unwrap_or(false);
             let smart = args.get("smart").and_then(|v| v.as_bool()).unwrap_or(false);
+            let context = args.get("context").and_then(|v| v.as_str());
 
             // Build KB list early (needed for both smart and normal paths)
             let kbs_owned: Vec<(String, crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
@@ -299,7 +305,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             // Smart mode: fan-out search with LLM-extracted queries
             if smart {
-                let queries = match crate::search::extract_queries_pub(config, query).await {
+                let queries = match crate::search::extract_queries_pub(config, query, context).await {
                     Ok(q) => q,
                     Err(e) => return Ok(tool_error(format!("Smart search query extraction failed: {}", e))),
                 };

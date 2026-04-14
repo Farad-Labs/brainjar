@@ -89,6 +89,12 @@ enum Commands {
         /// Use LLM to extract search queries from conversational text
         #[arg(long)]
         smart: bool,
+        /// Conversation context for smart search (plain text)
+        #[arg(long)]
+        context: Option<String>,
+        /// Read conversation context from a file
+        #[arg(long, conflicts_with = "context")]
+        context_file: Option<String>,
     },
     /// Show knowledge base status
     Status {
@@ -329,10 +335,18 @@ async fn main() -> Result<()> {
             chunks,
             doc_score,
             smart,
+            context,
+            context_file,
         } => {
             let config = brainjar::config::load_config(cli.config.as_deref())?;
             let mode = brainjar::search::SearchMode::from_flags(text, graph, vector, local, filename);
-            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score, smart)
+            let resolved_context: Option<String> = if let Some(path) = context_file {
+                Some(std::fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read context file: {}", path))?)
+            } else {
+                context
+            };
+            brainjar::search::run_search(&config, &query, kb.as_deref(), limit, json, mode, exact, chunks, doc_score, smart, resolved_context.as_deref())
                 .await?;
         }
         Commands::Status { kb, json, human: _ } => {

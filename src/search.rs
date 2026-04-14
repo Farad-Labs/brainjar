@@ -165,21 +165,28 @@ pub struct VectorResult {
 
 /// Use a cheap LLM to extract targeted search queries from conversational text.
 /// Public alias for use by mcp.rs.
-pub async fn extract_queries_pub(config: &Config, raw_text: &str) -> Result<Vec<String>> {
-    extract_queries(config, raw_text).await
+pub async fn extract_queries_pub(config: &Config, raw_text: &str, context: Option<&str>) -> Result<Vec<String>> {
+    extract_queries(config, raw_text, context).await
 }
 
-async fn extract_queries(config: &Config, raw_text: &str) -> Result<Vec<String>> {
+async fn extract_queries(config: &Config, raw_text: &str, context: Option<&str>) -> Result<Vec<String>> {
     let ext_config = config.extraction.as_ref()
         .context("Smart search requires [extraction] config for LLM query extraction")?;
 
     let api_key = config.resolve_api_key(&ext_config.provider, ext_config.api_key.as_deref())
         .context("No API key for extraction provider")?;
 
-    let prompt = format!(
-        "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Extract key concepts, entities, and topics\n- Do NOT return the original text as a query\n\nText: {}\n\nJSON array:",
-        raw_text
-    );
+    let prompt = if let Some(ctx) = context {
+        format!(
+            "You are a search query extractor. Given a conversation and the user's latest message, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Use the conversation context to understand what the user is referring to\n- Extract key concepts, entities, and topics from the latest message, informed by the conversation\n- Do NOT return the original text as a query\n\nConversation context:\n{}\n\nLatest message: {}\n\nJSON array:",
+            ctx, raw_text
+        )
+    } else {
+        format!(
+            "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Extract key concepts, entities, and topics\n- Do NOT return the original text as a query\n\nText: {}\n\nJSON array:",
+            raw_text
+        )
+    };
 
     let client = reqwest::Client::new();
 
@@ -272,10 +279,11 @@ pub async fn run_search(
     chunks: bool,
     doc_score: bool,
     smart: bool,
+    context: Option<&str>,
 ) -> Result<()> {
     // Smart mode: use LLM to extract targeted search queries from conversational text
     if smart {
-        let queries = extract_queries(config, query).await?;
+        let queries = extract_queries(config, query, context).await?;
         if !json {
             eprintln!(
                 "{} Extracted {} quer{}: {}",
