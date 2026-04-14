@@ -178,12 +178,40 @@ async fn extract_queries(config: &Config, raw_text: &str, context: Option<&str>)
 
     let prompt = if let Some(ctx) = context {
         format!(
-            "You are a search query extractor. Given a conversation and the user's latest message, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Use the conversation context to understand what the user is referring to\n- Extract key concepts, entities, and topics from the latest message, informed by the conversation\n- Do NOT return the original text as a query\n\nConversation context:\n{}\n\nLatest message: {}\n\nJSON array:",
+            "You are a search query extractor. Given a conversation and the user's latest message, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\n\
+            Rules:\n\
+            - Return a JSON array of strings\n\
+            - Each query should be 1-5 words\n\
+            - Use the conversation context to resolve references and understand intent\n\
+            - Extract key concepts, entities, and topics from the latest message, informed by the conversation\n\
+            - Do NOT return the original text as a query\n\n\
+            Examples:\n\n\
+            Conversation: \"User: I'm setting up the Rust CLI project with SQLite\\nAssistant: Want me to add FTS5 support?\\nUser: yeah, and what about the embedding stuff?\"\n\
+            Latest message: \"yeah, and what about the embedding stuff?\"\n\
+            Output: [\"SQLite FTS5 setup\", \"Rust embedding integration\", \"vector search SQLite\"]\n\n\
+            Conversation: \"User: the deploy keeps failing on the VPS\\nAssistant: which service?\\nUser: the one behind caddy\"\n\
+            Latest message: \"the one behind caddy\"\n\
+            Output: [\"Caddy reverse proxy config\", \"VPS deployment failure\", \"service deploy troubleshooting\"]\n\n\
+            Conversation context:\n{}\n\n\
+            Latest message: {}\n\n\
+            JSON array:",
             ctx, raw_text
         )
     } else {
         format!(
-            "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Extract key concepts, entities, and topics\n- Do NOT return the original text as a query\n\nText: {}\n\nJSON array:",
+            "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\n\
+            Rules:\n\
+            - Return a JSON array of strings\n\
+            - Each query should be 1-5 words\n\
+            - Extract key concepts, entities, and topics\n\
+            - Do NOT return the original text as a query\n\n\
+            Examples:\n\n\
+            Text: \"How do I configure the decay rate for daily notes in brainjar?\"\n\
+            Output: [\"brainjar decay configuration\", \"daily notes decay rate\", \"folder decay settings\"]\n\n\
+            Text: \"I want to set up automatic memory recall for my AI agent\"\n\
+            Output: [\"agent memory recall\", \"automatic context retrieval\", \"MCP memory search\"]\n\n\
+            Text: {}\n\n\
+            JSON array:",
             raw_text
         )
     };
