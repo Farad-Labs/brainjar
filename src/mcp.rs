@@ -377,7 +377,10 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                     all_graph.retain(|r| seen.insert(r.file.clone()));
                 }
 
-                // Filter excluded chunk IDs from FTS results
+                // Filter excluded chunk IDs from FTS results.
+                // GraphSearchResult and LocalSearchResult have no chunk_id field
+                // (graph results are entity-level, local results are file-level),
+                // so only FTS results can be filtered by chunk ID here.
                 if let Some(excl) = exclude_chunks_ref
                     && !excl.is_empty()
                 {
@@ -446,7 +449,10 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 Vec::new()
             };
 
-            // Filter excluded chunk IDs
+            // Filter excluded chunk IDs from FTS results.
+            // GraphSearchResult and LocalSearchResult have no chunk_id field
+            // (graph results are entity-level, local results are file-level),
+            // so only FTS results can be filtered by chunk ID here.
             let fts_results_filtered: Vec<crate::search::FtsResult> = if let Some(excl) = exclude_chunks_ref {
                 if excl.is_empty() {
                     fts_results

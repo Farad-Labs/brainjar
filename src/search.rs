@@ -169,14 +169,12 @@ pub async fn extract_queries_pub(config: &Config, raw_text: &str, context: Optio
     extract_queries(config, raw_text, context).await
 }
 
-async fn extract_queries(config: &Config, raw_text: &str, context: Option<&str>) -> Result<Vec<String>> {
-    let ext_config = config.extraction.as_ref()
-        .context("Smart search requires [extraction] config for LLM query extraction")?;
-
-    let api_key = config.resolve_api_key(&ext_config.provider, ext_config.api_key.as_deref())
-        .context("No API key for extraction provider")?;
-
-    let prompt = if let Some(ctx) = context {
+/// Build the LLM prompt for extracting search queries from conversational text.
+///
+/// When `context` is provided the prompt instructs the model to use the
+/// conversation history to resolve references and sharpen the queries.
+fn build_extraction_prompt(raw_text: &str, context: Option<&str>) -> String {
+    if let Some(ctx) = context {
         format!(
             "You are a search query extractor. Given a conversation and the user's latest message, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\n\
             Rules:\n\
@@ -214,7 +212,17 @@ async fn extract_queries(config: &Config, raw_text: &str, context: Option<&str>)
             JSON array:",
             raw_text
         )
-    };
+    }
+}
+
+async fn extract_queries(config: &Config, raw_text: &str, context: Option<&str>) -> Result<Vec<String>> {
+    let ext_config = config.extraction.as_ref()
+        .context("Smart search requires [extraction] config for LLM query extraction")?;
+
+    let api_key = config.resolve_api_key(&ext_config.provider, ext_config.api_key.as_deref())
+        .context("No API key for extraction provider")?;
+
+    let prompt = build_extraction_prompt(raw_text, context);
 
     let client = reqwest::Client::new();
 
@@ -2211,5 +2219,132 @@ mod tests {
         // At horizon, should return floor=0.3
         let result = calc_decay(30.0, 30, 0.3, 1.0);
         assert!((result - 0.3).abs() < 1e-9);
+    }
+
+    // ─── build_unified_results with exclude_chunks ───────────────────────────
+
+    /// Helper: construct an FtsResult with a known chunk_id and score.
+    fn make_fts(path: &str, chunk_id: i64, score: f64) -> FtsResult {
+        FtsResult {
+            path: path.to_string(),
+            excerpt: "test excerpt".to_string(),
+            score,
+            chunk_id: Some(chunk_id),
+            line_start: Some(1),
+            line_end: Some(5),
+            chunk_type: Some("text".to_string()),
+            content: Some(format!("content of {}", path)),
+        }
+    }
+
+    #[test]
+    fn test_exclude_chunks_filters_fts_results() {
+        let fts = vec![
+            make_fts("a.md", 1, 3.0),
+            make_fts("b.md", 2, 2.0),
+            make_fts("c.md", 3, 1.0),
+        ];
+        let results = build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", Some(&[2]));
+        assert!(
+            !results.iter().any(|r| r.chunk_id == Some(2)),
+            "chunk 2 should be excluded"
+        );
+        assert!(
+            results.iter().any(|r| r.chunk_id == Some(1)),
+            "chunk 1 should remain"
+        );
+        assert!(
+            results.iter().any(|r| r.chunk_id == Some(3)),
+            "chunk 3 should remain"
+        );
+    }
+
+    #[test]
+    fn test_exclude_chunks_does_not_count_against_limit() {
+        // 5 results, exclude 2 of them, limit=3 → should return 3 (not 1)
+        let fts = vec![
+            make_fts("a.md", 1, 5.0),
+            make_fts("b.md", 2, 4.0),
+            make_fts("c.md", 3, 3.0),
+            make_fts("d.md", 4, 2.0),
+            make_fts("e.md", 5, 1.0),
+        ];
+        let results =
+            build_unified_results(&fts, &[], &[], &[], &[], 3, false, false, "q", Some(&[1, 2]));
+        assert_eq!(
+            results.len(),
+            3,
+            "should return 3 results (the 3 non-excluded ones)"
+        );
+        assert!(!results.iter().any(|r| r.chunk_id == Some(1)));
+        assert!(!results.iter().any(|r| r.chunk_id == Some(2)));
+    }
+
+    #[test]
+    fn test_exclude_chunks_empty_list_returns_all() {
+        // Some(&[]) should behave the same as None
+        let fts = vec![make_fts("a.md", 1, 2.0), make_fts("b.md", 2, 1.0)];
+        let results_empty =
+            build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", Some(&[]));
+        let results_none =
+            build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", None);
+        assert_eq!(
+            results_empty.len(),
+            results_none.len(),
+            "empty exclude list should return same count as no exclusion"
+        );
+    }
+
+    #[test]
+    fn test_exclude_chunks_none_returns_all() {
+        let fts = vec![
+            make_fts("a.md", 1, 3.0),
+            make_fts("b.md", 2, 2.0),
+            make_fts("c.md", 3, 1.0),
+        ];
+        let results =
+            build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", None);
+        assert_eq!(results.len(), 3, "None exclude should return all results");
+    }
+
+    // ─── build_extraction_prompt ─────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_prompt_includes_context() {
+        let ctx = "User: I'm setting up the Rust CLI\nAssistant: Need FTS5?";
+        let query = "what about the embedding stuff?";
+        let prompt = build_extraction_prompt(query, Some(ctx));
+
+        assert!(
+            prompt.contains(ctx),
+            "prompt should embed the conversation context verbatim"
+        );
+        assert!(
+            prompt.contains(query),
+            "prompt should include the user's query"
+        );
+        assert!(
+            prompt.contains("Conversation context"),
+            "context-aware prompt should label the context section"
+        );
+    }
+
+    #[test]
+    fn test_extract_prompt_without_context() {
+        let query = "how do I configure decay rate?";
+        let prompt = build_extraction_prompt(query, None);
+
+        assert!(
+            prompt.contains(query),
+            "prompt should include the user's query"
+        );
+        assert!(
+            !prompt.contains("Conversation context"),
+            "context-free prompt should not mention conversation context"
+        );
+        assert!(
+            !prompt.contains("Latest message"),
+            "context-free prompt should not reference a 'latest message' header"
+        );
     }
 }
