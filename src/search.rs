@@ -165,21 +165,64 @@ pub struct VectorResult {
 
 /// Use a cheap LLM to extract targeted search queries from conversational text.
 /// Public alias for use by mcp.rs.
-pub async fn extract_queries_pub(config: &Config, raw_text: &str) -> Result<Vec<String>> {
-    extract_queries(config, raw_text).await
+pub async fn extract_queries_pub(config: &Config, raw_text: &str, context: Option<&str>) -> Result<Vec<String>> {
+    extract_queries(config, raw_text, context).await
 }
 
-async fn extract_queries(config: &Config, raw_text: &str) -> Result<Vec<String>> {
+/// Build the LLM prompt for extracting search queries from conversational text.
+///
+/// When `context` is provided the prompt instructs the model to use the
+/// conversation history to resolve references and sharpen the queries.
+fn build_extraction_prompt(raw_text: &str, context: Option<&str>) -> String {
+    if let Some(ctx) = context {
+        format!(
+            "You are a search query extractor. Given a conversation and the user's latest message, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\n\
+            Rules:\n\
+            - Return a JSON array of strings\n\
+            - Each query should be 1-5 words\n\
+            - Use the conversation context to resolve references and understand intent\n\
+            - Extract key concepts, entities, and topics from the latest message, informed by the conversation\n\
+            - Do NOT return the original text as a query\n\n\
+            Examples:\n\n\
+            Conversation: \"User: I'm setting up the Rust CLI project with SQLite\\nAssistant: Want me to add FTS5 support?\\nUser: yeah, and what about the embedding stuff?\"\n\
+            Latest message: \"yeah, and what about the embedding stuff?\"\n\
+            Output: [\"SQLite FTS5 setup\", \"Rust embedding integration\", \"vector search SQLite\"]\n\n\
+            Conversation: \"User: the deploy keeps failing on the VPS\\nAssistant: which service?\\nUser: the one behind caddy\"\n\
+            Latest message: \"the one behind caddy\"\n\
+            Output: [\"Caddy reverse proxy config\", \"VPS deployment failure\", \"service deploy troubleshooting\"]\n\n\
+            Conversation context:\n{}\n\n\
+            Latest message: {}\n\n\
+            JSON array:",
+            ctx, raw_text
+        )
+    } else {
+        format!(
+            "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\n\
+            Rules:\n\
+            - Return a JSON array of strings\n\
+            - Each query should be 1-5 words\n\
+            - Extract key concepts, entities, and topics\n\
+            - Do NOT return the original text as a query\n\n\
+            Examples:\n\n\
+            Text: \"How do I configure the decay rate for daily notes in brainjar?\"\n\
+            Output: [\"brainjar decay configuration\", \"daily notes decay rate\", \"folder decay settings\"]\n\n\
+            Text: \"I want to set up automatic memory recall for my AI agent\"\n\
+            Output: [\"agent memory recall\", \"automatic context retrieval\", \"MCP memory search\"]\n\n\
+            Text: {}\n\n\
+            JSON array:",
+            raw_text
+        )
+    }
+}
+
+async fn extract_queries(config: &Config, raw_text: &str, context: Option<&str>) -> Result<Vec<String>> {
     let ext_config = config.extraction.as_ref()
         .context("Smart search requires [extraction] config for LLM query extraction")?;
 
     let api_key = config.resolve_api_key(&ext_config.provider, ext_config.api_key.as_deref())
         .context("No API key for extraction provider")?;
 
-    let prompt = format!(
-        "You are a search query extractor. Given conversational text, extract 2-5 short, specific search queries that would find relevant documents in a knowledge base.\n\nRules:\n- Return a JSON array of strings, e.g. [\"query one\", \"query two\"]\n- Each query should be 1-5 words\n- Extract key concepts, entities, and topics\n- Do NOT return the original text as a query\n\nText: {}\n\nJSON array:",
-        raw_text
-    );
+    let prompt = build_extraction_prompt(raw_text, context);
 
     let client = reqwest::Client::new();
 
@@ -272,10 +315,12 @@ pub async fn run_search(
     chunks: bool,
     doc_score: bool,
     smart: bool,
+    context: Option<&str>,
+    exclude_chunks: Option<&[i64]>,
 ) -> Result<()> {
     // Smart mode: use LLM to extract targeted search queries from conversational text
     if smart {
-        let queries = extract_queries(config, query).await?;
+        let queries = extract_queries(config, query, context).await?;
         if !json {
             eprintln!(
                 "{} Extracted {} quer{}: {}",
@@ -335,7 +380,7 @@ pub async fn run_search(
         };
 
         if json {
-            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query, exclude_chunks);
             enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -354,6 +399,7 @@ pub async fn run_search(
                 limit,
                 chunks,
                 doc_score,
+                exclude_chunks,
             );
         }
         return Ok(());
@@ -560,7 +606,7 @@ pub async fn run_search(
     let decay_conn = kb_name.and_then(|n| db::open_db(n, &db_dir).ok());
 
     if json {
-        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query, exclude_chunks);
         if let Some(ref conn) = decay_conn {
             apply_folder_scoring(conn, &mut unified);
         }
@@ -589,6 +635,7 @@ pub async fn run_search(
             limit,
             chunks,
             doc_score,
+            exclude_chunks,
         );
     }
 
@@ -1086,6 +1133,7 @@ fn build_unified_results(
     _include_content: bool, // deprecated: content always included now
     doc_score: bool,
     _query: &str,
+    exclude_chunks: Option<&[i64]>,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
     // We use chunk-keyed ranking: each chunk is its own ranked item
@@ -1264,6 +1312,13 @@ fn build_unified_results(
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     }
 
+    // Filter out excluded chunk IDs before applying limit
+    if let Some(excl) = exclude_chunks
+        && !excl.is_empty()
+    {
+        results.retain(|r| r.chunk_id.is_none_or(|id| !excl.contains(&id)));
+    }
+
     if doc_score {
         // Aggregate: sum top-3 chunk scores per document, return one result per doc
         let mut doc_scores: HashMap<String, (f64, UnifiedResult)> = HashMap::new();
@@ -1432,6 +1487,7 @@ fn print_results(
     limit: usize,
     include_content: bool,
     doc_score: bool,
+    exclude_chunks: Option<&[i64]>,
 ) {
     let has_fts = !fts.is_empty();
     let has_local = !local.is_empty();
@@ -1474,7 +1530,7 @@ fn print_results(
     let single_local = mode.run_local();
     if !single_text && !single_local {
         // Merged RRF view (default for any engine combination)
-        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query);
+        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query, exclude_chunks);
         if let Some(db_conn) = conn {
             apply_folder_scoring(db_conn, &mut unified);
         }
@@ -1907,6 +1963,7 @@ mod tests {
             true,
             false,
             "pricing",
+            None,
         );
 
         let pricing_result = unified.iter().find(|r| r.file.contains("pricing.md"));
@@ -1978,6 +2035,7 @@ mod tests {
             true,
             false,
             "pricing",
+            None,
         );
 
         let pricing_result = unified.iter().find(|r| r.file.contains("PRICING.md"));
@@ -2019,6 +2077,7 @@ mod tests {
             true,
             false,
             "pricing",
+            None,
         );
 
         assert_eq!(unified.len(), 1);
@@ -2160,5 +2219,132 @@ mod tests {
         // At horizon, should return floor=0.3
         let result = calc_decay(30.0, 30, 0.3, 1.0);
         assert!((result - 0.3).abs() < 1e-9);
+    }
+
+    // ─── build_unified_results with exclude_chunks ───────────────────────────
+
+    /// Helper: construct an FtsResult with a known chunk_id and score.
+    fn make_fts(path: &str, chunk_id: i64, score: f64) -> FtsResult {
+        FtsResult {
+            path: path.to_string(),
+            excerpt: "test excerpt".to_string(),
+            score,
+            chunk_id: Some(chunk_id),
+            line_start: Some(1),
+            line_end: Some(5),
+            chunk_type: Some("text".to_string()),
+            content: Some(format!("content of {}", path)),
+        }
+    }
+
+    #[test]
+    fn test_exclude_chunks_filters_fts_results() {
+        let fts = vec![
+            make_fts("a.md", 1, 3.0),
+            make_fts("b.md", 2, 2.0),
+            make_fts("c.md", 3, 1.0),
+        ];
+        let results = build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", Some(&[2]));
+        assert!(
+            !results.iter().any(|r| r.chunk_id == Some(2)),
+            "chunk 2 should be excluded"
+        );
+        assert!(
+            results.iter().any(|r| r.chunk_id == Some(1)),
+            "chunk 1 should remain"
+        );
+        assert!(
+            results.iter().any(|r| r.chunk_id == Some(3)),
+            "chunk 3 should remain"
+        );
+    }
+
+    #[test]
+    fn test_exclude_chunks_does_not_count_against_limit() {
+        // 5 results, exclude 2 of them, limit=3 → should return 3 (not 1)
+        let fts = vec![
+            make_fts("a.md", 1, 5.0),
+            make_fts("b.md", 2, 4.0),
+            make_fts("c.md", 3, 3.0),
+            make_fts("d.md", 4, 2.0),
+            make_fts("e.md", 5, 1.0),
+        ];
+        let results =
+            build_unified_results(&fts, &[], &[], &[], &[], 3, false, false, "q", Some(&[1, 2]));
+        assert_eq!(
+            results.len(),
+            3,
+            "should return 3 results (the 3 non-excluded ones)"
+        );
+        assert!(!results.iter().any(|r| r.chunk_id == Some(1)));
+        assert!(!results.iter().any(|r| r.chunk_id == Some(2)));
+    }
+
+    #[test]
+    fn test_exclude_chunks_empty_list_returns_all() {
+        // Some(&[]) should behave the same as None
+        let fts = vec![make_fts("a.md", 1, 2.0), make_fts("b.md", 2, 1.0)];
+        let results_empty =
+            build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", Some(&[]));
+        let results_none =
+            build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", None);
+        assert_eq!(
+            results_empty.len(),
+            results_none.len(),
+            "empty exclude list should return same count as no exclusion"
+        );
+    }
+
+    #[test]
+    fn test_exclude_chunks_none_returns_all() {
+        let fts = vec![
+            make_fts("a.md", 1, 3.0),
+            make_fts("b.md", 2, 2.0),
+            make_fts("c.md", 3, 1.0),
+        ];
+        let results =
+            build_unified_results(&fts, &[], &[], &[], &[], 10, false, false, "q", None);
+        assert_eq!(results.len(), 3, "None exclude should return all results");
+    }
+
+    // ─── build_extraction_prompt ─────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_prompt_includes_context() {
+        let ctx = "User: I'm setting up the Rust CLI\nAssistant: Need FTS5?";
+        let query = "what about the embedding stuff?";
+        let prompt = build_extraction_prompt(query, Some(ctx));
+
+        assert!(
+            prompt.contains(ctx),
+            "prompt should embed the conversation context verbatim"
+        );
+        assert!(
+            prompt.contains(query),
+            "prompt should include the user's query"
+        );
+        assert!(
+            prompt.contains("Conversation context"),
+            "context-aware prompt should label the context section"
+        );
+    }
+
+    #[test]
+    fn test_extract_prompt_without_context() {
+        let query = "how do I configure decay rate?";
+        let prompt = build_extraction_prompt(query, None);
+
+        assert!(
+            prompt.contains(query),
+            "prompt should include the user's query"
+        );
+        assert!(
+            !prompt.contains("Conversation context"),
+            "context-free prompt should not mention conversation context"
+        );
+        assert!(
+            !prompt.contains("Latest message"),
+            "context-free prompt should not reference a 'latest message' header"
+        );
     }
 }

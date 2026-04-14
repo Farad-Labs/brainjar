@@ -168,8 +168,19 @@ fn handle_tools_list() -> Result<Value> {
                         },
                         "smart": {
                             "type": "boolean",
-                            "description": "Use LLM to extract targeted search queries from conversational text before searching. Requires [extraction] config.",
+                            "description": "Use LLM to extract targeted search queries from conversational text before searching. Provide context for even better extraction. Requires [extraction] config.",
                             "default": false
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Conversation context for smart search (plain text, any format). When provided with smart=true, the LLM uses this context to extract better search terms.",
+                            "default": null
+                        },
+                        "exclude_chunks": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "List of chunk IDs to exclude from results (for deduplication across conversation turns)",
+                            "default": null
                         }
                     },
                     "required": ["query"]
@@ -283,6 +294,11 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let include_content = args.get("include_content").and_then(|v| v.as_bool()).unwrap_or(false);
             let doc_score = args.get("doc_score").and_then(|v| v.as_bool()).unwrap_or(false);
             let smart = args.get("smart").and_then(|v| v.as_bool()).unwrap_or(false);
+            let context = args.get("context").and_then(|v| v.as_str());
+            let exclude_chunks: Option<Vec<i64>> = args.get("exclude_chunks")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect());
+            let exclude_chunks_ref: Option<&[i64]> = exclude_chunks.as_deref();
 
             // Build KB list early (needed for both smart and normal paths)
             let kbs_owned: Vec<(String, crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
@@ -299,7 +315,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
 
             // Smart mode: fan-out search with LLM-extracted queries
             if smart {
-                let queries = match crate::search::extract_queries_pub(config, query).await {
+                let queries = match crate::search::extract_queries_pub(config, query, context).await {
                     Ok(q) => q,
                     Err(e) => return Ok(tool_error(format!("Smart search query extraction failed: {}", e))),
                 };
@@ -359,6 +375,15 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 {
                     let mut seen = std::collections::HashSet::new();
                     all_graph.retain(|r| seen.insert(r.file.clone()));
+                }
+
+                // Filter excluded chunk IDs from content-bearing results (FTS has chunk_id).
+                // Graph results are entity-level (no chunk_id) and stay unfiltered.
+                // For JSON output, build_unified_results handles FTS + vector exclusion.
+                if let Some(excl) = exclude_chunks_ref
+                    && !excl.is_empty()
+                {
+                    all_fts.retain(|r| r.chunk_id.is_none_or(|id| !excl.contains(&id)));
                 }
 
                 let mut text = format!("🧠 Smart search extracted {} quer{}: {}\n\n",
@@ -423,7 +448,20 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 Vec::new()
             };
 
-            let text = format_search_text(query, &fts_results, &local_results, &graph_results, mode, include_content, doc_score);
+            // Filter excluded chunk IDs from content-bearing results (FTS has chunk_id).
+            // Graph results are entity-level (no chunk_id) and stay unfiltered.
+            // For JSON output, build_unified_results handles FTS + vector exclusion.
+            let fts_results_filtered: Vec<crate::search::FtsResult> = if let Some(excl) = exclude_chunks_ref {
+                if excl.is_empty() {
+                    fts_results
+                } else {
+                    fts_results.into_iter().filter(|r| r.chunk_id.is_none_or(|id| !excl.contains(&id))).collect()
+                }
+            } else {
+                fts_results
+            };
+
+            let text = format_search_text(query, &fts_results_filtered, &local_results, &graph_results, mode, include_content, doc_score);
             Ok(tool_text(text))
         }
 
