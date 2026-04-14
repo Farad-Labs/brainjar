@@ -1,3 +1,4 @@
+use crate::tuning::TuningParams;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +28,10 @@ pub struct Config {
     pub config_dir: PathBuf,
     /// Watch mode configuration
     pub watch: Option<WatchConfig>,
+    /// Tunable scoring parameters (optional `[tuning]` section).
+    /// Falls back to hardcoded defaults when the section is absent.
+    #[serde(default)]
+    pub tuning: TuningParams,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

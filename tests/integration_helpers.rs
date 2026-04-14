@@ -25,5 +25,6 @@ pub fn make_config(config_dir: &Path, watch_path: &Path) -> Config {
         data_dir: Some(config_dir.to_string_lossy().to_string()),
         config_dir: config_dir.to_path_buf(),
         watch: None,
+        tuning: brainjar::tuning::TuningParams::default(),
     }
 }

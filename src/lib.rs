@@ -13,6 +13,7 @@ pub mod status;
 pub mod sync;
 #[cfg(feature = "tree-sitter")]
 pub mod treesitter;
+pub mod tuning;
 pub mod watch;
 
 pub use config::Config;

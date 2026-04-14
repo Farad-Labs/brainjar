@@ -326,7 +326,12 @@ pub async fn run_search(
             let mut fn_results: Vec<(String, f64)> = Vec::new();
             for (name, _kb) in &kbs {
                 if let Ok(conn) = db::open_db(name, &db_dir_smart) {
-                    fn_results.extend(search_filename(&conn, query));
+                    fn_results.extend(search_filename(
+                        &conn,
+                        query,
+                        config.tuning.filename_exact_score,
+                        config.tuning.filename_substring_score,
+                    ));
                 }
             }
             fn_results
@@ -335,7 +340,7 @@ pub async fn run_search(
         };
 
         if json {
-            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query, &config.tuning);
             enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -354,6 +359,7 @@ pub async fn run_search(
                 limit,
                 chunks,
                 doc_score,
+                &config.tuning,
             );
         }
         return Ok(());
@@ -471,7 +477,7 @@ pub async fn run_search(
                 continue;
             }
             match crate::graph::KnowledgeGraph::open(&db_dir, name) {
-                Ok(kg) => match kg.search(&graph_query, limit) {
+                Ok(kg) => match kg.search(&graph_query, limit, config.tuning.graph_base_score) {
                     Ok(results) => all_graph.extend(results),
                     Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
                 },
@@ -548,7 +554,12 @@ pub async fn run_search(
         let mut all_fn: Vec<(String, f64)> = Vec::new();
         for (name, _kb) in &kbs {
             if let Ok(conn) = db::open_db(name, &db_dir) {
-                all_fn.extend(search_filename(&conn, search_query));
+                all_fn.extend(search_filename(
+                    &conn,
+                    search_query,
+                    config.tuning.filename_exact_score,
+                    config.tuning.filename_substring_score,
+                ));
             }
         }
         all_fn
@@ -560,7 +571,7 @@ pub async fn run_search(
     let decay_conn = kb_name.and_then(|n| db::open_db(n, &db_dir).ok());
 
     if json {
-        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query, &config.tuning);
         if let Some(ref conn) = decay_conn {
             apply_folder_scoring(conn, &mut unified);
         }
@@ -589,6 +600,7 @@ pub async fn run_search(
             limit,
             chunks,
             doc_score,
+            &config.tuning,
         );
     }
 
@@ -675,7 +687,7 @@ async fn collect_search_results(
                 continue;
             }
             match crate::graph::KnowledgeGraph::open(&db_dir, name) {
-                Ok(kg) => match kg.search(search_query, limit) {
+                Ok(kg) => match kg.search(search_query, limit, config.tuning.graph_base_score) {
                     Ok(results) => all_graph.extend(results),
                     Err(e) => eprintln!("Graph search error in KB {}: {}", name, e),
                 },
@@ -965,12 +977,17 @@ pub fn search_vector(
 /// Filename stem search engine.
 ///
 /// Scores each document's filename (stem without extension) against the query words:
-/// - Exact stem match (query word == stem): score 1.0
-/// - Substring match (query word contained in stem): score 0.5
+/// - Exact stem match (query word == stem): `exact_score`
+/// - Substring match (query word contained in stem): `substring_score`
 /// - Case-insensitive; multiple words: sum, capped at 1.0
 ///
 /// Returns Vec of (file_path, score) for files with score > 0.
-pub fn search_filename(conn: &Connection, query: &str) -> Vec<(String, f64)> {
+pub fn search_filename(
+    conn: &Connection,
+    query: &str,
+    exact_score: f64,
+    substring_score: f64,
+) -> Vec<(String, f64)> {
     let words: Vec<String> = query
         .split_whitespace()
         .map(|w| w.to_lowercase())
@@ -1002,9 +1019,9 @@ pub fn search_filename(conn: &Connection, query: &str) -> Vec<(String, f64)> {
         let mut score = 0.0f64;
         for word in &words {
             if stem == *word {
-                score += 1.0;
+                score += exact_score;
             } else if stem.contains(word.as_str()) {
-                score += 0.5;
+                score += substring_score;
             }
         }
         if score > 0.0 {
@@ -1086,6 +1103,7 @@ fn build_unified_results(
     _include_content: bool, // deprecated: content always included now
     doc_score: bool,
     _query: &str,
+    tuning: &crate::tuning::TuningParams,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
     // We use chunk-keyed ranking: each chunk is its own ranked item
@@ -1108,15 +1126,14 @@ fn build_unified_results(
     }).collect();
     let filename_ranked: Vec<(String, f64)> = filename_results.to_vec();
 
-    // Weighted Normalized Score Fusion:
-    // FTS5=0.35, Vector=0.25, Graph=0.2, Filename=0.1, Local/fuzzy=0.1
+    // Weighted Normalized Score Fusion — weights come from TuningParams.
     // Scores within each engine are min-max normalized before weighting.
     let merged = weighted_score_fusion(vec![
-        (fts_ranked, 0.35),
-        (vector_ranked, 0.25),
-        (graph_ranked, 0.2),
-        (filename_ranked, 0.1),
-        (local_ranked, 0.1),
+        (fts_ranked, tuning.wsf_fts_weight),
+        (vector_ranked, tuning.wsf_vector_weight),
+        (graph_ranked, tuning.wsf_graph_weight),
+        (filename_ranked, tuning.wsf_filename_weight),
+        (local_ranked, tuning.wsf_local_weight),
     ]);
 
     // Build lookup maps
@@ -1432,6 +1449,7 @@ fn print_results(
     limit: usize,
     include_content: bool,
     doc_score: bool,
+    tuning: &crate::tuning::TuningParams,
 ) {
     let has_fts = !fts.is_empty();
     let has_local = !local.is_empty();
@@ -1474,7 +1492,7 @@ fn print_results(
     let single_local = mode.run_local();
     if !single_text && !single_local {
         // Merged RRF view (default for any engine combination)
-        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query);
+        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query, tuning);
         if let Some(db_conn) = conn {
             apply_folder_scoring(db_conn, &mut unified);
         }
@@ -1804,7 +1822,7 @@ mod tests {
     #[test]
     fn test_filename_search_exact_match() {
         let conn = make_test_db_with_docs(&["docs/architecture.md", "docs/other.md"]);
-        let results = search_filename(&conn, "architecture");
+        let results = search_filename(&conn, "architecture", 1.0, 0.5);
         let arch = results.iter().find(|(p, _)| p.contains("architecture.md"));
         assert!(arch.is_some(), "architecture.md should match");
         assert!(
@@ -1820,7 +1838,7 @@ mod tests {
     #[test]
     fn test_filename_search_substring_match() {
         let conn = make_test_db_with_docs(&["docs/architecture.md", "docs/arch-notes.md"]);
-        let results = search_filename(&conn, "arch");
+        let results = search_filename(&conn, "arch", 1.0, 0.5);
         let arch_md = results.iter().find(|(p, _)| p.ends_with("architecture.md"));
         let arch_notes = results.iter().find(|(p, _)| p.ends_with("arch-notes.md"));
         assert!(arch_md.is_some(), "architecture.md should match 'arch'");
@@ -1833,7 +1851,7 @@ mod tests {
     #[test]
     fn test_filename_search_no_match() {
         let conn = make_test_db_with_docs(&["docs/architecture.md", "docs/overview.md"]);
-        let results = search_filename(&conn, "zebra");
+        let results = search_filename(&conn, "zebra", 1.0, 0.5);
         assert!(results.is_empty(), "no files should match 'zebra'");
     }
 
@@ -1844,7 +1862,7 @@ mod tests {
             "docs/architecture.md",
             "docs/overview.md",
         ]);
-        let results = search_filename(&conn, "architecture overview");
+        let results = search_filename(&conn, "architecture overview", 1.0, 0.5);
         let arch_ov = results.iter().find(|(p, _)| p.ends_with("architecture-overview.md"));
         let arch = results.iter().find(|(p, _)| p.ends_with("architecture.md") && !p.ends_with("architecture-overview.md"));
         assert!(arch_ov.is_some(), "architecture-overview.md should match");
@@ -1907,6 +1925,7 @@ mod tests {
             true,
             false,
             "pricing",
+            &crate::tuning::TuningParams::default(),
         );
 
         let pricing_result = unified.iter().find(|r| r.file.contains("pricing.md"));
@@ -1978,6 +1997,7 @@ mod tests {
             true,
             false,
             "pricing",
+            &crate::tuning::TuningParams::default(),
         );
 
         let pricing_result = unified.iter().find(|r| r.file.contains("PRICING.md"));
@@ -2019,6 +2039,7 @@ mod tests {
             true,
             false,
             "pricing",
+            &crate::tuning::TuningParams::default(),
         );
 
         assert_eq!(unified.len(), 1);

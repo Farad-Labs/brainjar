@@ -199,7 +199,15 @@ impl KnowledgeGraph {
 
     /// Search: find entities matching a query, then surface the documents that
     /// mention them (plus 1-hop neighbors for context).
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<GraphSearchResult>> {
+    ///
+    /// `base_score` is the score assigned to every matching result.
+    /// Pass `config.tuning.graph_base_score` (default: 1.0).
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        base_score: f64,
+    ) -> Result<Vec<GraphSearchResult>> {
         let query_lower = query.to_lowercase();
         // Split query into words for multi-word matching
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -270,7 +278,7 @@ impl KnowledgeGraph {
                     entity: entity_name.clone(),
                     entity_type: entity_type.clone(),
                     related_entities: related.clone(),
-                    score: 1.0,
+                    score: base_score,
                 });
             }
 
@@ -367,7 +375,7 @@ mod tests {
         ];
         kg.ingest_entities("notes/intro.md", &entities, &[]).unwrap();
 
-        let results = kg.search("Brainjar", 5).unwrap();
+        let results = kg.search("Brainjar", 5, 1.0).unwrap();
         assert!(!results.is_empty());
         assert!(results.iter().any(|r| r.entity.contains("Brainjar")));
     }
@@ -412,14 +420,14 @@ mod tests {
             },
         ];
         kg.ingest_entities("doc.md", &entities, &[]).unwrap();
-        let results = kg.search("myproject", 5).unwrap();
+        let results = kg.search("myproject", 5, 1.0).unwrap();
         assert!(!results.is_empty());
     }
 
     #[test]
     fn test_search_no_match_returns_empty() {
         let (kg, _base) = make_kg();
-        let results = kg.search("xyzzy_nonexistent", 5).unwrap();
+        let results = kg.search("xyzzy_nonexistent", 5, 1.0).unwrap();
         assert!(results.is_empty());
     }
 
@@ -448,7 +456,7 @@ mod tests {
         kg.ingest_entities("doc_a.md", std::slice::from_ref(&entity), &[]).unwrap();
         kg.ingest_entities("doc_b.md", &[entity], &[]).unwrap();
 
-        let results = kg.search("SharedEntity", 10).unwrap();
+        let results = kg.search("SharedEntity", 10, 1.0).unwrap();
         // No duplicate files in results
         let mut files: Vec<&str> = results.iter().map(|r| r.file.as_str()).collect();
         files.sort();

@@ -33,6 +33,7 @@ fn make_config(config_dir: &std::path::Path, watch_path: &std::path::Path) -> Co
         data_dir: Some(config_dir.join(".brainjar").to_string_lossy().to_string()),
         config_dir: config_dir.to_path_buf(),
         watch: None,
+        tuning: brainjar::tuning::TuningParams::default(),
     }
 }
 
@@ -906,6 +907,7 @@ async fn test_per_folder_config_docs_stored_with_folder_params() {
         data_dir: Some(dir.path().to_string_lossy().to_string()),
         config_dir: dir.path().to_path_buf(),
         watch: None,
+        tuning: brainjar::tuning::TuningParams::default(),
     };
 
     brainjar::sync::run_sync(&config, Some("test"), false, false, false, false, false)

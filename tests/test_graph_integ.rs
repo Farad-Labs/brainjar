@@ -40,7 +40,7 @@ fn test_graph_insert_and_search() {
     kg.ingest_entities("notes/arch.md", &entities, &rels)
         .unwrap();
 
-    let results = kg.search("Brainjar", 10).unwrap();
+    let results = kg.search("Brainjar", 10, 1.0).unwrap();
     assert!(!results.is_empty());
     let result = &results[0];
     assert_eq!(result.entity, "Brainjar");
@@ -57,14 +57,14 @@ fn test_graph_search_returns_file_path() {
     }];
     kg.ingest_entities("docs/rust.md", &entities, &[]).unwrap();
 
-    let results = kg.search("RustLang", 5).unwrap();
+    let results = kg.search("RustLang", 5, 1.0).unwrap();
     assert!(results.iter().any(|r| r.file == "docs/rust.md"));
 }
 
 #[test]
 fn test_graph_search_no_match() {
     let (kg, _base) = make_kg();
-    let results = kg.search("nonexistent_entity_xyz", 5).unwrap();
+    let results = kg.search("nonexistent_entity_xyz", 5, 1.0).unwrap();
     assert!(results.is_empty());
 }
 
@@ -81,7 +81,7 @@ fn test_graph_deduplication() {
         .unwrap();
     kg.ingest_entities("doc_b.md", &[entity], &[]).unwrap();
 
-    let results = kg.search("SharedThing", 10).unwrap();
+    let results = kg.search("SharedThing", 10, 1.0).unwrap();
     // Both docs should appear, but each only once
     let files: std::collections::HashSet<_> = results.iter().map(|r| r.file.as_str()).collect();
     assert_eq!(files.len(), results.len(), "Duplicate file entries found");
@@ -129,7 +129,7 @@ fn test_graph_manually_inserted_entities_searchable() {
         panic!("Unexpected error: {e}");
     }
 
-    let results = kg.search("ManualEntity", 5).unwrap();
+    let results = kg.search("ManualEntity", 5, 1.0).unwrap();
     assert!(!results.is_empty());
     assert_eq!(results[0].entity_type, "service");
 }

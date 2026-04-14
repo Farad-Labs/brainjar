@@ -326,7 +326,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                                 continue;
                             }
                             match crate::graph::KnowledgeGraph::open(&config.effective_db_dir(), name) {
-                                Ok(kg) => match kg.search(sub_query, limit) {
+                                Ok(kg) => match kg.search(sub_query, limit, config.tuning.graph_base_score) {
                                     Ok(results) => all_graph.extend(results),
                                     Err(e) => eprintln!("[brainjar mcp] Graph error for KB {}: {}", name, e),
                                 },
@@ -411,7 +411,7 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                         continue;
                     }
                     match crate::graph::KnowledgeGraph::open(&config.effective_db_dir(), name) {
-                        Ok(kg) => match kg.search(query, limit) {
+                        Ok(kg) => match kg.search(query, limit, config.tuning.graph_base_score) {
                             Ok(results) => all.extend(results),
                             Err(e) => eprintln!("[brainjar mcp] Graph search error for KB {}: {}", name, e),
                         },
