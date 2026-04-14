@@ -210,27 +210,45 @@ impl KnowledgeGraph {
             .query("MATCH (e:Entity) RETURN e.id AS eid, e.name AS ename, e.type AS etype")
             .context("Failed to query entity nodes")?;
 
-        // (id, name, type) of matching entities
-        let mut matched: Vec<(String, String, String)> = Vec::new();
+        // (id, name, type, match_quality) of matching entities
+        let mut matched: Vec<(String, String, String, f64)> = Vec::new();
 
         for row in all_entities.iter() {
             let name: String = row.get("ename").unwrap_or_default();
             let name_lower = name.to_lowercase();
-            // Match if ANY query word is a substring of the entity name
-            let matches = query_words.iter().any(|word| name_lower.contains(word));
-            if !matches {
-                continue;
+
+            // Determine match quality: check each query word against the entity name
+            let mut best_quality: Option<f64> = None;
+            for word in &query_words {
+                let quality = if name_lower == *word {
+                    Some(1.0_f64)
+                } else if name_lower.starts_with(word) {
+                    Some(0.7_f64)
+                } else if name_lower.contains(word) {
+                    Some(0.5_f64)
+                } else {
+                    None
+                };
+                if let Some(q) = quality {
+                    best_quality = Some(best_quality.map_or(q, |prev: f64| prev.max(q)));
+                }
             }
+
+            let match_quality = match best_quality {
+                Some(q) => q,
+                None => continue,
+            };
+
             let id: String = row.get("eid").unwrap_or_default();
             let etype: String = row.get("etype").unwrap_or_default();
             if !id.is_empty() {
-                matched.push((id, name, etype));
+                matched.push((id, name, etype, match_quality));
             }
         }
 
         let mut raw_results: Vec<GraphSearchResult> = Vec::new();
 
-        for (entity_id, entity_name, entity_type) in &matched {
+        for (entity_id, entity_name, entity_type, match_quality) in &matched {
             // 1-hop neighbors for context
             // get_neighbors returns full node objects: {properties: {name, ...}, labels: [...], id: N}
             let neighbors = self.graph.get_neighbors(entity_id).unwrap_or_default();
@@ -249,6 +267,25 @@ impl KnowledgeGraph {
                         })
                 })
                 .collect();
+
+            // Count documents that MENTION this entity (for authority scoring)
+            let mention_count: f64 = self
+                .graph
+                .query_builder(
+                    "MATCH (d:Document)-[:MENTIONS]->(e {id: $eid}) RETURN count(d) AS cnt",
+                )
+                .param("eid", entity_id.as_str())
+                .run()
+                .ok()
+                .and_then(|rows| rows.iter().next().and_then(|r| r.get::<i64>("cnt").ok()))
+                .unwrap_or(1) as f64;
+
+            let neighbor_count = related.len();
+
+            // Composite entity score: match quality × logarithmic mention authority × connectivity boost
+            let entity_score = match_quality
+                * (1.0 + mention_count.ln().max(0.0))
+                * (1.0 + 0.1 * neighbor_count as f64);
 
             // Documents that MENTION this entity
             let doc_rows = self
@@ -270,7 +307,7 @@ impl KnowledgeGraph {
                     entity: entity_name.clone(),
                     entity_type: entity_type.clone(),
                     related_entities: related.clone(),
-                    score: 1.0,
+                    score: entity_score,
                 });
             }
 
@@ -279,13 +316,32 @@ impl KnowledgeGraph {
             }
         }
 
-        // Deduplicate by file (keep first occurrence = highest relevance)
-        let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<GraphSearchResult> = raw_results
-            .into_iter()
-            .filter(|r| seen.insert(r.file.clone()))
-            .take(limit)
-            .collect();
+        // Normalize scores to [0.0, 1.0] by dividing by the max score
+        let max_score = raw_results
+            .iter()
+            .map(|r| r.score)
+            .fold(0.0_f64, f64::max);
+        if max_score > 0.0 {
+            for r in &mut raw_results {
+                r.score /= max_score;
+            }
+        }
+
+        // Deduplicate by file: keep the highest-scoring entry per file
+        let mut best_per_file: std::collections::HashMap<String, GraphSearchResult> =
+            std::collections::HashMap::new();
+        for result in raw_results {
+            let entry = best_per_file
+                .entry(result.file.clone())
+                .or_insert_with(|| result.clone());
+            if result.score > entry.score {
+                *entry = result;
+            }
+        }
+
+        let mut deduped: Vec<GraphSearchResult> = best_per_file.into_values().collect();
+        deduped.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        deduped.truncate(limit);
 
         Ok(deduped)
     }
