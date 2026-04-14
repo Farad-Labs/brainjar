@@ -175,6 +175,12 @@ fn handle_tools_list() -> Result<Value> {
                             "type": "string",
                             "description": "Conversation context for smart search (plain text, any format). When provided with smart=true, the LLM uses this context to extract better search terms.",
                             "default": null
+                        },
+                        "exclude_chunks": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "List of chunk IDs to exclude from results (for deduplication across conversation turns)",
+                            "default": null
                         }
                     },
                     "required": ["query"]
@@ -289,6 +295,10 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
             let doc_score = args.get("doc_score").and_then(|v| v.as_bool()).unwrap_or(false);
             let smart = args.get("smart").and_then(|v| v.as_bool()).unwrap_or(false);
             let context = args.get("context").and_then(|v| v.as_str());
+            let exclude_chunks: Option<Vec<i64>> = args.get("exclude_chunks")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect());
+            let exclude_chunks_ref: Option<&[i64]> = exclude_chunks.as_deref();
 
             // Build KB list early (needed for both smart and normal paths)
             let kbs_owned: Vec<(String, crate::config::KnowledgeBaseConfig)> = if let Some(name) = kb {
@@ -367,6 +377,13 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                     all_graph.retain(|r| seen.insert(r.file.clone()));
                 }
 
+                // Filter excluded chunk IDs from FTS results
+                if let Some(excl) = exclude_chunks_ref
+                    && !excl.is_empty()
+                {
+                    all_fts.retain(|r| r.chunk_id.is_none_or(|id| !excl.contains(&id)));
+                }
+
                 let mut text = format!("🧠 Smart search extracted {} quer{}: {}\n\n",
                     queries.len(),
                     if queries.len() == 1 { "y" } else { "ies" },
@@ -429,7 +446,18 @@ async fn handle_tools_call(config: &Config, params: Option<Value>) -> Result<Val
                 Vec::new()
             };
 
-            let text = format_search_text(query, &fts_results, &local_results, &graph_results, mode, include_content, doc_score);
+            // Filter excluded chunk IDs
+            let fts_results_filtered: Vec<crate::search::FtsResult> = if let Some(excl) = exclude_chunks_ref {
+                if excl.is_empty() {
+                    fts_results
+                } else {
+                    fts_results.into_iter().filter(|r| r.chunk_id.is_none_or(|id| !excl.contains(&id))).collect()
+                }
+            } else {
+                fts_results
+            };
+
+            let text = format_search_text(query, &fts_results_filtered, &local_results, &graph_results, mode, include_content, doc_score);
             Ok(tool_text(text))
         }
 

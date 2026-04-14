@@ -308,6 +308,7 @@ pub async fn run_search(
     doc_score: bool,
     smart: bool,
     context: Option<&str>,
+    exclude_chunks: Option<&[i64]>,
 ) -> Result<()> {
     // Smart mode: use LLM to extract targeted search queries from conversational text
     if smart {
@@ -371,7 +372,7 @@ pub async fn run_search(
         };
 
         if json {
-            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query);
+            let mut unified = build_unified_results(&all_fts, &all_local, &all_graph, &all_vector, &all_filename, limit, chunks, doc_score, query, exclude_chunks);
             enrich_graph_only_results(config, &mut unified);
             let output = serde_json::json!({ "results": unified, "smart_queries": queries });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -390,6 +391,7 @@ pub async fn run_search(
                 limit,
                 chunks,
                 doc_score,
+                exclude_chunks,
             );
         }
         return Ok(());
@@ -596,7 +598,7 @@ pub async fn run_search(
     let decay_conn = kb_name.and_then(|n| db::open_db(n, &db_dir).ok());
 
     if json {
-        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query);
+        let mut unified = build_unified_results(&fts_results, &local_results, &graph_results, &vector_results, &filename_results, limit, chunks, doc_score, query, exclude_chunks);
         if let Some(ref conn) = decay_conn {
             apply_folder_scoring(conn, &mut unified);
         }
@@ -625,6 +627,7 @@ pub async fn run_search(
             limit,
             chunks,
             doc_score,
+            exclude_chunks,
         );
     }
 
@@ -1122,6 +1125,7 @@ fn build_unified_results(
     _include_content: bool, // deprecated: content always included now
     doc_score: bool,
     _query: &str,
+    exclude_chunks: Option<&[i64]>,
 ) -> Vec<UnifiedResult> {
     // Key: use chunk-level identity (chunk_id or path) for dedup
     // We use chunk-keyed ranking: each chunk is its own ranked item
@@ -1300,6 +1304,13 @@ fn build_unified_results(
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     }
 
+    // Filter out excluded chunk IDs before applying limit
+    if let Some(excl) = exclude_chunks
+        && !excl.is_empty()
+    {
+        results.retain(|r| r.chunk_id.is_none_or(|id| !excl.contains(&id)));
+    }
+
     if doc_score {
         // Aggregate: sum top-3 chunk scores per document, return one result per doc
         let mut doc_scores: HashMap<String, (f64, UnifiedResult)> = HashMap::new();
@@ -1468,6 +1479,7 @@ fn print_results(
     limit: usize,
     include_content: bool,
     doc_score: bool,
+    exclude_chunks: Option<&[i64]>,
 ) {
     let has_fts = !fts.is_empty();
     let has_local = !local.is_empty();
@@ -1510,7 +1522,7 @@ fn print_results(
     let single_local = mode.run_local();
     if !single_text && !single_local {
         // Merged RRF view (default for any engine combination)
-        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query);
+        let mut unified = build_unified_results(fts, local, graph, vector, filename_results, limit, include_content, doc_score, query, exclude_chunks);
         if let Some(db_conn) = conn {
             apply_folder_scoring(db_conn, &mut unified);
         }
@@ -1943,6 +1955,7 @@ mod tests {
             true,
             false,
             "pricing",
+            None,
         );
 
         let pricing_result = unified.iter().find(|r| r.file.contains("pricing.md"));
@@ -2014,6 +2027,7 @@ mod tests {
             true,
             false,
             "pricing",
+            None,
         );
 
         let pricing_result = unified.iter().find(|r| r.file.contains("PRICING.md"));
@@ -2055,6 +2069,7 @@ mod tests {
             true,
             false,
             "pricing",
+            None,
         );
 
         assert_eq!(unified.len(), 1);
