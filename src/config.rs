@@ -40,6 +40,7 @@ pub struct DecayConfig {
 
 fn default_floor() -> f64 { 0.3 }
 fn default_shape() -> f64 { 1.0 }
+fn default_concurrency() -> usize { 4 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -116,6 +117,9 @@ pub struct ExtractionConfig {
     /// Backward-compat: base_url directly on extraction section.
     pub base_url: Option<String>,
     pub enabled: bool,
+    /// Number of LLM extraction calls to run concurrently (default: 4).
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
